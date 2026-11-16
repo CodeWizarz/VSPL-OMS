@@ -1885,3 +1885,106 @@ export async function allocateBSRStock(payload: {
   const { data } = await api.post('/api/v1/bsr-stock/allocate', payload);
   return data;
 }
+
+// ============================================================================
+// Sales-Ops Daily Meeting Report (Plan vs Actual)
+// ============================================================================
+
+export interface SalesOpsDailyItem {
+  wo_id: string;
+  wo_number: string;
+  customer_name: string;
+  customer_code: string;
+  customer_po: string;
+  part_id: string;
+  part_number: string; // Internal Part ID (e.g. PMC225)
+  customer_part_number?: string | null;
+  part_name?: string | null;
+  grade?: string | null;
+  oar_number?: string | null;
+  commitment_date?: string | null;
+  revised_commitment_date?: string | null;
+  effective_commitment_date?: string | null;
+  commitment_date_revision_count: number;
+  delivery_date?: string | null;
+  date_status: "OVERDUE" | "TODAY" | "TOMORROW" | "THIS_WEEK" | "FUTURE" | "UNDATED";
+  planned_qty: number;
+  bsr_actual_qty: number;
+  dispatched_qty: number;
+  total_fulfilled_qty: number;
+  gap_qty: number;
+  part_bsr_stock: number;
+  current_stage: string;
+  is_at_vendor: boolean;
+  vendor_name?: string | null;
+  vendor_dc?: string | null;
+  vendor_qty?: number | null;
+  vendor_stage?: string | null;
+  stage_wip: Record<string, number>;
+  unit_price: number;
+  price_source: string;
+  planned_value: number;
+  fulfilled_value: number;
+  gap_value: number;
+  fulfillment_status: "READY_IN_BSR" | "DISPATCHED" | "WIP_IN_HOUSE" | "AT_VENDOR" | "OVERDUE_DEFICIT";
+  wo_status: string;
+  heat_number?: string | null;
+}
+
+export interface SalesOpsSummary {
+  total_orders: number;
+  total_planned_qty: number;
+  total_bsr_actual_qty: number;
+  total_dispatched_qty: number;
+  total_fulfilled_qty: number;
+  total_gap_qty: number;
+  fulfillment_rate: number;
+  total_planned_value: number;
+  total_fulfilled_value: number;
+  total_gap_value: number;
+  overdue_orders_count: number;
+  overdue_gap_value: number;
+  today_orders_count: number;
+  today_gap_value: number;
+  at_vendor_count: number;
+}
+
+export interface SalesOpsDailyReportResponse {
+  target_date?: string | null;
+  filter_preset: string;
+  summary: SalesOpsSummary;
+  items: SalesOpsDailyItem[];
+}
+
+export async function getSalesOpsDailyReport(params?: {
+  target_date?: string;
+  from_date?: string;
+  to_date?: string;
+  preset?: string;
+  status_filter?: string;
+  search?: string;
+  sort_by?: string;
+}): Promise<SalesOpsDailyReportResponse> {
+  const { data } = await api.get('/api/v1/reports/sales-ops-daily', { params });
+  return data;
+}
+
+export function getSalesOpsCsvExportUrl(params?: {
+  target_date?: string;
+  from_date?: string;
+  to_date?: string;
+  preset?: string;
+  status_filter?: string;
+  search?: string;
+  sort_by?: string;
+}): string {
+  const q = new URLSearchParams();
+  if (params?.target_date) q.set('target_date', params.target_date);
+  if (params?.from_date) q.set('from_date', params.from_date);
+  if (params?.to_date) q.set('to_date', params.to_date);
+  if (params?.preset) q.set('preset', params.preset);
+  if (params?.status_filter) q.set('status_filter', params.status_filter);
+  if (params?.search) q.set('search', params.search);
+  if (params?.sort_by) q.set('sort_by', params.sort_by);
+  return `/api/v1/reports/export/sales-ops-csv?${q.toString()}`;
+}

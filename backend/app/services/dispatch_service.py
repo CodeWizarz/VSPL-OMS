@@ -529,8 +529,8 @@ class DispatchService:
 
                 # Check Schedule
                 sched = db.query(ScheduleMaster).filter(
-                    ScheduleMaster.customer_code == cust.customer_code,
-                    ScheduleMaster.part_number == prt.part_number
+                    ScheduleMaster.customer_id == cust.id,
+                    ScheduleMaster.part_id == prt.id
                 ).order_by(desc(ScheduleMaster.created_at)).first()
                 if sched and sched.unit_price:
                     return {"unit_price": float(sched.unit_price), "source": "SCHEDULE"}

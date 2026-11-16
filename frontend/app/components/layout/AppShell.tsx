@@ -40,7 +40,9 @@ import {
   Link2,
   ClipboardCheck,
   GraduationCap,
-  Eye
+  Eye,
+  CalendarCheck,
+  TrendingUp
 } from "lucide-react";
 import { logout, getCurrentUserRole, getCurrentUser } from "@/lib/api";
 
@@ -288,6 +290,12 @@ const NAV_GROUPS: NavGroup[] = [
         name: "OMS Engine Batch",
         href: "/oms",
         icon: <FileSpreadsheet className="h-4 w-4 text-emerald-600" />,
+      },
+      {
+        name: "Sales-Ops Daily Report",
+        href: "/reports/sales-ops",
+        icon: <TrendingUp className="h-4 w-4 text-indigo-500" />,
+        badge: "Standup",
       },
       {
         name: "Manufacturing Reports",
