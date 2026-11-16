@@ -878,13 +878,28 @@ function WOReleasePageInner() {
                 )}
               </div>
               <div>
-                <span className="text-[10px] text-zinc-400 uppercase font-semibold block">OAR &amp; PO</span>
-                <span className="font-mono font-bold text-zinc-800 dark:text-zinc-200 block">
-                  {selectedWODetail.oar_number || "—"}
+                <span className="text-[10px] text-zinc-400 uppercase font-semibold block">
+                  {selectedWODetail.is_merged ? "Merged OARs & POs" : "OAR & PO"}
                 </span>
-                <span className="text-[10px] text-zinc-500 font-mono">
-                  PO: {selectedWODetail.customer_po || "—"}
-                </span>
+                {selectedWODetail.is_merged && selectedWODetail.merged_oars && selectedWODetail.merged_oars.length > 0 ? (
+                  <div className="space-y-0.5 mt-0.5">
+                    <span className="inline-block px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-100 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+                      {selectedWODetail.merged_oars.length} OARs Merged
+                    </span>
+                    <p className="font-mono font-bold text-zinc-800 dark:text-zinc-200 text-xs">
+                      {selectedWODetail.merged_oars.map((m) => `${m.oar_number} (${m.allocated_qty}p)`).join(", ")}
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <span className="font-mono font-bold text-zinc-800 dark:text-zinc-200 block">
+                      {selectedWODetail.oar_number || "—"}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono">
+                      PO: {selectedWODetail.customer_po || "—"}
+                    </span>
+                  </>
+                )}
               </div>
               <div>
                 <span className="text-[10px] text-zinc-400 uppercase font-semibold block">Quantities</span>

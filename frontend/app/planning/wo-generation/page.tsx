@@ -336,7 +336,7 @@ function WOGenerationContent() {
     ? oars.filter(
         (o) =>
           mergeSelections[o.order_id] === undefined &&
-          o.remaining_qty > 0 &&
+          (allowOverrun || o.remaining_qty > 0) &&
           o.customer_code === mergeAnchor.customer_code &&
           o.part_number === mergeAnchor.part_number
       )
@@ -361,11 +361,11 @@ function WOGenerationContent() {
           return prev;
         }
       }
-      if (oar.remaining_qty <= 0) {
-        setError(`OAR ${oar.oar_number} has 0 remaining quantity to plan.`);
+      if (!allowOverrun && oar.remaining_qty <= 0) {
+        setError(`OAR ${oar.oar_number} has 0 remaining quantity to plan. Check "Allow Overrun" to include it.`);
         return prev;
       }
-      return { ...prev, [oar.order_id]: oar.remaining_qty };
+      return { ...prev, [oar.order_id]: oar.remaining_qty > 0 ? oar.remaining_qty : 1 };
     });
   };
 
@@ -694,7 +694,7 @@ function WOGenerationContent() {
                     const mergeIncompatible =
                       generationMode === "merge" &&
                       !isMergeChecked &&
-                      (o.remaining_qty <= 0 ||
+                      ((!allowOverrun && o.remaining_qty <= 0) ||
                         (mergeAnchor !== null &&
                           (o.customer_code !== mergeAnchor.customer_code || o.part_number !== mergeAnchor.part_number)));
                     return (
@@ -1146,10 +1146,31 @@ function WOGenerationContent() {
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                {/* Overrun Toggle for Merged WOs */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl bg-purple-50 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      id="mergeAllowOverrunCheckbox"
+                      checked={allowOverrun}
+                      onChange={(e) => setAllowOverrun(e.target.checked)}
+                      className="rounded border-zinc-300 text-purple-600 focus:ring-purple-500 h-4 w-4 cursor-pointer"
+                    />
+                    <span className="text-xs text-purple-950 dark:text-purple-200 font-bold">
+                      Allow Overrun / Additional Batch
+                    </span>
+                  </label>
+                  <span className="text-[11px] text-purple-800 dark:text-purple-300">
+                    {allowOverrun
+                      ? "✓ Overrun enabled: You may enter quantities above the remaining OAR balance."
+                      : "Quantities are capped by remaining unallocated OAR balances."}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
                   <div>
                     <label className="block font-bold text-zinc-700 dark:text-zinc-300 mb-1">
-                      Single Merged Work Order ID
+                      Single Merged Work Order ID *
                     </label>
                     <div className="flex gap-1.5">
                       <input
@@ -1176,19 +1197,68 @@ function WOGenerationContent() {
                       type="date"
                       value={woDate}
                       onChange={(e) => setWoDate(e.target.value)}
-                      className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-3 py-2"
+                      className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-zinc-700 dark:text-zinc-300 mb-1">Target / Delivery Date</label>
+                    <input
+                      type="date"
+                      value={targetDate}
+                      onChange={(e) => setTargetDate(e.target.value)}
+                      className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 font-mono"
                     />
                   </div>
                   <div>
                     <label className="block font-bold text-zinc-700 dark:text-zinc-300 mb-1">Casting Process</label>
                     <select
                       value={castingProcess}
-                      onChange={(e) => setCastingProcess(e.target.value as "CENTRIFUGAL" | "CONTINUOUS")}
+                      onChange={(e) => {
+                        const val = e.target.value as "CENTRIFUGAL" | "CONTINUOUS";
+                        setCastingProcess(val);
+                        if (val === "CONTINUOUS") {
+                          setRouteStages((prev) => prev.filter((s) => s !== "F1"));
+                        } else {
+                          setRouteStages((prev) => (prev.includes("F1") ? prev : ["F1", ...prev]));
+                        }
+                      }}
                       className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 font-semibold"
                     >
                       <option value="CENTRIFUGAL">CENTRIFUGAL (Starts F1)</option>
                       <option value="CONTINUOUS">CONTINUOUS (Starts F2)</option>
                     </select>
+                  </div>
+                </div>
+
+                {/* Production Route Stages Checklist */}
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex flex-wrap items-center justify-between gap-1">
+                    <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                      Production Route Stages (Click to toggle stages this merged WO will move through):
+                    </label>
+                    <span className="text-[11px] font-mono text-purple-700 dark:text-purple-300 font-bold">
+                      Route: {routeStages.join(" → ")}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {DEFAULT_STAGES.map((stg) => {
+                      const active = routeStages.includes(stg);
+                      return (
+                        <button
+                          key={stg}
+                          type="button"
+                          onClick={() => handleToggleStage(stg)}
+                          className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition cursor-pointer flex items-center gap-1.5 ${
+                            active
+                              ? "bg-purple-600 border-purple-600 text-white shadow-xs"
+                              : "bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-400 hover:border-zinc-400"
+                          }`}
+                        >
+                          <span>{stg}</span>
+                          {active && <Check className="h-3 w-3" />}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
