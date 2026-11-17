@@ -95,6 +95,29 @@ class UserAdminService:
         return TempPasswordResult(user=UserOut.model_validate(target), temporary_password=temp_password)
 
     @staticmethod
+    def update_user(db: Session, user_id: str, payload, current_user: User) -> UserOut:
+        _require_admin(current_user, "update user profile")
+
+        target = db.query(User).filter(User.id == user_id).first()
+        if not target:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+        old_details = f"role={target.role}, secondary_role={target.secondary_role}, dept={target.department}"
+        if payload.full_name is not None and payload.full_name.strip():
+            target.full_name = payload.full_name.strip()
+        if payload.department is not None:
+            target.department = payload.department.strip() if payload.department.strip() else None
+        if payload.role is not None:
+            target.role = payload.role
+        if hasattr(payload, "secondary_role"):
+            target.secondary_role = payload.secondary_role
+
+        _audit(db, current_user, "USER_UPDATED", target, details=f"old: {old_details} -> new: role={target.role}, secondary_role={target.secondary_role}, dept={target.department}")
+        db.commit()
+        db.refresh(target)
+        return UserOut.model_validate(target)
+
+    @staticmethod
     def set_active(db: Session, user_id: str, is_active: bool, current_user: User) -> UserOut:
         _require_admin(current_user, "activate or deactivate a user account")
 

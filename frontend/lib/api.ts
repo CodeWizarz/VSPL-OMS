@@ -143,6 +143,19 @@ export async function setUserStatus(userId: string, isActive: boolean): Promise<
   return data;
 }
 
+export async function updateUser(
+  userId: string,
+  payload: {
+    full_name?: string;
+    department?: string | null;
+    role?: string;
+    secondary_role?: string | null;
+  }
+): Promise<AdminUser> {
+  const { data } = await api.patch(`/api/v1/users/${encodeURIComponent(userId)}`, payload);
+  return data;
+}
+
 export interface UserDeleteResult {
   success: boolean;
   message: string;

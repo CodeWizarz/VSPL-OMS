@@ -24,9 +24,9 @@ conn = connector.connect(
 )
 cur = conn.cursor()
 
-cur.execute("SELECT id, email, full_name, role, is_active FROM users ORDER BY created_at ASC;")
+cur.execute("SELECT id, email, full_name, role, secondary_role, department, is_active FROM users WHERE email ILIKE '%loyed%' ORDER BY created_at ASC;")
 users = cur.fetchall()
-print("--- USERS IN DATABASE ---")
+print("--- LOYED IN DATABASE ---")
 for u in users:
     print(u)
 

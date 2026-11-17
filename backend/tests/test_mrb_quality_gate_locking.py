@@ -297,3 +297,110 @@ def test_mrb_batch_stage_approval(db):
     assert move_res.quantity_moved == 50
 
 
+def test_fi_stage_exempt_from_mrb_lock(db):
+    """Final Inspection (FI) production entry is authoritative and final.
+    Good pieces recorded at FI must pass directly to PACKING without requiring MRB approval."""
+    wo = _setup_test_wo(db, qty=50)
+
+    # Move material through to FI
+    # F1 production & approval
+    ProductionService.record_stage_production(
+        db, RecordStageProductionRequest(wo_number=wo.wo_number, stage="F1", good_qty=50, rejected_quantity=0)
+    )
+    admin_user = User(
+        id=uuid.uuid4(),
+        email=f"admin-{uuid.uuid4().hex[:6]}@vspl.com",
+        full_name="Admin Approver",
+        hashed_password="mock",
+        role="ADMIN",
+        is_active=True
+    )
+    db.add(admin_user)
+    db.commit()
+    MRBService.approve_stage_reviews(db, wo.wo_number, "F1", admin_user)
+
+    ProductionService.move_parts(db, MovePartsRequest(wo_number=wo.wo_number, from_stage="F1", to_stage="F2", quantity_moved=50))
+    ProductionService.record_stage_production(db, RecordStageProductionRequest(wo_number=wo.wo_number, stage="F2", good_qty=50, rejected_quantity=0))
+    MRBService.approve_stage_reviews(db, wo.wo_number, "F2", admin_user)
+    ProductionService.move_parts(db, MovePartsRequest(wo_number=wo.wo_number, from_stage="F2", to_stage="F3", quantity_moved=50))
+    ProductionService.record_stage_production(db, RecordStageProductionRequest(wo_number=wo.wo_number, stage="F3", good_qty=50, rejected_quantity=0))
+    MRBService.approve_stage_reviews(db, wo.wo_number, "F3", admin_user)
+    ProductionService.move_parts(db, MovePartsRequest(wo_number=wo.wo_number, from_stage="F3", to_stage="FI", quantity_moved=50))
+
+    # Now at FI: Final QA records production entry
+    prod_fi = ProductionService.record_stage_production(
+        db, RecordStageProductionRequest(wo_number=wo.wo_number, stage="FI", good_qty=50, rejected_quantity=0)
+    )
+    assert prod_fi.success is True
+
+    # FI stage state must be UNLOCKED immediately (no pending MRB block)
+    state = OMSIntegrationService.get_current_stage_state(db, wo, "FI")
+    assert state["mrb_lock_status"] == "UNLOCKED"
+    assert state["on_hand_qty"] == 50
+    assert state["mrb_pending_qty"] == 0
+
+    # Moving to PACKING must succeed without calling MRB approval!
+    move_to_pack = ProductionService.move_parts(
+        db, MovePartsRequest(wo_number=wo.wo_number, from_stage="FI", to_stage="PACKING", quantity_moved=50)
+    )
+    assert move_to_pack.success is True
+    assert move_to_pack.quantity_moved == 50
+
+
+def test_f2_partial_in_house_and_vendor_dispatch(db):
+    """Operators can produce partial quantity in-house at F2 and dispatch remaining to outside vendor.
+    The in-house pieces must be immediately movable to F3 without false 'All pieces dispatched to vendor' error."""
+    wo = _setup_test_wo(db, qty=40)
+
+    # Bring 40 pieces to F2
+    ProductionService.record_stage_production(db, RecordStageProductionRequest(wo_number=wo.wo_number, stage="F1", good_qty=40, rejected_quantity=0))
+    admin_user = User(
+        id=uuid.uuid4(),
+        email=f"admin-{uuid.uuid4().hex[:6]}@vspl.com",
+        full_name="Admin",
+        hashed_password="mock",
+        role="ADMIN",
+        is_active=True
+    )
+    db.add(admin_user)
+    db.commit()
+    MRBService.approve_stage_reviews(db, wo.wo_number, "F1", admin_user)
+    ProductionService.move_parts(db, MovePartsRequest(wo_number=wo.wo_number, from_stage="F1", to_stage="F2", quantity_moved=40))
+
+    # 1. In-house F2 production of 10 pieces
+    p1 = ProductionService.record_stage_production(
+        db, RecordStageProductionRequest(wo_number=wo.wo_number, stage="F2", good_qty=10, rejected_quantity=0, production_type="IN_HOUSE")
+    )
+    assert p1.success is True
+
+    # 2. Outside vendor dispatch of remaining 30 pieces
+    p2 = ProductionService.record_stage_production(
+        db, RecordStageProductionRequest(
+            wo_number=wo.wo_number,
+            stage="F2",
+            good_qty=30,
+            rejected_quantity=0,
+            production_type="VENDOR",
+            vendor_name="STEEL PROFILES INDIA",
+            dc_number="DC-TEST-100",
+            target_return_stage="FI"
+        )
+    )
+    assert p2.success is True
+
+    # 3. Check F2 state: on_hand_qty should be 10 (the in-house pieces), not 0
+    state_f2 = OMSIntegrationService.get_current_stage_state(db, wo, "F2")
+    assert state_f2["on_hand_qty"] == 10
+
+    # Approve MRB for the 10 in-house pieces
+    MRBService.approve_stage_reviews(db, wo.wo_number, "F2", admin_user)
+
+    # 4. Moving the 10 in-house pieces to F3 must succeed!
+    move_res = ProductionService.move_parts(
+        db, MovePartsRequest(wo_number=wo.wo_number, from_stage="F2", to_stage="F3", quantity_moved=10)
+    )
+    assert move_res.success is True
+    assert move_res.quantity_moved == 10
+
+
+

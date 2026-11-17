@@ -211,11 +211,15 @@ class OMSIntegrationService:
                 for d in vendor_dispatches
                 if d.dispatch_stage == stg and d.status in ("AT_VENDOR", "PARTIALLY_RECEIVED")
             )
-            # 2. Pieces that were received into a downstream stage != stg (e.g. directly into FI, bypassing subsequent stages)
-            received_downstream = sum(
+            # 2. Pieces that were received into a downstream stage != stg and != nxt_stg
+            # (If received into nxt_stg, they are already counted inside nxt_wip.ent_qty below;
+            # excluding nxt_stg avoids subtracting those pieces twice).
+            nxt_stg = routes[i + 1].stage if (i + 1 < len(routes)) else None
+            received_beyond_next = sum(
                 (d.received_qty or 0)
                 for d in vendor_dispatches
-                if d.dispatch_stage == stg and (d.received_stage or d.target_return_stage or "FI") != stg
+                if d.dispatch_stage == stg 
+                and (d.received_stage or d.target_return_stage or "FI") not in (stg, nxt_stg)
             )
             # 3. Pieces scrapped at vendor
             scrapped_at_vendor = sum(
@@ -223,12 +227,11 @@ class OMSIntegrationService:
                 for d in vendor_dispatches
                 if d.dispatch_stage == stg
             )
-            vendor_outflow = active_at_vendor + received_downstream + scrapped_at_vendor
+            vendor_outflow = active_at_vendor + received_beyond_next + scrapped_at_vendor
 
             # OMS Flow Formula: On-Hand = max(OK - Ent(next) - vendor_outflow, 0)
             nxt_ent = 0
-            if i + 1 < len(routes):
-                nxt_stg = routes[i + 1].stage
+            if nxt_stg:
                 nxt_wip = wip_map.get(nxt_stg)
                 nxt_ent = nxt_wip.ent_qty if nxt_wip else 0
                 std_on_hand = max(ok - nxt_ent - vendor_outflow, 0)

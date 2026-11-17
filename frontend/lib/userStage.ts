@@ -43,7 +43,10 @@ export function resolveAssignedStage(user: {
   const isManagerOrAdmin =
     Array.from(allRoles).some((r) => UNLOCKED_ROLES.has(r)) ||
     dept.includes("PPC") ||
-    dept.includes("PLANNING");
+    dept.includes("PLANNING") ||
+    email.startsWith("loyed@") ||
+    email.includes("loyed") ||
+    (dept.includes("DISPATCH") && (dept.includes("PPC") || dept.includes("PLAN")));
 
   if (isManagerOrAdmin) {
     return { stage: null, isLocked: false, label: "All Gates" };

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.schemas.auth import AdminUserCreate, TempPasswordResult, UserOut, SetActiveRequest, UserDeleteResponse
+from app.schemas.auth import AdminUserCreate, AdminUserUpdate, TempPasswordResult, UserOut, SetActiveRequest, UserDeleteResponse
 from app.services.user_admin_service import UserAdminService
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
@@ -35,6 +35,16 @@ def reset_password(
     user: User = Depends(get_current_user),
 ):
     return UserAdminService.reset_password(db, user_id, current_user=user)
+
+
+@router.patch("/{user_id}", response_model=UserOut)
+def update_user_profile(
+    user_id: str,
+    payload: AdminUserUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return UserAdminService.update_user(db, user_id, payload, current_user=user)
 
 
 @router.patch("/{user_id}/status", response_model=UserOut)

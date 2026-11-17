@@ -10,6 +10,7 @@ class UserRole(str, enum.Enum):
     PRODUCTION_MANAGER = "production_manager"
     PLANNER = "planner"
     QA = "qa"
+    QUALITY = "quality"
     DISPATCH = "dispatch"
     MACHINE_OPERATOR = "machine_operator"
     OPERATOR = "operator"

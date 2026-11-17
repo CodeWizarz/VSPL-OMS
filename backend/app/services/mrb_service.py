@@ -435,10 +435,26 @@ class MRBService:
         import uuid
         wo_uuid = uuid.UUID(str(work_order_id)) if isinstance(work_order_id, str) else work_order_id
 
+        stage_clean = stage.strip().upper()
         tickets = db.query(MRBReview).filter(
             MRBReview.work_order_id == wo_uuid,
-            MRBReview.stage == stage.strip().upper()
+            MRBReview.stage == stage_clean
         ).all()
+
+        # Final Inspection (FI) production entry is authoritative and final.
+        # Good pieces recorded at FI pass directly to Packing & BSR without requiring MRB gate locking.
+        if stage_clean in ("FI", "FINAL_QA"):
+            return {
+                "total_tickets": len(tickets),
+                "approved_tickets_count": len(tickets),
+                "pending_tickets_count": 0,
+                "rejected_tickets_count": 0,
+                "approved_movable_qty": onhand_qty,
+                "total_approved_good": onhand_qty,
+                "pending_qty": 0,
+                "lock_status": "UNLOCKED",
+                "pending_tickets": []
+            }
 
         if not tickets:
             return {

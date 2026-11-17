@@ -5,13 +5,14 @@ import { Modal } from "@/app/components/ui/Modal";
 import {
   getUsers,
   createUser,
+  updateUser,
   resetUserPassword,
   setUserStatus,
   deleteUser,
   AdminUser,
   TemporaryPasswordResult,
 } from "@/lib/api";
-import { UserPlus, KeyRound, Copy, CheckCircle2, AlertTriangle, ShieldAlert, Trash2, Loader2 } from "lucide-react";
+import { UserPlus, KeyRound, Copy, CheckCircle2, AlertTriangle, ShieldAlert, Trash2, Loader2, Edit2 } from "lucide-react";
 
 const ROLES = [
   "admin", "ceo", "production_manager", "planner", "qa",
@@ -55,6 +56,44 @@ export default function AdminUsersPage() {
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [deleteSuccess, setDeleteSuccess] = useState("");
+
+  const [userToEdit, setUserToEdit] = useState<AdminUser | null>(null);
+  const [editFullName, setEditFullName] = useState("");
+  const [editDepartment, setEditDepartment] = useState("");
+  const [editRole, setEditRole] = useState("planner");
+  const [editSecondaryRole, setEditSecondaryRole] = useState<string>("none");
+  const [editError, setEditError] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  function openEditModal(u: AdminUser) {
+    setUserToEdit(u);
+    setEditFullName(u.full_name || "");
+    setEditDepartment(u.department || "");
+    setEditRole(u.role ? u.role.toLowerCase() : "planner");
+    setEditSecondaryRole(u.secondary_role ? u.secondary_role.toLowerCase() : "none");
+    setEditError("");
+  }
+
+  async function handleSaveEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!userToEdit) return;
+    setSavingEdit(true);
+    setEditError("");
+    try {
+      await updateUser(userToEdit.id, {
+        full_name: editFullName.trim(),
+        department: editDepartment.trim() || null,
+        role: editRole,
+        secondary_role: editSecondaryRole === "none" ? null : editSecondaryRole,
+      });
+      setUserToEdit(null);
+      await loadUsers();
+    } catch (err: any) {
+      setEditError(err?.response?.data?.detail || "Failed to update user.");
+    } finally {
+      setSavingEdit(false);
+    }
+  }
 
 
   async function loadUsers() {
@@ -360,6 +399,15 @@ export default function AdminUsersPage() {
                       <button
                         type="button"
                         disabled={rowBusy === u.id}
+                        onClick={() => openEditModal(u)}
+                        className="rounded-lg bg-indigo-50 dark:bg-indigo-950/40 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 disabled:opacity-50 transition-colors inline-flex items-center gap-1"
+                      >
+                        <Edit2 className="h-3 w-3" />
+                        <span>Edit</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={rowBusy === u.id}
                         onClick={() => handleReset(u)}
                         className="rounded-lg bg-zinc-100 dark:bg-zinc-800 px-2.5 py-1 text-[11px] font-semibold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 transition-colors"
                       >
@@ -476,6 +524,114 @@ export default function AdminUsersPage() {
                 </button>
               </div>
             </div>
+          )}
+        </Modal>
+
+        {/* Edit User Modal */}
+        <Modal
+          isOpen={!!userToEdit}
+          onClose={() => {
+            if (!savingEdit) {
+              setUserToEdit(null);
+              setEditError("");
+            }
+          }}
+          title={userToEdit ? `Edit User: ${userToEdit.email}` : "Edit User"}
+        >
+          {userToEdit && (
+            <form onSubmit={handleSaveEdit} className="p-5 space-y-4 text-xs">
+              {editError && (
+                <div className="flex items-start gap-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 p-3 text-[11px] font-medium text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-900">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{editError}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                  Full Name
+                </label>
+                <input
+                  type="text"
+                  value={editFullName}
+                  onChange={(e) => setEditFullName(e.target.value)}
+                  required
+                  className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                  Department
+                </label>
+                <input
+                  type="text"
+                  value={editDepartment}
+                  onChange={(e) => setEditDepartment(e.target.value)}
+                  placeholder="e.g. Dispatch / PPC, Foundry, Quality"
+                  className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                    Primary Role
+                  </label>
+                  <select
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value)}
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  >
+                    {ROLES.map((r) => (
+                      <option key={r} value={r}>
+                        {roleLabel(r)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                    Secondary Role (Dual-Role)
+                  </label>
+                  <select
+                    value={editSecondaryRole}
+                    onChange={(e) => setEditSecondaryRole(e.target.value)}
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  >
+                    <option value="none">None (Single Role)</option>
+                    {ROLES.map((r) => (
+                      <option key={`sec_${r}`} value={r}>
+                        + {roleLabel(r)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-100 dark:border-zinc-800">
+                <button
+                  type="button"
+                  disabled={savingEdit}
+                  onClick={() => {
+                    setUserToEdit(null);
+                    setEditError("");
+                  }}
+                  className="rounded-xl px-3.5 py-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingEdit}
+                  className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center gap-1.5 shadow-sm"
+                >
+                  {savingEdit && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {savingEdit ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
           )}
         </Modal>
       </div>

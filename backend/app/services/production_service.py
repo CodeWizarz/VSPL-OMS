@@ -239,7 +239,7 @@ class ProductionService:
         from_idx = route_stage_names.index(matched_from)
         to_idx = route_stage_names.index(matched_to)
 
-        is_vendor_f2_to_fi = (matched_from == "F2" and matched_to == "FI")
+        is_vendor_f2_to_fi = (matched_from == "F2" and matched_to in ("SP", "FI"))
         if to_idx != from_idx + 1 and not is_vendor_f2_to_fi:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -294,14 +294,14 @@ class ProductionService:
             VendorDispatch.status.in_(["AT_VENDOR", "PARTIALLY_RECEIVED"])
         ).all()
         at_vendor_qty = sum(max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0) for d in v_dispatches)
-        max_movable = max((from_wip.onhand_qty if from_wip else 0) - at_vendor_qty, 0)
-        if max_movable <= 0:
+        available_onhand = from_wip.onhand_qty if from_wip else 0
+        if available_onhand <= 0:
             if at_vendor_qty > 0:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
                         f"Cannot move parts from stage '{matched_from}'. "
-                        f"All {at_vendor_qty} pieces are currently dispatched to outside vendor '{v_dispatches[0].vendor_name}' (DC #{v_dispatches[0].dc_number}). "
+                        f"All completed pieces ({at_vendor_qty} pcs) are currently dispatched to outside vendor '{v_dispatches[0].vendor_name}' (DC #{v_dispatches[0].dc_number}). "
                         f"Material must be inwarded back on the Vendor Tracking screen (/production/vendor) before moving on the shop floor."
                     )
                 )
@@ -313,6 +313,8 @@ class ProductionService:
                     f"Please record production in Production Entry before moving parts."
                 )
             )
+
+        max_movable = available_onhand
 
         if req.quantity_moved > max_movable:
             raise HTTPException(
@@ -792,8 +794,26 @@ class ProductionService:
         db.flush()
 
         # Create Material Review Board (MRB) ticket for Quality, Planner, and Admin review
-        # Note: Outside vendor dispatches do not require a pending floor scrap review.
+        # Note: Outside vendor dispatches and Stage FI (Final QA) do not require a pending floor scrap review.
+        # At Stage FI, production entry is the authoritative final inspection; good pieces are directly approved.
+        is_fi = matched_stage.upper() in ("FI", "FINAL_QA")
         mrb_num = next_mrb_number(db)
+        if is_vendor:
+            mrb_status = "APPROVED"
+            mrb_disp = "DISPATCHED_TO_VENDOR"
+            mrb_rev_by = "System (Vendor Outward)"
+            mrb_rev_at = now
+        elif is_fi:
+            mrb_status = "APPROVED"
+            mrb_disp = "FINAL_INSPECTION_PASSED"
+            mrb_rev_by = (current_user.full_name if current_user else "Final QA Inspector") + " (Direct Pass)"
+            mrb_rev_at = now
+        else:
+            mrb_status = "PENDING"
+            mrb_disp = "PENDING"
+            mrb_rev_by = None
+            mrb_rev_at = None
+
         mrb_ticket = MRBReview(
             mrb_number=mrb_num,
             production_update_id=entry.id,
@@ -806,14 +826,14 @@ class ProductionService:
             reported_ok_qty=req.good_qty,
             reported_reject_qty=req.rejected_quantity,
             reported_defect_code=req.defect_code if req.rejected_quantity > 0 else None,
-            floor_remarks=req.remarks or (f"Dispatched to outside vendor {req.vendor_name} on DC #{req.dc_number}" if is_vendor else None),
+            floor_remarks=req.remarks or ("Final inspection passed directly to Packing & BSR" if is_fi else (f"Dispatched to outside vendor {req.vendor_name} on DC #{req.dc_number}" if is_vendor else None)),
             verified_ok_qty=req.good_qty,
             verified_reject_qty=req.rejected_quantity,
             verified_defect_code=req.defect_code if req.rejected_quantity > 0 else None,
-            status="APPROVED" if is_vendor else "PENDING",
-            disposition="DISPATCHED_TO_VENDOR" if is_vendor else "PENDING",
-            reviewed_by_name="System (Vendor Outward)" if is_vendor else None,
-            reviewed_at=now if is_vendor else None,
+            status=mrb_status,
+            disposition=mrb_disp,
+            reviewed_by_name=mrb_rev_by,
+            reviewed_at=mrb_rev_at,
         )
         db.add(mrb_ticket)
 
@@ -833,6 +853,7 @@ class ProductionService:
                 remarks=req.remarks
             )
             db.add(v_disp)
+            db.flush()
 
         # Log NC if rejected
         if req.rejected_quantity > 0:

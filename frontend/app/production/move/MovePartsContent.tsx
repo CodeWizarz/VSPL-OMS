@@ -355,9 +355,11 @@ export function MovePartsContent() {
     : (woData ? (woData.movable_wip || 0) : 0);
 
   // MRB Quality Gate (Option 2: Lock movement until MRB Approval)
-  const isMrbLocked = stageState?.mrb_lock_status === "LOCKED";
-  const isMrbPartial = stageState?.mrb_lock_status === "PARTIAL";
-  const mrbApprovedMovable = stageState?.mrb_approved_movable_qty ?? onHandAtOrigin;
+  // Stage FI is the authoritative Final Quality Inspection; production entry at FI is directly movable to Packing.
+  const isFiStage = originStage === "FI" || originStage === "FINAL_QA";
+  const isMrbLocked = !isFiStage && stageState?.mrb_lock_status === "LOCKED";
+  const isMrbPartial = !isFiStage && stageState?.mrb_lock_status === "PARTIAL";
+  const mrbApprovedMovable = isFiStage ? onHandAtOrigin : (stageState?.mrb_approved_movable_qty ?? onHandAtOrigin);
   const availableAtOrigin: number = isMrbLocked ? 0 : mrbApprovedMovable;
 
   const isTerminalStage = woData && (!destStage || originStage === "DISPATCH" || woData.current_stage === "Completed");
@@ -1134,10 +1136,14 @@ export function MovePartsContent() {
                       <div className="rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/60 dark:bg-emerald-950/20 px-3.5 py-2 flex items-center justify-between text-xs text-emerald-800 dark:text-emerald-300">
                         <div className="flex items-center gap-2">
                           <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-                          <span>MRB Quality Gate Cleared: Production approved for downstream movement.</span>
+                          <span>
+                            {isFiStage
+                              ? "Final Inspection Passed: Good pieces ready for immediate transfer to Packing & BSR."
+                              : "MRB Quality Gate Cleared: Production approved for downstream movement."}
+                          </span>
                         </div>
                         <span className="font-mono font-bold text-emerald-700 dark:text-emerald-300">
-                          {availableAtOrigin} pcs cleared
+                          {availableAtOrigin} pcs ready
                         </span>
                       </div>
                     )}

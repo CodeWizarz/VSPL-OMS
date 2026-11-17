@@ -79,6 +79,13 @@ class AdminUserCreate(BaseModel):
     email: EmailStr
     department: Optional[str] = None
     role: UserRole
+    secondary_role: Optional[UserRole] = None
+
+class AdminUserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    department: Optional[str] = None
+    role: Optional[UserRole] = None
+    secondary_role: Optional[UserRole] = None
 
 class TempPasswordResult(BaseModel):
     """The ONE-TIME response shown to the admin right after create/reset. This is the
