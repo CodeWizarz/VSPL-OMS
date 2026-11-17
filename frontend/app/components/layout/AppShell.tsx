@@ -44,7 +44,7 @@ import {
   CalendarCheck,
   TrendingUp
 } from "lucide-react";
-import { logout, getCurrentUserRole, getCurrentUser } from "@/lib/api";
+import { logout, getCurrentUserRole, getCurrentUserRoles, getCurrentUser } from "@/lib/api";
 
 // STORE is a physical material-handling role: it must see only the navigation it is
 // actually authorized to use (Move Parts, and Rejection Tracking for melting-entry
@@ -343,6 +343,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [userRoles, setUserRoles] = useState<string[]>([]);
   const [currentUser, setCurrentUser] = useState<{ full_name: string; email: string } | null>(null);
   const [notificationCount, setNotificationCount] = useState(3);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -392,7 +393,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const role = getCurrentUserRole();
+    const roles = getCurrentUserRoles();
     setUserRole(role);
+    setUserRoles(roles);
     if (role === "data_analyst" && DATA_ANALYST_DISALLOWED_HREFS.has(pathname)) {
       router.replace("/dashboard");
       return;
@@ -400,6 +403,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     getCurrentUser()
       .then((u) => {
         setCurrentUser({ full_name: u.full_name, email: u.email });
+        if (u.roles && Array.isArray(u.roles)) {
+          setUserRoles(u.roles);
+        }
         // A password-change-pending account must set a permanent password before
         // reaching any other page -- the backend re-asserts this at every login too
         // (must_change_password is re-checked, not a one-time client flag).
@@ -414,9 +420,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     .map((grp) => ({
       ...grp,
       items: grp.items.filter((item) => {
-        if (userRole === "store" && !STORE_ALLOWED_HREFS.has(item.href)) return false;
+        if (userRoles.includes("store") && !userRoles.some((r) => r !== "store") && !STORE_ALLOWED_HREFS.has(item.href)) return false;
         if (userRole === "data_analyst" && DATA_ANALYST_DISALLOWED_HREFS.has(item.href)) return false;
-        if (item.roles && (!userRole || !item.roles.includes(userRole))) return false;
+        if (item.roles && !item.roles.some((r) => userRoles.includes(r))) return false;
         return true;
       }),
     }))

@@ -1,5 +1,5 @@
-from typing import Optional
-from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
+from typing import Optional, List
+from pydantic import BaseModel, EmailStr, ConfigDict, field_validator, model_validator
 from app.models.user import UserRole
 
 class UserLogin(BaseModel):
@@ -11,6 +11,7 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     role: UserRole
+    secondary_role: Optional[UserRole] = None
     department: Optional[str] = None
     is_active: bool = True
 
@@ -26,6 +27,8 @@ class UserOut(BaseModel):
     full_name: str
     email: EmailStr
     role: UserRole
+    secondary_role: Optional[UserRole] = None
+    roles: List[str] = []
     department: Optional[str] = None
     is_active: bool = True
     must_change_password: bool = False
@@ -34,6 +37,40 @@ class UserOut(BaseModel):
     @classmethod
     def _coerce_id(cls, v):
         return str(v)
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _coerce_role(cls, v):
+        if isinstance(v, str):
+            try:
+                return UserRole(v.lower())
+            except ValueError:
+                return v
+        return v
+
+    @field_validator("secondary_role", mode="before")
+    @classmethod
+    def _coerce_secondary_role(cls, v):
+        if not v:
+            return None
+        if isinstance(v, str):
+            try:
+                return UserRole(v.lower())
+            except ValueError:
+                return None
+        return v
+
+    @model_validator(mode="after")
+    def _populate_roles(self):
+        r_list = []
+        if self.role:
+            val = self.role.value if hasattr(self.role, "value") else str(self.role)
+            r_list.append(val.lower())
+        if self.secondary_role:
+            val = self.secondary_role.value if hasattr(self.secondary_role, "value") else str(self.secondary_role)
+            r_list.append(val.lower())
+        self.roles = r_list
+        return self
 
 # Admin user-management: creating an account never takes a password from the caller --
 # the server always generates one (see app.core.security.generate_temp_password).

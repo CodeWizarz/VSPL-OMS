@@ -46,7 +46,17 @@ def login(request: Request, payload: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
-    token = create_access_token({"sub": user.email, "role": user.role.value})
+    roles_list = []
+    if user.role:
+        roles_list.append(user.role.value if hasattr(user.role, "value") else str(user.role).lower())
+    if user.secondary_role:
+        roles_list.append(user.secondary_role.value if hasattr(user.secondary_role, "value") else str(user.secondary_role).lower())
+    token = create_access_token({
+        "sub": user.email,
+        "role": roles_list[0] if roles_list else "operator",
+        "secondary_role": roles_list[1] if len(roles_list) > 1 else None,
+        "roles": roles_list,
+    })
     return Token(access_token=token, must_change_password=user.must_change_password)
 
 @router.post("/change-password", response_model=Token)

@@ -62,6 +62,25 @@ export function getCurrentUserRole(): string | null {
   }
 }
 
+// Decodes all assigned roles (primary and secondary) from JWT payload
+export function getCurrentUserRoles(): string[] {
+  const token = Cookies.get("access_token");
+  if (!token) return [];
+  try {
+    const payloadB64 = token.split(".")[1];
+    const json = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
+    if (Array.isArray(json.roles) && json.roles.length > 0) {
+      return json.roles.map((r: string) => String(r).toLowerCase());
+    }
+    const roles: string[] = [];
+    if (json.role) roles.push(String(json.role).toLowerCase());
+    if (json.secondary_role) roles.push(String(json.secondary_role).toLowerCase());
+    return roles;
+  } catch {
+    return [];
+  }
+}
+
 // Server-resolved identity of the authenticated caller (never client-supplied) --
 // used to render the sidebar's real logged-in user instead of a hardcoded placeholder.
 export async function getCurrentUser(): Promise<{
@@ -69,6 +88,8 @@ export async function getCurrentUser(): Promise<{
   full_name: string;
   email: string;
   role: string;
+  secondary_role?: string | null;
+  roles?: string[];
   department?: string | null;
   is_active: boolean;
   must_change_password: boolean;

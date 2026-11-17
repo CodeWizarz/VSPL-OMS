@@ -191,6 +191,16 @@ class UserAdminService:
         # Issue a fresh token: the old one may have been obtained while
         # must_change_password was true, and the temporary password it was issued
         # against no longer verifies against anything (the hash was just replaced).
-        token = create_access_token({"sub": current_user.email, "role": current_user.role.value})
+        roles_list = []
+        if current_user.role:
+            roles_list.append(current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role).lower())
+        if getattr(current_user, "secondary_role", None):
+            roles_list.append(current_user.secondary_role.value if hasattr(current_user.secondary_role, "value") else str(current_user.secondary_role).lower())
+        token = create_access_token({
+            "sub": current_user.email,
+            "role": roles_list[0] if roles_list else "operator",
+            "secondary_role": roles_list[1] if len(roles_list) > 1 else None,
+            "roles": roles_list,
+        })
         return Token(access_token=token)
 

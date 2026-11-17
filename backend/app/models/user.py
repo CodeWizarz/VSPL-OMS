@@ -28,8 +28,28 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     role = Column(Enum(UserRole), nullable=False)
+    secondary_role = Column(Enum(UserRole), nullable=True)
     employee_id = Column(String, nullable=True)
     department = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     must_change_password = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    def has_any_role(self, *allowed_roles: UserRole) -> bool:
+        """Returns True if either the user's primary role or secondary role matches allowed_roles."""
+        user_roles = [self.role]
+        if self.secondary_role:
+            user_roles.append(self.secondary_role)
+        allowed_values = {
+            r.value.lower() if hasattr(r, "value") else str(r).lower()
+            for r in allowed_roles
+        }
+        for r in user_roles:
+            if r is None:
+                continue
+            if r in allowed_roles:
+                return True
+            r_str = (r.value if hasattr(r, "value") else str(r)).lower()
+            if r_str in allowed_values:
+                return True
+        return False
