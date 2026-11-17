@@ -150,6 +150,20 @@ export function ProductionEntryContent() {
     }
   };
 
+  const loadAvailableWOs = async () => {
+    try {
+      const data = await getWorkOrders({ limit: 100, exclude_dispatched: true });
+      if (Array.isArray(data) && data.length > 0) {
+        setAvailableWOs(data);
+        return data;
+      }
+      return [];
+    } catch (err) {
+      console.error("Failed to fetch WOs:", err);
+      return [];
+    }
+  };
+
   // Load available WOs and active masters on mount
   useEffect(() => {
     getCurrentUser()
@@ -167,16 +181,12 @@ export function ProductionEntryContent() {
       })
       .catch(() => {});
 
-    getWorkOrders({ limit: 100, exclude_dispatched: true })
+    loadAvailableWOs()
       .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setAvailableWOs(data);
+        if (data && data.length > 0) {
           const targetWO = queryWO || data[0].wo_number;
           lookupWO(targetWO, queryStage || undefined);
         }
-      })
-      .catch((err) => {
-        console.error("Failed to fetch WOs:", err);
       });
 
     getRejectionTypes()
@@ -500,8 +510,30 @@ export function ProductionEntryContent() {
         message: res.message
       });
 
-      // Refresh authoritative WO tracking and stage state
-      await lookupWO(woData.wo_number);
+      // Optimistically update availableWOs so the dropdown reflects vendor status immediately
+      const isVendorF2 = selectedStage === "F2" && productionType === "VENDOR";
+      if (isVendorF2) {
+        setAvailableWOs((prev) =>
+          prev.map((w) =>
+            w.wo_number === woData.wo_number
+              ? {
+                  ...w,
+                  is_at_vendor: true,
+                  vendor_name: vendorName.trim(),
+                  vendor_dc: dcNumber.trim(),
+                  vendor_dispatch_stage: "F2",
+                  vendor_target_return_stage: targetReturnStage,
+                }
+              : w
+          )
+        );
+      }
+
+      // Refresh authoritative WO tracking, stage state, and available WOs list
+      await Promise.all([
+        lookupWO(woData.wo_number),
+        loadAvailableWOs(),
+      ]);
       inputGoodQtyRef.current?.focus();
     } catch (err: any) {
       let detailMsg = "Production recording failed. Please check validation rules.";
@@ -580,7 +612,10 @@ export function ProductionEntryContent() {
         message: res.message,
         patch_wo_number: res.patch_wo_number,
       });
-      await lookupWO(woData.wo_number, "F1");
+      await Promise.all([
+        lookupWO(woData.wo_number, "F1"),
+        loadAvailableWOs(),
+      ]);
     } catch (err: any) {
       alert(err?.response?.data?.detail || "Failed to declare shortfall.");
     } finally {
@@ -655,6 +690,21 @@ export function ProductionEntryContent() {
                 className="flex-1 md:flex-none rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-500 transition-colors cursor-pointer flex items-center justify-center gap-1.5"
               >
                 {loading ? "Searching..." : "Lookup WO"}
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  await loadAvailableWOs();
+                  if (searchTerm) {
+                    await lookupWO(searchTerm);
+                  }
+                }}
+                disabled={loading}
+                title="Refresh Work Orders list & vendor statuses"
+                className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-2.5 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer flex items-center justify-center shadow-xs"
+              >
+                <RotateCcw className={`h-4 w-4 ${loading ? "animate-spin text-emerald-600" : ""}`} />
               </button>
 
               {availableWOs.length > 0 && (

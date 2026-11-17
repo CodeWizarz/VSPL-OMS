@@ -24,7 +24,8 @@ import {
   TrendingUp,
   BrainCircuit,
   Ban,
-  Flame
+  Flame,
+  RotateCcw
 } from "lucide-react";
 import { AppShell } from "@/app/components/layout/AppShell";
 import { Badge, getRAGVariant } from "@/app/components/ui/Badge";
@@ -132,6 +133,22 @@ export function MovePartsContent() {
   };
 
   // Fetch quick selectable active WOs and movable queue from backend on load
+  const loadAvailableWOs = async () => {
+    try {
+      const data = await getWorkOrders({ limit: 50, exclude_dispatched: true });
+      if (Array.isArray(data) && data.length > 0) {
+        setAvailableWOs(data);
+        return data;
+      } else {
+        setAvailableWOs([]);
+        return [];
+      }
+    } catch (err) {
+      console.error("[MoveParts] Failed to load Work Orders from backend:", err);
+      return [];
+    }
+  };
+
   useEffect(() => {
     getCurrentUser()
       .then((user) => {
@@ -152,22 +169,14 @@ export function MovePartsContent() {
         loadMovableWOs("ALL");
       });
 
-    getWorkOrders({ limit: 50, exclude_dispatched: true })
+    loadAvailableWOs()
       .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setAvailableWOs(data);
+        if (data && data.length > 0) {
           const initialTarget = urlWO || (data.find((w: any) => !w.is_at_vendor) || data[0])?.wo_number;
           lookupWO(initialTarget, urlStage || undefined);
-        } else {
-          setAvailableWOs([]);
-          if (urlWO) {
-            lookupWO(urlWO, urlStage || undefined);
-          }
+        } else if (urlWO) {
+          lookupWO(urlWO, urlStage || undefined);
         }
-      })
-      .catch((err) => {
-        console.error("[MoveParts] Failed to load Work Orders from backend:", err);
-        setSearchError("Backend / API service is currently unavailable. Please verify connection.");
       });
 
     getMasterMachines()
@@ -442,8 +451,11 @@ export function MovePartsContent() {
       });
 
       setShowSuccessModal(true);
-      lookupWO(woData.wo_number, originStageNow);
-      loadMovableWOs(activeGate);
+      await Promise.all([
+        lookupWO(woData.wo_number, originStageNow),
+        loadMovableWOs(activeGate),
+        loadAvailableWOs(),
+      ]);
     } catch (err: any) {
       let detailMsg = "Transfer failed. Please check route and WIP balance.";
       if (err?.response?.data?.detail) {
@@ -674,6 +686,21 @@ export function MovePartsContent() {
               className="flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-xs font-bold text-white shadow-sm shadow-blue-500/20 hover:bg-blue-500 disabled:opacity-50 transition-colors cursor-pointer"
             >
               {loading ? "Loading..." : "Find Work Order"}
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                await Promise.all([
+                  loadAvailableWOs(),
+                  loadMovableWOs(activeGate),
+                  searchTerm ? lookupWO(searchTerm) : Promise.resolve(),
+                ]);
+              }}
+              disabled={loading}
+              title="Refresh Work Orders list"
+              className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-2.5 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer flex items-center justify-center shadow-xs"
+            >
+              <RotateCcw className={`h-4 w-4 ${loading ? "animate-spin text-blue-600" : ""}`} />
             </button>
           </form>
 
