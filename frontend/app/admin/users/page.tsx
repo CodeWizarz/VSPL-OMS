@@ -334,7 +334,16 @@ export default function AdminUsersPage() {
                     <td className="px-4 py-2">{u.full_name}</td>
                     <td className="px-4 py-2">{u.email}</td>
                     <td className="px-4 py-2">{u.department || "-"}</td>
-                    <td className="px-4 py-2">{roleLabel(u.role)}</td>
+                    <td className="px-4 py-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100">{roleLabel(u.role)}</span>
+                        {u.secondary_role && (
+                          <span className="inline-flex items-center rounded-md bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 px-1.5 py-0.5 text-[10px] font-bold border border-purple-200 dark:border-purple-800">
+                            + {roleLabel(u.secondary_role)}
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-4 py-2">
                       <span className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase ${u.is_active ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400" : "bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"}`}>
                         {u.is_active ? "Active" : "Inactive"}
@@ -416,7 +425,7 @@ export default function AdminUsersPage() {
               <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800/60 p-3.5 text-xs space-y-1.5 border border-zinc-200/70 dark:border-zinc-800">
                 <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Name:</span> <span className="font-semibold text-zinc-900 dark:text-zinc-100">{userToDelete.full_name}</span></div>
                 <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Email:</span> <span className="font-mono text-zinc-900 dark:text-zinc-100">{userToDelete.email}</span></div>
-                <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Role:</span> <span className="font-medium text-zinc-900 dark:text-zinc-100">{roleLabel(userToDelete.role)}</span></div>
+                <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Role:</span> <span className="font-medium text-zinc-900 dark:text-zinc-100">{roleLabel(userToDelete.role)}{userToDelete.secondary_role ? ` + ${roleLabel(userToDelete.secondary_role)}` : ""}</span></div>
                 <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Department:</span> <span className="font-medium text-zinc-900 dark:text-zinc-100">{userToDelete.department || "-"}</span></div>
                 <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Status:</span> <span className="font-medium text-zinc-900 dark:text-zinc-100">{userToDelete.is_active ? "Active" : "Inactive"}</span></div>
               </div>

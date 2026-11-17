@@ -104,6 +104,8 @@ export interface AdminUser {
   full_name: string;
   email: string;
   role: string;
+  secondary_role?: string | null;
+  roles?: string[];
   department?: string | null;
   is_active: boolean;
   must_change_password: boolean;
