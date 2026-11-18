@@ -1226,9 +1226,12 @@ export async function deleteOAR(oarNumber: string): Promise<{ success: boolean; 
 }
 
 export async function deleteWorkOrder(
-  woIdentifier: string
+  woIdentifier: string,
+  forceUnstartedRelease: boolean = true
 ): Promise<{ success: boolean; wo_number: string; oar_number?: string | null; freed_qty: number; message: string }> {
-  const { data } = await api.delete(`/api/v1/work-orders/${encodeURIComponent(woIdentifier)}`);
+  const { data } = await api.delete(`/api/v1/work-orders/${encodeURIComponent(woIdentifier)}`, {
+    params: forceUnstartedRelease ? { force_unstarted_release: true } : {},
+  });
   return data;
 }
 

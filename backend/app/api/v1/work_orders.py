@@ -139,13 +139,24 @@ def delete_work_order(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles(*PLANNING_ROLES))
 ):
-    """Safely delete an unreleased Work Order (or ADMIN-forced unstarted released WO) with zero shop-floor/child activity."""
+    """Safely delete an unreleased Work Order (or ADMIN/PLANNER-forced unstarted released WO) with zero shop-floor/child activity."""
     if force_unstarted_release:
         from app.models.user import UserRole
-        if getattr(user, "role", None) != UserRole.ADMIN:
+        allowed_roles = {UserRole.ADMIN, UserRole.PLANNER, UserRole.PRODUCTION_MANAGER}
+        has_permission = False
+        if hasattr(user, "has_any_role") and user.has_any_role(*allowed_roles):
+            has_permission = True
+        elif user.role in allowed_roles:
+            has_permission = True
+        else:
+            user_val = (user.role.value if hasattr(user.role, "value") else str(user.role)).lower()
+            if user_val in {"admin", "planner", "production_manager"}:
+                has_permission = True
+
+        if not has_permission:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only ADMIN can force-delete a released unstarted Work Order."
+                detail="Only ADMIN, PLANNER, or PRODUCTION_MANAGER can delete an unstarted released Work Order."
             )
     return OperationsService.delete_work_order(
         db, wo_identifier, current_user=user, force_unstarted_release=force_unstarted_release

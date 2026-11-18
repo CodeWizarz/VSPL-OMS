@@ -130,16 +130,20 @@ function WOReleaseSearchContent() {
   const [deleteErrorMsg, setDeleteErrorMsg] = useState<string>("");
 
   const handleDeleteWO = async (wo: WorkOrderListItem) => {
+    const isReleased = Boolean(wo.is_released || wo.release_date || wo.release_status === "RELEASED");
     const confirmed = window.confirm(
-      `Delete unreleased Work Order ${wo.wo_number} (${wo.physical_wo_qty} pcs)?\n\n` +
-        `Parent OAR (${wo.oar_number || "N/A"}) will remain intact and ${wo.physical_wo_qty} pcs will return to unallocated OAR quantity.`
+      isReleased
+        ? `Delete released Work Order ${wo.wo_number} (${wo.physical_wo_qty} pcs)?\n\n` +
+          `This Work Order has not started production. Deleting it will cancel the release, remove the routing, and return ${wo.physical_wo_qty} pcs to parent OAR (${wo.oar_number || "N/A"}).\n\nProceed with deletion?`
+        : `Delete unreleased Work Order ${wo.wo_number} (${wo.physical_wo_qty} pcs)?\n\n` +
+          `Parent OAR (${wo.oar_number || "N/A"}) will remain intact and ${wo.physical_wo_qty} pcs will return to unallocated OAR quantity.`
     );
     if (!confirmed) return;
 
     setDeletingWoNumber(wo.wo_number);
     setDeleteErrorMsg("");
     try {
-      const res = await deleteWorkOrder(wo.wo_number);
+      const res = await deleteWorkOrder(wo.wo_number, isReleased);
       setEditSuccessMsg(res.message || `Work Order ${wo.wo_number} deleted.`);
       await fetchData();
       setTimeout(() => setEditSuccessMsg(""), 5000);
@@ -951,18 +955,16 @@ function WOReleaseSearchContent() {
                             <span>Edit</span>
                           </button>
 
-                          {!isReleased && (
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteWO(wo)}
-                              disabled={deletingWoNumber === wo.wo_number}
-                              className="inline-flex items-center gap-1 rounded-xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs font-bold text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/50 transition-colors shadow-xs cursor-pointer disabled:opacity-50"
-                              title="Temporary: Delete unreleased Work Order"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              <span>{deletingWoNumber === wo.wo_number ? "Deleting..." : "Delete"}</span>
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteWO(wo)}
+                            disabled={deletingWoNumber === wo.wo_number}
+                            className="inline-flex items-center gap-1 rounded-xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs font-bold text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/50 transition-colors shadow-xs cursor-pointer disabled:opacity-50"
+                            title={isReleased ? "Delete unstarted released Work Order" : "Delete unreleased Work Order"}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span>{deletingWoNumber === wo.wo_number ? "Deleting..." : "Delete"}</span>
+                          </button>
 
                           <Link
                             href={`/production/tracking?wo=${encodeURIComponent(wo.wo_number)}`}
@@ -1093,18 +1095,16 @@ function WOReleaseSearchContent() {
                             <Edit2 className="h-3 w-3 text-blue-500" />
                             <span>Edit</span>
                           </button>
-                          {!isReleased && (
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteWO(wo)}
-                              disabled={deletingWoNumber === wo.wo_number}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 cursor-pointer disabled:opacity-50"
-                              title="Temporary: Delete unreleased Work Order"
-                            >
-                              <Trash2 className="h-3 w-3" />
-                              <span>{deletingWoNumber === wo.wo_number ? "Deleting..." : "Delete"}</span>
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteWO(wo)}
+                            disabled={deletingWoNumber === wo.wo_number}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 cursor-pointer disabled:opacity-50"
+                            title={isReleased ? "Delete unstarted released Work Order" : "Delete unreleased Work Order"}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                            <span>{deletingWoNumber === wo.wo_number ? "Deleting..." : "Delete"}</span>
+                          </button>
                           <Link
                             href={`/planning/wo-release?wo_id=${encodeURIComponent(wo.id)}`}
                             className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold ${
@@ -1178,18 +1178,16 @@ function WOReleaseSearchContent() {
                       <Edit2 className="h-3 w-3 text-blue-500" />
                       <span>Edit</span>
                     </button>
-                    {!isReleased && (
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteWO(wo)}
-                        disabled={deletingWoNumber === wo.wo_number}
-                        className="px-3 py-1.5 rounded-xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-xs font-bold text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/50 flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                        title="Temporary: Delete unreleased Work Order"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                        <span>{deletingWoNumber === wo.wo_number ? "Deleting..." : "Delete"}</span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteWO(wo)}
+                      disabled={deletingWoNumber === wo.wo_number}
+                      className="px-3 py-1.5 rounded-xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-xs font-bold text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/50 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                      title={isReleased ? "Delete unstarted released Work Order" : "Delete unreleased Work Order"}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      <span>{deletingWoNumber === wo.wo_number ? "Deleting..." : "Delete"}</span>
+                    </button>
                     <Link
                       href={`/production/tracking?wo=${encodeURIComponent(wo.wo_number)}`}
                       className="px-3 py-1.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-xs font-bold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100"
