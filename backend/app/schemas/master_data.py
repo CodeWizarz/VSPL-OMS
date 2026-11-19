@@ -343,6 +343,7 @@ class PartMasterCreate(BaseModel):
 
 
 class PartMasterUpdate(BaseModel):
+    part_number: Optional[str] = Field(None, max_length=100)
     customer_part_number: Optional[str] = Field(None, max_length=200)
     status: Optional[str] = Field(None, max_length=50)
     description: Optional[str] = Field(None, max_length=500)

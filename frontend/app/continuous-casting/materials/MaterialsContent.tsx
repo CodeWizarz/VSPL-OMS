@@ -87,9 +87,24 @@ export default function MaterialsContent() {
       ),
     },
     { header: "Grade", render: (m) => m.grade },
-    { header: "Section", render: (m) => m.section },
-    { header: "Dim A (mm)", className: "text-right font-mono", render: (m) => m.stock_dimension_a_mm },
-    { header: "Dim B (mm)", className: "text-right font-mono", render: (m) => m.stock_dimension_b_mm ?? "-" },
+    {
+      header: "Section",
+      render: (m) => (
+        <span className="inline-flex items-center gap-1 font-semibold text-zinc-800 dark:text-zinc-200">
+          {m.section === "ROUND" ? "Ø ROUND" : m.section === "SQUARE" ? "□ SQUARE" : "▭ RECTANGLE"}
+        </span>
+      ),
+    },
+    {
+      header: "Dim A (mm)",
+      className: "text-right font-mono",
+      render: (m) => (m.section === "ROUND" ? `Ø ${m.stock_dimension_a_mm}` : m.stock_dimension_a_mm),
+    },
+    {
+      header: "Dim B (mm)",
+      className: "text-right font-mono",
+      render: (m) => (m.section === "ROUND" ? "-" : (m.stock_dimension_b_mm ?? "-")),
+    },
     { header: "Description", render: (m) => m.description ?? "-" },
     { header: "Status", render: (m) => <CCStatusBadge status={m.is_active ? "ACTIVE" : "INACTIVE"} /> },
     { header: "Created", render: (m) => <span>{fmtDateTime(m.created_at)}<br />{m.created_by ?? ""}</span> },
@@ -179,19 +194,27 @@ function MaterialFormModal({ isOpen, onClose, onDone }: {
   useEffect(() => { if (isOpen) { setForm(EMPTY_FORM); setError(null); } }, [isOpen]);
 
   const submit = async () => {
+    const isRound = form.section.trim().toUpperCase() === "ROUND";
     const a = parsePositiveInt(form.stock_dimension_a_mm);
-    const b = parseOptionalPositiveInt(form.stock_dimension_b_mm);
+    const b = isRound ? null : parseOptionalPositiveInt(form.stock_dimension_b_mm);
     if (!form.material_code.trim() || !form.grade.trim() || !form.section.trim()) {
       return setError("Material code, grade and section are required.");
     }
-    if (Number.isNaN(a)) return setError("Stock dimension A must be a whole number of mm greater than 0.");
-    if (b !== null && Number.isNaN(b)) return setError("Stock dimension B must be a whole number of mm greater than 0, or empty.");
+    if (Number.isNaN(a)) {
+      return setError(isRound ? "Diameter must be a whole number of mm greater than 0." : "Stock dimension A must be a whole number of mm greater than 0.");
+    }
+    if (!isRound && b !== null && Number.isNaN(b)) {
+      return setError("Stock dimension B must be a whole number of mm greater than 0, or empty.");
+    }
     setBusy(true);
     setError(null);
     try {
       const res = await ccCreateMaterial({
-        material_code: form.material_code.trim(), grade: form.grade.trim(), section: form.section.trim(),
-        stock_dimension_a_mm: a, stock_dimension_b_mm: b,
+        material_code: form.material_code.trim(),
+        grade: form.grade.trim(),
+        section: form.section.trim().toUpperCase(),
+        stock_dimension_a_mm: a,
+        stock_dimension_b_mm: b,
         description: form.description.trim() === "" ? null : form.description.trim(),
       });
       onDone(`${res.message} Material ${res.material_code} (id ${res.material_id}).`);
@@ -217,32 +240,78 @@ function MaterialFields({ form, setForm, showActive }: {
   form: FormState; setForm: (f: FormState) => void; showActive: boolean;
 }) {
   const set = (k: keyof FormState, v: string | boolean) => setForm({ ...form, [k]: v });
+  const isRound = form.section.trim().toUpperCase() === "ROUND";
+
   return (
     <div className="grid grid-cols-2 gap-3">
       <div>
         <label className={ccLabelCls}>Material code *</label>
-        <input className={ccInputCls} maxLength={100} value={form.material_code} onChange={(e) => set("material_code", e.target.value)} autoFocus />
+        <input className={ccInputCls} maxLength={100} placeholder="e.g. CC-01" value={form.material_code} onChange={(e) => set("material_code", e.target.value.toUpperCase())} autoFocus />
       </div>
       <div>
         <label className={ccLabelCls}>Grade *</label>
-        <input className={ccInputCls} maxLength={100} value={form.grade} onChange={(e) => set("grade", e.target.value)} />
+        <input className={ccInputCls} maxLength={100} placeholder="e.g. 65-45-12 or SG 500/7" value={form.grade} onChange={(e) => set("grade", e.target.value)} />
       </div>
       <div>
-        <label className={ccLabelCls}>Section *</label>
-        <input className={ccInputCls} maxLength={100} value={form.section} onChange={(e) => set("section", e.target.value)} />
+        <label className={ccLabelCls}>Section / Shape *</label>
+        <select
+          className={ccInputCls}
+          value={form.section.toUpperCase()}
+          onChange={(e) => {
+            const sec = e.target.value;
+            setForm({
+              ...form,
+              section: sec,
+              stock_dimension_b_mm: sec === "ROUND" ? "" : form.stock_dimension_b_mm,
+            });
+          }}
+        >
+          <option value="">Select shape...</option>
+          <option value="ROUND">ROUND (Circle Ø)</option>
+          <option value="RECTANGLE">RECTANGLE (Flat / Rectangular Bar ▭)</option>
+          <option value="SQUARE">SQUARE (Square Bar □)</option>
+        </select>
       </div>
-      <div />
-      <div>
-        <label className={ccLabelCls}>Stock dimension A (mm) *</label>
-        <input className={ccInputCls} inputMode="numeric" value={form.stock_dimension_a_mm} onChange={(e) => set("stock_dimension_a_mm", e.target.value)} />
+      <div className="flex items-end">
+        <span className="text-[11px] text-zinc-500 italic pb-1">
+          {isRound ? "Solid circular bar defined by diameter." : "Rectangular / Square bar defined by W × H."}
+        </span>
       </div>
       <div>
-        <label className={ccLabelCls}>Stock dimension B (mm)</label>
-        <input className={ccInputCls} inputMode="numeric" value={form.stock_dimension_b_mm} onChange={(e) => set("stock_dimension_b_mm", e.target.value)} />
+        <label className={ccLabelCls}>
+          {isRound ? "Diameter / Dia (Ø mm) *" : form.section.toUpperCase() === "SQUARE" ? "Side Width (mm) *" : "Stock Dimension A / Width (mm) *"}
+        </label>
+        <input
+          className={ccInputCls}
+          inputMode="numeric"
+          placeholder={isRound ? "e.g. 90" : "e.g. 100"}
+          value={form.stock_dimension_a_mm}
+          onChange={(e) => set("stock_dimension_a_mm", e.target.value)}
+        />
+      </div>
+      <div>
+        <label className={ccLabelCls}>
+          {isRound ? "Stock Dimension B (N/A for Round)" : form.section.toUpperCase() === "SQUARE" ? "Stock Dimension B (mm)" : "Stock Dimension B / Thickness (mm)"}
+        </label>
+        <input
+          className={ccInputCls}
+          inputMode="numeric"
+          disabled={isRound}
+          placeholder={isRound ? "Not applicable for Round bar" : "e.g. 120"}
+          value={isRound ? "" : form.stock_dimension_b_mm}
+          onChange={(e) => set("stock_dimension_b_mm", e.target.value)}
+        />
       </div>
       <div className="col-span-2">
         <label className={ccLabelCls}>Description</label>
-        <textarea className={ccInputCls} rows={2} maxLength={500} value={form.description} onChange={(e) => set("description", e.target.value)} />
+        <textarea
+          className={ccInputCls}
+          rows={2}
+          maxLength={500}
+          placeholder={isRound ? "e.g. Ductile Cast Iron Round Bar Dia 90 mm (65-45-12)" : "e.g. Ductile Cast Iron Rectangular Bar 100x120 mm (65-45-12)"}
+          value={form.description}
+          onChange={(e) => set("description", e.target.value)}
+        />
       </div>
       {showActive && (
         <label className="col-span-2 flex items-center gap-2 text-xs">
@@ -286,20 +355,25 @@ function MaterialDetailModal({ materialId, onClose, onChanged }: {
 
   const save = async () => {
     if (!material || !materialId) return;
+    const isRound = form.section.trim().toUpperCase() === "ROUND";
     const a = parsePositiveInt(form.stock_dimension_a_mm);
-    const b = parseOptionalPositiveInt(form.stock_dimension_b_mm);
+    const b = isRound ? null : parseOptionalPositiveInt(form.stock_dimension_b_mm);
     if (!form.material_code.trim() || !form.grade.trim() || !form.section.trim()) {
       return setError("Material code, grade and section are required.");
     }
-    if (Number.isNaN(a)) return setError("Stock dimension A must be a whole number of mm greater than 0.");
-    if (b !== null && Number.isNaN(b)) return setError("Stock dimension B must be a whole number of mm greater than 0, or empty.");
+    if (Number.isNaN(a)) {
+      return setError(isRound ? "Diameter must be a whole number of mm greater than 0." : "Stock dimension A must be a whole number of mm greater than 0.");
+    }
+    if (!isRound && b !== null && Number.isNaN(b)) {
+      return setError("Stock dimension B must be a whole number of mm greater than 0, or empty.");
+    }
 
     // Send only the fields the user actually changed; the backend decides what may change.
     const orig = fromMaterial(material);
     const patch: CCMaterialPatch = {};
     if (form.material_code.trim() !== orig.material_code) patch.material_code = form.material_code.trim();
     if (form.grade.trim() !== orig.grade) patch.grade = form.grade.trim();
-    if (form.section.trim() !== orig.section) patch.section = form.section.trim();
+    if (form.section.trim() !== orig.section) patch.section = form.section.trim().toUpperCase();
     if (a !== material.stock_dimension_a_mm) patch.stock_dimension_a_mm = a;
     if (b !== material.stock_dimension_b_mm) patch.stock_dimension_b_mm = b;
     if (form.description.trim() !== orig.description.trim()) {

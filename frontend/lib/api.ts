@@ -1679,6 +1679,7 @@ export async function createMasterPart(payload: {
 export async function updateMasterPart(
   partId: string,
   payload: {
+    part_number?: string;
     customer_part_number?: string;
     status?: string;
     description?: string;

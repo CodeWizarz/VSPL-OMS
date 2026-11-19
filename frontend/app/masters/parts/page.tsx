@@ -61,6 +61,7 @@ export default function PartMasterPage() {
 
   // Edit Part Modal state
   const [editingPart, setEditingPart] = useState<MasterPart | null>(null);
+  const [editPartNumber, setEditPartNumber] = useState("");
   const [editCustomerPartNo, setEditCustomerPartNo] = useState("");
   const [editStatus, setEditStatus] = useState("Active");
   const [editDescription, setEditDescription] = useState("");
@@ -150,6 +151,7 @@ export default function PartMasterPage() {
 
   function openEditModal(p: MasterPart) {
     setEditingPart(p);
+    setEditPartNumber(p.part_number);
     setEditCustomerPartNo(p.customer_part_number);
     setEditStatus(p.status);
     setEditDescription(p.description || "");
@@ -159,10 +161,15 @@ export default function PartMasterPage() {
   async function handleUpdatePart(e: React.FormEvent) {
     e.preventDefault();
     if (!editingPart) return;
+    if (!editPartNumber.trim()) {
+      setEditError("Unique Internal Code cannot be blank.");
+      return;
+    }
     setEditError("");
     setSaving(true);
     try {
       await updateMasterPart(editingPart.id, {
+        part_number: editPartNumber.trim().toUpperCase(),
         customer_part_number: editCustomerPartNo.trim(),
         status: editStatus,
         description: editDescription.trim() || undefined,
@@ -668,17 +675,27 @@ export default function PartMasterPage() {
             )}
 
             <form onSubmit={handleUpdatePart} className="space-y-4 text-xs">
-              {/* Unique Internal Code (Read-Only) */}
+              {/* Unique Internal Code */}
               <div>
-                <label className="block font-bold text-zinc-500 mb-1">
-                  Unique Internal Code (Immutable)
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block font-bold text-zinc-700 dark:text-zinc-300">
+                    Unique Internal Code <span className="text-rose-500">*</span>
+                  </label>
+                  <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-medium">
+                    Sales / PPC / Planning Authorized
+                  </span>
+                </div>
                 <input
                   type="text"
-                  disabled
-                  value={editingPart.part_number}
-                  className="w-full px-3 py-2 text-xs font-mono font-bold rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-800 text-zinc-500 cursor-not-allowed"
+                  required
+                  value={editPartNumber}
+                  onChange={(e) => setEditPartNumber(e.target.value.toUpperCase())}
+                  className="w-full px-3 py-2 text-xs font-mono font-bold rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  placeholder="e.g. ACC12"
                 />
+                <p className="text-[10px] text-zinc-400 mt-1">
+                  Authoritative internal manufacturing code used across OARs, routing, and shop floor. Must be unique.
+                </p>
               </div>
 
               {/* Customer (Read-Only) */}

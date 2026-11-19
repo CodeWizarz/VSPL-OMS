@@ -101,7 +101,18 @@ export default function InwardContent() {
         <span className="text-amber-500 font-mono text-[11px] italic">UNRECONCILED</span>
       ),
     },
-    { header: "Material", render: (r) => <span><span className="font-mono">{r.material_code}</span><br /><span className="text-zinc-400">{r.grade} / {r.section}</span></span> },
+    {
+      header: "Material",
+      render: (r) => (
+        <span>
+          <span className="font-mono font-bold text-zinc-900 dark:text-zinc-100">{r.material_code}</span>
+          <br />
+          <span className="text-zinc-500 text-[11px]">
+            {r.grade} • {r.section === "ROUND" ? "Ø ROUND" : r.section}
+          </span>
+        </span>
+      ),
+    },
     { header: "Received", render: (r) => fmtDateTime(r.received_at) },
     { header: "QA", render: (r) => <CCStatusBadge status={r.qa_status} /> },
     { header: "Units", className: "text-right font-mono", render: (r) => r.unit_count },
@@ -342,7 +353,7 @@ function CreateInwardModal({ isOpen, materials, onClose, onCreated }: {
                   <option value="">Select active material...</option>
                   {materials.map((m) => (
                     <option key={m.material_id} value={m.material_id}>
-                      {m.material_code} — {m.grade} — {m.stock_dimension_a_mm}{m.stock_dimension_b_mm ? ` × ${m.stock_dimension_b_mm}` : ""} mm
+                      {m.material_code} — {m.grade} — {m.section === "ROUND" ? `Ø ${m.stock_dimension_a_mm} mm (ROUND)` : `${m.stock_dimension_a_mm}${m.stock_dimension_b_mm ? ` × ${m.stock_dimension_b_mm}` : ""} mm (${m.section})`}
                     </option>
                   ))}
                 </select>
@@ -360,10 +371,10 @@ function CreateInwardModal({ isOpen, materials, onClose, onCreated }: {
               {material && (
                 <div className="col-span-1 sm:col-span-2">
                   <dl className="grid grid-cols-2 gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-800/30 sm:grid-cols-4">
-                    <div><dt className="text-zinc-500">Grade</dt><dd>{material.grade}</dd></div>
-                    <div><dt className="text-zinc-500">Section</dt><dd>{material.section}</dd></div>
-                    <div><dt className="text-zinc-500">Dimension A</dt><dd className="font-mono">{material.stock_dimension_a_mm} mm</dd></div>
-                    <div><dt className="text-zinc-500">Dimension B</dt><dd className="font-mono">{material.stock_dimension_b_mm ? `${material.stock_dimension_b_mm} mm` : "-"}</dd></div>
+                    <div><dt className="text-zinc-500">Grade</dt><dd className="font-semibold">{material.grade}</dd></div>
+                    <div><dt className="text-zinc-500">Section</dt><dd className="font-semibold">{material.section === "ROUND" ? "Ø ROUND (Circle)" : material.section}</dd></div>
+                    <div><dt className="text-zinc-500">{material.section === "ROUND" ? "Diameter (OD)" : "Dimension A"}</dt><dd className="font-mono font-bold">{material.section === "ROUND" ? `Ø ${material.stock_dimension_a_mm} mm` : `${material.stock_dimension_a_mm} mm`}</dd></div>
+                    <div><dt className="text-zinc-500">Dimension B</dt><dd className="font-mono">{material.section === "ROUND" ? "-" : (material.stock_dimension_b_mm ? `${material.stock_dimension_b_mm} mm` : "-")}</dd></div>
                     <p className="col-span-2 text-[11px] text-zinc-400 sm:col-span-4">Dimensions come from the material master and cannot be changed here.</p>
                   </dl>
                 </div>
@@ -380,17 +391,24 @@ function CreateInwardModal({ isOpen, materials, onClose, onCreated }: {
               </div>
               <table className="w-full">
                 <thead className="text-left text-zinc-500">
-                  <tr><th className="px-1 py-1 font-medium">Length (mm)</th><th className="px-1 py-1 font-medium">No. of bars</th><th className="w-16 px-1 py-1 font-medium">Action</th></tr>
+                  <tr><th className="px-1 py-1 font-medium">Length per bar (mm / m)</th><th className="px-1 py-1 font-medium">No. of bars</th><th className="w-16 px-1 py-1 font-medium">Action</th></tr>
                 </thead>
                 <tbody>
                   {groups.map((g, i) => (
                     <tr key={i}>
                       <td className="px-1 py-0.5">
-                        <input ref={(el) => { lengthRefs.current[i] = el; }} className={ccInputCls} inputMode="numeric" value={g.length}
-                          onChange={(e) => setRow(i, { length: e.target.value })} onKeyDown={(e) => onLengthKey(e, i)} aria-label={`Group ${i + 1} length in mm`} />
+                        <div className="relative flex items-center">
+                          <input ref={(el) => { lengthRefs.current[i] = el; }} className={ccInputCls} inputMode="numeric" placeholder="e.g. 1000 (=1m) or 3000 (=3m)" value={g.length}
+                            onChange={(e) => setRow(i, { length: e.target.value })} onKeyDown={(e) => onLengthKey(e, i)} aria-label={`Group ${i + 1} length in mm`} />
+                          {g.length && Number(g.length) > 0 ? (
+                            <span className="absolute right-2 text-[10px] text-zinc-400 font-mono pointer-events-none">
+                              {(Number(g.length) / 1000).toFixed(2)} m
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                       <td className="px-1 py-0.5">
-                        <input ref={(el) => { countRefs.current[i] = el; }} className={ccInputCls} inputMode="numeric" value={g.count}
+                        <input ref={(el) => { countRefs.current[i] = el; }} className={ccInputCls} inputMode="numeric" placeholder="e.g. 10" value={g.count}
                           onChange={(e) => setRow(i, { count: e.target.value })} onKeyDown={(e) => onCountKey(e, i)} aria-label={`Group ${i + 1} number of bars`} />
                       </td>
                       <td className="px-1 py-0.5">

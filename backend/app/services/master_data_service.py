@@ -1669,6 +1669,27 @@ class PartMasterService:
 
         db.query(Customer).filter(Customer.id == customer.id).with_for_update().first()
 
+        old_part_num = part.part_number
+        if req.part_number is not None:
+            new_pn = req.part_number.strip().upper()
+            if not new_pn:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unique Internal Code cannot be blank.")
+            if new_pn != part.part_number:
+                conflict = db.query(Part).filter(Part.part_number == new_pn, Part.id != part.id).first()
+                if conflict:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Unique Internal Code '{new_pn}' is already in use by another part."
+                    )
+                part.part_number = new_pn
+                try:
+                    from app.models.customer_return import CustomerReturn
+                    db.query(CustomerReturn).filter(CustomerReturn.part_number == old_part_num).update(
+                        {CustomerReturn.part_number: new_pn}, synchronize_session=False
+                    )
+                except Exception:
+                    pass
+
         if req.customer_part_number is not None:
             new_cpn = req.customer_part_number.strip()
             if not new_cpn:
