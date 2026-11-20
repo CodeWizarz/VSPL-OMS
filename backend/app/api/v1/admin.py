@@ -67,11 +67,31 @@ def list_customers(db: Session = Depends(get_db), user: User = Depends(get_curre
     return db.query(Customer).order_by(Customer.customer_code).limit(5000).all()
 
 @router.get("/parts", response_model=List[PartOut])
-def list_parts(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_parts(
+    customer_code: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
     # Cap raised past the real, imported VSPL Part Master count (~6,200) -- 5000 was
     # silently truncating the list before every part existed in this table.
-    parts = db.query(Part).order_by(Part.part_number).limit(20000).all()
-    cpms = (
+    clean_code = customer_code.strip().upper() if customer_code else None
+    parts_query = db.query(Part).order_by(Part.part_number)
+    if clean_code:
+        parts_query = (
+            parts_query
+            .outerjoin(CustomerPartMapping, Part.id == CustomerPartMapping.part_id)
+            .outerjoin(Customer, CustomerPartMapping.customer_id == Customer.id)
+            .filter(
+                or_(
+                    Customer.customer_code == clean_code,
+                    Part.part_number.like(f"{clean_code}%")
+                )
+            )
+            .distinct()
+        )
+    parts = parts_query.limit(20000).all()
+
+    cpm_query = (
         db.query(
             CustomerPartMapping.part_id,
             CustomerPartMapping.customer_part_number,
@@ -79,8 +99,10 @@ def list_parts(db: Session = Depends(get_db), user: User = Depends(get_current_u
             Customer.customer_code,
         )
         .outerjoin(Customer, CustomerPartMapping.customer_id == Customer.id)
-        .all()
     )
+    if clean_code:
+        cpm_query = cpm_query.filter(Customer.customer_code == clean_code)
+    cpms = cpm_query.all()
     cpm_map = {str(p_id): (cust_part_no, cust_name, cust_code) for p_id, cust_part_no, cust_name, cust_code in cpms if p_id}
 
     try:

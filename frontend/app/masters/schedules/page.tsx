@@ -53,6 +53,7 @@ export default function ScheduleMasterPage() {
   const [listError, setListError] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [displayLimit, setDisplayLimit] = useState(50);
 
   // Add schedule state
   const [customerCode, setCustomerCode] = useState("");
@@ -81,15 +82,19 @@ export default function ScheduleMasterPage() {
     setLoading(true);
     setListError("");
     try {
-      const [c, s, pts] = await Promise.all([
+      const [c, s] = await Promise.all([
         getMasterCustomers(),
         getSchedules(),
-        getParts().catch(() => [] as AdminPart[]),
       ]);
       setCustomers(c);
       setSchedules(s);
-      setMasterParts(pts);
+      setLoading(false);
       if (!customerCode && c.length) setCustomerCode(c[0].customer_code);
+
+      // Load parts in background without blocking schedule list display
+      getParts()
+        .then(setMasterParts)
+        .catch(() => {});
     } catch (err: any) {
       setListError(extractErrorMessage(err, "Could not load schedule data."));
     } finally {
@@ -597,8 +602,9 @@ export default function ScheduleMasterPage() {
           {loading ? (
             <div className="p-4 text-xs text-zinc-500">Loading...</div>
           ) : (
-            <table className="w-full text-xs">
-              <thead className="bg-zinc-50 dark:bg-zinc-800/50 text-zinc-500 dark:text-zinc-400">
+            <>
+              <table className="w-full text-xs">
+                <thead className="bg-zinc-50 dark:bg-zinc-800/50 text-zinc-500 dark:text-zinc-400">
                 <tr>
                   <th className="text-left px-4 py-2 font-semibold">Schedule #</th>
                   <th className="text-left px-4 py-2 font-semibold">Customer</th>
@@ -631,7 +637,7 @@ export default function ScheduleMasterPage() {
                     </td>
                   </tr>
                 ) : (
-                  filteredSchedules.map((s) => (
+                  filteredSchedules.slice(0, displayLimit).map((s) => (
                     <tr key={s.id} className="border-t border-zinc-100 dark:border-zinc-800">
                       <td className="px-4 py-2 font-mono font-medium">{s.schedule_number}</td>
                       <td className="px-4 py-2">{s.customer_code} — {s.customer_name}</td>
@@ -729,6 +735,30 @@ export default function ScheduleMasterPage() {
                 )}
               </tbody>
             </table>
+            {filteredSchedules.length > displayLimit && (
+              <div className="flex items-center justify-between p-3 bg-zinc-50 dark:bg-zinc-800/60 border-t border-zinc-200 dark:border-zinc-800 text-xs text-zinc-500">
+                <span>
+                  Showing {Math.min(displayLimit, filteredSchedules.length)} of {filteredSchedules.length} schedules
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDisplayLimit((prev) => prev + 50)}
+                    className="px-2.5 py-0.5 font-semibold text-[11px] rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 shadow-sm"
+                  >
+                    Show More (+50)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDisplayLimit(filteredSchedules.length)}
+                    className="px-2.5 py-0.5 font-semibold text-[11px] rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-blue-600 dark:text-blue-400 shadow-sm"
+                  >
+                    Show All ({filteredSchedules.length})
+                  </button>
+                </div>
+              </div>
+            )}
+            </>
           )}
         </div>
 

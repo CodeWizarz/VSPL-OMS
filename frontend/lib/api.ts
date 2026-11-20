@@ -1472,8 +1472,10 @@ export interface AdminPart {
   customer_code?: string | null;
 }
 
-export async function getParts(): Promise<AdminPart[]> {
-  const { data } = await api.get("/api/v1/admin/parts");
+export async function getParts(customerCode?: string): Promise<AdminPart[]> {
+  const { data } = await api.get("/api/v1/admin/parts", {
+    params: customerCode ? { customer_code: customerCode } : undefined,
+  });
   return data;
 }
 

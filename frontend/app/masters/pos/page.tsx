@@ -235,6 +235,7 @@ export default function POMasterPage() {
   const [filterCustomerCode, setFilterCustomerCode] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [displayLimit, setDisplayLimit] = useState(25);
 
   // Filtered POs computation
   const filteredPOs = pos.filter((po) => {
@@ -373,15 +374,21 @@ export default function POMasterPage() {
     }
     setListError("");
     try {
-      const [c, p, pts] = await Promise.all([
+      const [c, p] = await Promise.all([
         getMasterCustomers(),
         getPOMasters(),
-        getParts().catch(() => [] as AdminPart[]),
       ]);
       setCustomers(c);
       setPOs(p);
-      setMasterParts(pts);
+      if (showSpinner) {
+        setLoading(false);
+      }
       if (!customerCode && c.length) setCustomerCode(c[0].customer_code);
+
+      // Fetch parts in background without blocking PO Master table display
+      getParts()
+        .then(setMasterParts)
+        .catch(() => {});
     } catch (err: any) {
       if (showSpinner) {
         setListError(err?.response?.data?.detail || "Could not load PO data.");
@@ -395,23 +402,6 @@ export default function POMasterPage() {
 
   useEffect(() => {
     loadAll(true);
-
-    const onFocus = () => {
-      loadAll(false);
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        loadAll(false);
-      }
-    };
-
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1024,7 +1014,7 @@ export default function POMasterPage() {
             </div>
           ) : (
             <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-              {filteredPOs.map((po) => {
+              {filteredPOs.slice(0, displayLimit).map((po) => {
                 const poTotalVal = Number(
                   po.total_value ||
                     po.lines.reduce((s, l) => s + (Number(l.line_total) || (Number(l.po_qty) * (Number(l.unit_price) || 0))), 0)
@@ -1129,6 +1119,29 @@ export default function POMasterPage() {
                   </div>
                 );
               })}
+              {filteredPOs.length > displayLimit && (
+                <div className="flex items-center justify-between p-4 bg-zinc-50 dark:bg-zinc-800/60 border-t border-zinc-200 dark:border-zinc-800 text-xs text-zinc-500">
+                  <span>
+                    Showing {Math.min(displayLimit, filteredPOs.length)} of {filteredPOs.length} purchase orders
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDisplayLimit((prev) => prev + 25)}
+                      className="px-3 py-1 font-semibold text-xs rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 shadow-sm"
+                    >
+                      Show More (+25)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDisplayLimit(filteredPOs.length)}
+                      className="px-3 py-1 font-semibold text-xs rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-blue-600 dark:text-blue-400 shadow-sm"
+                    >
+                      Show All ({filteredPOs.length})
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
