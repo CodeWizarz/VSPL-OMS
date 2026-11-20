@@ -1130,6 +1130,7 @@ export interface OARWorkOrderSummary {
   is_released?: boolean;
   ready_for_production?: boolean;
   classification?: string | null;
+  heat_number?: string | null;
   commitment_date?: string | null;
   revised_commitment_date?: string | null;
   effective_commitment_date?: string | null;

@@ -547,13 +547,16 @@ function WOGenerationContent() {
   const filteredOars = oars.filter((o) => {
     if (filterPendingOnly && o.remaining_qty <= 0) return false;
     if (!searchOar.trim()) return true;
-    const q = searchOar.toLowerCase();
+    const q = searchOar.toLowerCase().trim();
     return (
-      o.oar_number.toLowerCase().includes(q) ||
-      o.customer_name.toLowerCase().includes(q) ||
-      o.customer_code.toLowerCase().includes(q) ||
+      o.oar_number?.toLowerCase().includes(q) ||
+      o.customer_name?.toLowerCase().includes(q) ||
+      o.customer_code?.toLowerCase().includes(q) ||
       (o.customer_po && o.customer_po.toLowerCase().includes(q)) ||
-      o.part_number.toLowerCase().includes(q)
+      o.part_number?.toLowerCase().includes(q) ||
+      (o.customer_part_number && o.customer_part_number.toLowerCase().includes(q)) ||
+      (o.part_name && o.part_name.toLowerCase().includes(q)) ||
+      o.work_orders?.some((w) => w.wo_number?.toLowerCase().includes(q))
     );
   });
 

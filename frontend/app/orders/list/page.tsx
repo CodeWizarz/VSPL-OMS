@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
 import {
   Search,
@@ -85,20 +85,56 @@ export default function OarWoListPage() {
   const [exportingExcel, setExportingExcel] = useState(false);
   const [oars, setOars] = useState<OARListItem[]>([]);
 
-  // Instant client-side filtering -- switching between Production & NPD is 0ms (no network delay)
+  const activeRequestRef = useRef(0);
+
+  // Instant client-side filtering -- switching classifications or typing in search is 0ms
   const displayedOars = useMemo(() => {
-    if (classificationFilter === "ALL") return oars;
+    let list = oars;
     if (classificationFilter === "NPD") {
-      return oars.filter((o) => o.classification?.toUpperCase() === "NPD");
+      list = list.filter((o) => o.classification?.toUpperCase() === "NPD");
+    } else if (classificationFilter === "Production") {
+      list = list.filter((o) => o.classification?.toUpperCase() !== "NPD");
     }
-    return oars.filter((o) => o.classification?.toUpperCase() !== "NPD");
-  }, [oars, classificationFilter]);
+    const q = search.trim().toLowerCase();
+    if (q) {
+      list = list.filter((o) => {
+        return (
+          o.oar_number?.toLowerCase().includes(q) ||
+          o.customer_po?.toLowerCase().includes(q) ||
+          o.customer_name?.toLowerCase().includes(q) ||
+          o.customer_code?.toLowerCase().includes(q) ||
+          o.part_number?.toLowerCase().includes(q) ||
+          o.customer_part_number?.toLowerCase().includes(q) ||
+          o.part_name?.toLowerCase().includes(q) ||
+          o.work_orders?.some(
+            (w) =>
+              w.wo_number?.toLowerCase().includes(q) ||
+              w.heat_number?.toLowerCase().includes(q) ||
+              w.source_wo_number?.toLowerCase().includes(q)
+          )
+        );
+      });
+    }
+    return list;
+  }, [oars, classificationFilter, search]);
 
   const productionCount = useMemo(() => oars.filter((o) => o.classification?.toUpperCase() !== "NPD").length, [oars]);
   const npdCount = useMemo(() => oars.filter((o) => o.classification?.toUpperCase() === "NPD").length, [oars]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Auto-expand matched rows on search
+  useEffect(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return;
+    const nextExp: Record<string, boolean> = {};
+    displayedOars.forEach((item) => {
+      const k = item.order_id || `${item.oar_number}-${item.part_number}`;
+      nextExp[k] = true;
+    });
+    setExpanded((prev) => ({ ...prev, ...nextExp }));
+  }, [search, displayedOars]);
 
   // Patch / Replacement WO modal state
   const [patchModalOar, setPatchModalOar] = useState<OARListItem | null>(null);
@@ -111,6 +147,7 @@ export default function OarWoListPage() {
   const [patchSuccess, setPatchSuccess] = useState<ReplacementResult | null>(null);
 
   const fetchOars = useCallback(async (searchTerm: string = "", status: string = "") => {
+    const reqId = ++activeRequestRef.current;
     setLoading(true);
     setError("");
     try {
@@ -119,6 +156,7 @@ export default function OarWoListPage() {
         status_filter: status || undefined,
         limit: 1000
       });
+      if (reqId !== activeRequestRef.current) return;
       const items = Array.isArray(data) ? data : [];
       setOars(items);
       if (searchTerm.trim()) {
@@ -130,10 +168,13 @@ export default function OarWoListPage() {
         setExpanded(nextExpanded);
       }
     } catch (err: any) {
+      if (reqId !== activeRequestRef.current) return;
       setError(err?.response?.data?.detail || "Failed to load OAR & WO list.");
       setOars([]);
     } finally {
-      setLoading(false);
+      if (reqId === activeRequestRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -418,15 +459,14 @@ export default function OarWoListPage() {
           </select>
           <button
             type="submit"
-            disabled={loading}
-            className="rounded-xl bg-blue-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-blue-500 transition-colors cursor-pointer"
+            className="rounded-xl bg-blue-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-blue-500 transition-colors cursor-pointer flex items-center gap-1.5"
           >
-            {loading ? "Searching..." : "Search"}
+            {loading ? <RotateCw className="h-3.5 w-3.5 animate-spin" /> : null}
+            <span>{loading ? "Searching..." : "Search"}</span>
           </button>
           <button
             type="button"
             onClick={() => fetchOars(search, statusFilter)}
-            disabled={loading}
             title="Fetch latest production and order data"
             className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3.5 py-2.5 text-xs font-bold text-zinc-700 dark:text-zinc-300 shadow-sm hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors cursor-pointer flex items-center gap-1.5"
           >
@@ -1111,240 +1151,253 @@ export default function OarWoListPage() {
 
         {/* Edit OAR Commitment Date & Delivery Details Modal */}
         {editModalOar && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-            <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
-              <div className="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 pb-3">
-                <div className="flex items-center gap-2">
-                  <Calendar className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3 sm:p-6 overflow-hidden">
+            <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl max-w-2xl w-full max-h-[88vh] flex flex-col shadow-2xl overflow-hidden">
+              {/* Sticky Header */}
+              <div className="flex items-center justify-between px-6 py-3.5 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-1.5 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
+                    <Calendar className="h-5 w-5" />
+                  </div>
                   <div>
                     <h3 className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
                       Edit OAR Details &amp; Classification
                     </h3>
                     <p className="text-[11px] text-zinc-500 font-mono">
-                      OAR: {editModalOar.oar_number} • Customer: {editModalOar.customer_code}
+                      OAR: <span className="font-semibold text-zinc-800 dark:text-zinc-200">{editModalOar.oar_number}</span> • Customer: <span className="font-semibold text-zinc-800 dark:text-zinc-200">{editModalOar.customer_code}</span>
                     </p>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => setEditModalOar(null)}
-                  className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-1"
+                  className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-1 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer"
                 >
                   <X className="h-4 w-4" />
                 </button>
               </div>
 
               {editSuccess ? (
-                <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-700 dark:text-emerald-300 space-y-2">
-                  <div className="flex items-center gap-1.5 font-bold">
-                    <CheckCircle2 className="h-4 w-4" />
-                    <span>OAR Updated Successfully!</span>
-                  </div>
-                  <p>{editSuccess}</p>
-                  <div className="pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setEditModalOar(null)}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold text-xs cursor-pointer"
-                    >
-                      Close
-                    </button>
+                <div className="p-6 overflow-y-auto">
+                  <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-700 dark:text-emerald-300 space-y-2">
+                    <div className="flex items-center gap-1.5 font-bold">
+                      <CheckCircle2 className="h-4 w-4" />
+                      <span>OAR Updated Successfully!</span>
+                    </div>
+                    <p>{editSuccess}</p>
+                    <div className="pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditModalOar(null)}
+                        className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs cursor-pointer shadow-sm transition"
+                      >
+                        Close
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
-                <form onSubmit={handleUpdateOar} className="space-y-4">
-                  {editError && (
-                    <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-600 dark:text-rose-400">
-                      {editError}
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/50 text-xs border border-zinc-200/60 dark:border-zinc-800">
-                    <div>
-                      <span className="text-[10px] uppercase font-bold text-zinc-400">Customer PO</span>
-                      <p className="font-semibold text-zinc-800 dark:text-zinc-200">{editModalOar.customer_po}</p>
-                    </div>
-                    <div>
-                      <span className="text-[10px] uppercase font-bold text-zinc-400">Customer Part Number</span>
-                      <p className="font-mono font-semibold text-zinc-800 dark:text-zinc-200">
-                        {editModalOar.customer_part_number || editModalOar.part_number}
-                      </p>
-                      {editModalOar.customer_part_number && editModalOar.customer_part_number !== editModalOar.part_number && (
-                        <p className="text-[10px] text-zinc-400 font-mono">Internal: {editModalOar.part_number}</p>
-                      )}
-                    </div>
-                    <div>
-                      <span className="text-[10px] uppercase font-bold text-zinc-400">Order Quantity</span>
-                      <p className="font-mono font-bold text-zinc-900 dark:text-zinc-100">{editModalOar.oar_qty} pcs</p>
-                    </div>
-                    <div>
-                      <span className="text-[10px] uppercase font-bold text-zinc-400">Current OAR Status</span>
-                      <p className="font-bold text-blue-600 uppercase">{editModalOar.status}</p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
-                        OAR &amp; Customer PO Quantity (pcs) *
-                      </label>
-                      <input
-                        type="number"
-                        required
-                        min={editModalOar.allocated_qty || 1}
-                        value={editOarQty}
-                        onChange={(e) => setEditOarQty(e.target.value === "" ? "" : Number(e.target.value))}
-                        className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-bold font-mono text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
-                      />
-                      <p className="text-[10px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                        Syncs directly with linked Customer PO line <strong className="text-zinc-700 dark:text-zinc-300 font-mono">#{editModalOar.customer_po}</strong> and re-computes PO total value.
-                        {editModalOar.allocated_qty > 0 && (
-                          <span className="block text-amber-600 dark:text-amber-400 font-semibold mt-0.5">
-                            Minimum {editModalOar.allocated_qty} pcs (already planned in Work Orders).
-                          </span>
-                        )}
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
-                        Customer Part Number
-                      </label>
-                      <input
-                        type="text"
-                        value={editCustomerPartNumber}
-                        onChange={(e) => setEditCustomerPartNumber(e.target.value)}
-                        placeholder={editModalOar.part_number}
-                        className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none font-mono"
-                      />
-                      <p className="text-[10px] text-zinc-400 mt-0.5">
-                        Customer drawing or catalog part number printed on customer PO.
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
-                        Order Classification
-                      </label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setEditOrderType("Production")}
-                          className={`px-3 py-2 rounded-xl text-xs font-bold border transition-all text-center flex items-center justify-center gap-1.5 ${
-                            editOrderType === "Production"
-                              ? "border-blue-500 bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 shadow-sm ring-1 ring-blue-500"
-                              : "border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300"
-                          }`}
-                        >
-                          🏭 Series Production
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditOrderType("NPD")}
-                          className={`px-3 py-2 rounded-xl text-xs font-bold border transition-all text-center flex items-center justify-center gap-1.5 ${
-                            editOrderType === "NPD"
-                              ? "border-purple-500 bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 shadow-sm ring-1 ring-purple-500"
-                              : "border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300"
-                          }`}
-                        >
-                          🔬 NPD (New Product Dev)
-                        </button>
+                <form onSubmit={handleUpdateOar} className="flex flex-col flex-1 overflow-hidden">
+                  {/* Scrollable Form Body */}
+                  <div className="overflow-y-auto px-6 py-4 space-y-4 flex-1">
+                    {editError && (
+                      <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-600 dark:text-rose-400 font-medium">
+                        {editError}
                       </div>
-                      <p className="text-[10px] text-zinc-400 mt-1">
-                        Switches this OAR and all associated Work Orders between Production and NPD.
-                      </p>
+                    )}
+
+                    {/* Context Summary Cards */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/50 text-xs border border-zinc-200/70 dark:border-zinc-800">
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-zinc-400 block">Customer PO</span>
+                        <p className="font-semibold text-zinc-800 dark:text-zinc-200 truncate">{editModalOar.customer_po || "—"}</p>
+                      </div>
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-zinc-400 block">Current Part</span>
+                        <p className="font-mono font-semibold text-zinc-800 dark:text-zinc-200 truncate">
+                          {editModalOar.customer_part_number || editModalOar.part_number}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-zinc-400 block">Allocated to WOs</span>
+                        <p className="font-mono font-bold text-blue-600">{editModalOar.allocated_qty || 0} pcs</p>
+                      </div>
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-zinc-400 block">Current Status</span>
+                        <p className="font-bold text-emerald-600 uppercase">{editModalOar.status}</p>
+                      </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200/60 dark:border-blue-800/60">
+                    {/* Row 1: Qty & Customer Part Number (2 columns) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                       <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider">
+                        <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                          OAR &amp; PO Qty (pcs) *
+                        </label>
+                        <input
+                          type="number"
+                          required
+                          min={editModalOar.allocated_qty || 1}
+                          value={editOarQty}
+                          onChange={(e) => setEditOarQty(e.target.value === "" ? "" : Number(e.target.value))}
+                          className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-bold font-mono text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
+                        />
+                        <p className="text-[10px] text-zinc-500 mt-1">
+                          {editModalOar.allocated_qty > 0 ? (
+                            <span className="text-amber-600 dark:text-amber-400 font-semibold">
+                              Min {editModalOar.allocated_qty} pcs (already planned in WOs)
+                            </span>
+                          ) : (
+                            "Syncs directly with linked Customer PO line"
+                          )}
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                          Customer Part Number
+                        </label>
+                        <input
+                          type="text"
+                          value={editCustomerPartNumber}
+                          onChange={(e) => setEditCustomerPartNumber(e.target.value)}
+                          placeholder={editModalOar.part_number}
+                          className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none font-mono"
+                        />
+                        <p className="text-[10px] text-zinc-400 mt-1">
+                          Drawing or catalog part number printed on customer PO
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Row 2: Classification & Status (2 columns) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                          Order Classification
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditOrderType("Production")}
+                            className={`px-3 py-2 rounded-xl text-xs font-bold border transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer ${
+                              editOrderType === "Production"
+                                ? "border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 shadow-xs ring-1 ring-emerald-500"
+                                : "border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300"
+                            }`}
+                          >
+                            🏭 Production
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditOrderType("NPD")}
+                            className={`px-3 py-2 rounded-xl text-xs font-bold border transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer ${
+                              editOrderType === "NPD"
+                                ? "border-purple-500 bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 shadow-xs ring-1 ring-purple-500"
+                                : "border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300"
+                            }`}
+                          >
+                            🔬 NPD
+                          </button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                          OAR Status
+                        </label>
+                        <select
+                          value={editStatus}
+                          onChange={(e) => setEditStatus(e.target.value)}
+                          className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
+                        >
+                          <option value="accept">ACCEPT (Active Order)</option>
+                          <option value="hold">HOLD (Temporarily On Hold)</option>
+                          <option value="reject">REJECT (Order Rejected)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Row 3: Commitment Dates in Highlight Box (2 columns) */}
+                    <div className="p-3.5 rounded-xl bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200/60 dark:border-blue-800/60 space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                        <div>
+                          <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
                             Original Commitment Date
                           </label>
+                          <input
+                            type="date"
+                            value={editCommitmentDate}
+                            onChange={(e) => setEditCommitmentDate(e.target.value)}
+                            className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
+                          />
+                          <p className="text-[10px] text-zinc-400 mt-1">Baseline accepted date on creation</p>
                         </div>
-                        <input
-                          type="date"
-                          value={editCommitmentDate}
-                          onChange={(e) => setEditCommitmentDate(e.target.value)}
-                          className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
-                        />
-                        <p className="text-[10px] text-zinc-400 mt-0.5">Baseline date accepted on OAR creation.</p>
+
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="block text-[11px] font-bold text-amber-700 dark:text-amber-300 uppercase tracking-wider">
+                              Revised Commitment Date
+                            </label>
+                            <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-200 dark:bg-amber-800 text-amber-900 dark:text-amber-100">
+                              {editModalOar.commitment_date_revision_count ? `${editModalOar.commitment_date_revision_count} Rev(s)` : "Initial"}
+                            </span>
+                          </div>
+                          <input
+                            type="date"
+                            value={editRevisedCommitmentDate}
+                            onChange={(e) => setEditRevisedCommitmentDate(e.target.value)}
+                            className="w-full rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-bold text-amber-900 dark:text-amber-100 focus:border-amber-500 focus:outline-none"
+                          />
+                          <p className="text-[10px] text-zinc-400 mt-1">Changing updates revision count &amp; logs history</p>
+                        </div>
                       </div>
 
                       <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="block text-[11px] font-bold text-amber-700 dark:text-amber-300 uppercase tracking-wider">
-                            Revised Commitment Date
-                          </label>
-                          <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-200 dark:bg-amber-800 text-amber-900 dark:text-amber-100">
-                            {editModalOar.commitment_date_revision_count ? `${editModalOar.commitment_date_revision_count} Rev(s)` : "Initial"}
-                          </span>
-                        </div>
+                        <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                          Revision Reason
+                        </label>
                         <input
-                          type="date"
-                          value={editRevisedCommitmentDate}
-                          onChange={(e) => setEditRevisedCommitmentDate(e.target.value)}
-                          className="w-full rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-bold text-amber-900 dark:text-amber-100 focus:border-amber-500 focus:outline-none"
+                          type="text"
+                          value={editRevisionReason}
+                          onChange={(e) => setEditRevisionReason(e.target.value)}
+                          placeholder="e.g. Delayed approval / Material shortage / Machine maintenance"
+                          className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
                         />
-                        <p className="text-[10px] text-zinc-400 mt-0.5">Changing this updates revision count & logs history.</p>
                       </div>
                     </div>
 
-                    <div>
-                      <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
-                        Revision Reason
-                      </label>
-                      <input
-                        type="text"
-                        value={editRevisionReason}
-                        onChange={(e) => setEditRevisionReason(e.target.value)}
-                        placeholder="e.g. Customer delayed approval / Material shortage / Machine maintenance"
-                        className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
-                      />
-                    </div>
+                    {/* Row 4: Delivery Date & Remarks (2 columns) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                          Customer Delivery Date
+                        </label>
+                        <input
+                          type="date"
+                          value={editDeliveryDate}
+                          onChange={(e) => setEditDeliveryDate(e.target.value)}
+                          className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
+                        />
+                      </div>
 
-                    <div>
-                      <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
-                        Delivery Date (Customer Required)
-                      </label>
-                      <input
-                        type="date"
-                        value={editDeliveryDate}
-                        onChange={(e) => setEditDeliveryDate(e.target.value)}
-                        className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
-                        OAR Status
-                      </label>
-                      <select
-                        value={editStatus}
-                        onChange={(e) => setEditStatus(e.target.value)}
-                        className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
-                      >
-                        <option value="accept">ACCEPT (Active Order)</option>
-                        <option value="hold">HOLD (Temporarily On Hold)</option>
-                        <option value="reject">REJECT (Order Rejected)</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
-                        Revision Reason / Remarks
-                      </label>
-                      <textarea
-                        rows={2}
-                        value={editRemarks}
-                        onChange={(e) => setEditRemarks(e.target.value)}
-                        placeholder="e.g. Rescheduled due to delayed customer confirmation / machine maintenance..."
-                        className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-2.5 text-xs text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
-                      />
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                          Remarks / Notes
+                        </label>
+                        <input
+                          type="text"
+                          value={editRemarks}
+                          onChange={(e) => setEditRemarks(e.target.value)}
+                          placeholder="Optional remarks or instructions..."
+                          className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
+                        />
+                      </div>
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between pt-3 border-t border-zinc-200 dark:border-zinc-800">
+                  {/* Sticky Footer */}
+                  <div className="px-6 py-3 border-t border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/60 flex items-center justify-between shrink-0">
                     <div>
                       {editModalOar && (!editModalOar.allocated_qty || editModalOar.allocated_qty === 0) && (
                         <button
@@ -1358,19 +1411,19 @@ export default function OarWoListPage() {
                         </button>
                       )}
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2.5">
                       <button
                         type="button"
                         onClick={() => setEditModalOar(null)}
                         disabled={editSubmitting}
-                        className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                        className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
                       >
                         Cancel
                       </button>
                       <button
                         type="submit"
                         disabled={editSubmitting}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-sm transition-colors cursor-pointer disabled:opacity-50"
+                        className="inline-flex items-center gap-1.5 px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
                       >
                         {editSubmitting ? (
                           <>
