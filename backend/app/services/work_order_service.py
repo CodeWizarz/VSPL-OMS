@@ -280,21 +280,31 @@ class WorkOrderService:
                 )
 
         if search:
-            s = f"%{search.strip()}%"
+            s_raw = search.strip()
+            # Normalize WO formats: "WO 18056", "wo18056", "18056", "WO-18056" -> match all variants
+            m = re.match(r'^(?:wo[\s\-]*)?(\d+)$', s_raw, re.IGNORECASE)
+            wo_variants = [f"%{s_raw}%"]
+            if m:
+                digits = m.group(1)
+                wo_variants.append(f"%WO-{digits}%")
+                wo_variants.append(f"%{digits}%")
+
+            wo_conds = [WorkOrder.wo_number.ilike(v) for v in set(wo_variants)]
+
             query = query.filter(
                 or_(
-                    WorkOrder.wo_number.ilike(s),
-                    Order.oar_number.ilike(s),
-                    Customer.customer_code.ilike(s),
-                    Customer.name.ilike(s),
-                    Part.part_number.ilike(s),
-                    Order.customer_po.ilike(s),
-                    cast(WorkOrder.created_at, String).ilike(s),
-                    cast(WorkOrder.release_date, String).ilike(s),
-                    cast(Order.delivery_date, String).ilike(s),
+                    *wo_conds,
+                    Order.oar_number.ilike(f"%{s_raw}%"),
+                    Customer.customer_code.ilike(f"%{s_raw}%"),
+                    Customer.name.ilike(f"%{s_raw}%"),
+                    Part.part_number.ilike(f"%{s_raw}%"),
+                    Order.customer_po.ilike(f"%{s_raw}%"),
+                    cast(WorkOrder.created_at, String).ilike(f"%{s_raw}%"),
+                    cast(WorkOrder.release_date, String).ilike(f"%{s_raw}%"),
+                    cast(Order.delivery_date, String).ilike(f"%{s_raw}%"),
                     WorkOrder.oar_allocations.any(
                         WorkOrderOARAllocation.order.has(
-                            or_(Order.oar_number.ilike(s), Order.customer_po.ilike(s))
+                            or_(Order.oar_number.ilike(f"%{s_raw}%"), Order.customer_po.ilike(f"%{s_raw}%"))
                         )
                     ),
                 )

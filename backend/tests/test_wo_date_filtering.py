@@ -144,7 +144,31 @@ def test_wo_date_filtering_and_sorting(client):
         wo_nums = [w["wo_number"] for w in wos]
         assert wo2_num in wo_nums
 
-        # 6. Test sorting by release_date_desc
+        # 6. Test WO number variant searching (e.g. WO-99999 vs WO 99999 vs 99999)
+        test_numeric_wo = f"WO-9{uuid.uuid4().int % 90000 + 10000}"
+        wo3 = WorkOrder(
+            wo_number=test_numeric_wo,
+            order_id=order1.id,
+            physical_wo_qty=25,
+            current_stage="F1",
+            status=WOStatus.PLANNED,
+            created_at=datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+        )
+        db.add(wo3)
+        db.commit()
+
+        raw_num = test_numeric_wo.split("-")[1]
+        # Test searching by plain digits
+        resp = client.get("/api/v1/work-orders", headers=headers, params={"search": raw_num})
+        assert resp.status_code == 200
+        assert any(w["wo_number"] == test_numeric_wo for w in resp.json())
+
+        # Test searching by "wo {digits}" with space
+        resp = client.get("/api/v1/work-orders", headers=headers, params={"search": f"wo {raw_num}"})
+        assert resp.status_code == 200
+        assert any(w["wo_number"] == test_numeric_wo for w in resp.json())
+
+        # 7. Test sorting by release_date_desc
         resp = client.get("/api/v1/work-orders", headers=headers, params={
             "sort_by": "release_date_desc"
         })

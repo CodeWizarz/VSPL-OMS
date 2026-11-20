@@ -105,6 +105,15 @@ function WOReleaseSearchContent() {
 
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState(searchParams.get("q") || "");
+  const [debouncedSearch, setDebouncedSearch] = useState(searchParams.get("q") || "");
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+    }, 250);
+    return () => clearTimeout(handler);
+  }, [searchQuery]);
+
   const [dateType, setDateType] = useState<"wo_date" | "release_date" | "delivery_date">(
     (searchParams.get("date_type") as any) || "wo_date"
   );
@@ -166,6 +175,12 @@ function WOReleaseSearchContent() {
       const todayStr = toIso(now);
       setFromDate(todayStr);
       setToDate(todayStr);
+    } else if (preset === "tomorrow") {
+      const tomorrow = new Date(now);
+      tomorrow.setDate(now.getDate() + 1);
+      const tStr = toIso(tomorrow);
+      setFromDate(tStr);
+      setToDate(tStr);
     } else if (preset === "yesterday") {
       const yesterday = new Date(now);
       yesterday.setDate(now.getDate() - 1);
@@ -196,18 +211,25 @@ function WOReleaseSearchContent() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
+      const q = debouncedSearch.trim();
+      const isSearching = Boolean(q);
+
       const params: any = {
         limit: 300,
         sort_by: sortBy,
         date_type: dateType,
       };
 
-      if (searchQuery.trim()) {
-        params.search = searchQuery.trim();
+      if (isSearching) {
+        params.search = q;
       }
 
-      if (fromDate) params.from_date = fromDate;
-      if (toDate) params.to_date = toDate;
+      // If user is searching (e.g. for a specific WO ID, OAR, Part, or PO),
+      // search across ALL DATES so the Work Order is found regardless of "Today", "Tomorrow", or date preset
+      if (!isSearching) {
+        if (fromDate) params.from_date = fromDate;
+        if (toDate) params.to_date = toDate;
+      }
 
       if (releaseStatusFilter === "unreleased") {
         params.release_filter = "unreleased";
@@ -225,7 +247,27 @@ function WOReleaseSearchContent() {
         params.casting_process = castingProcessFilter;
       }
 
-      const res = await getWorkOrders(params);
+      let res = await getWorkOrders(params);
+
+      // If user searched for a specific WO ID or keyword and nothing matched under active status/stage filters,
+      // fallback to searching across all statuses/stages so we don't show a false "not found"
+      if (
+        isSearching &&
+        (!res || res.length === 0) &&
+        (releaseStatusFilter !== "all" || (stageFilter && stageFilter !== "all") || (castingProcessFilter && castingProcessFilter !== "all"))
+      ) {
+        const fallbackParams = {
+          limit: 300,
+          sort_by: sortBy,
+          date_type: dateType,
+          search: q,
+        };
+        const fallbackRes = await getWorkOrders(fallbackParams);
+        if (Array.isArray(fallbackRes) && fallbackRes.length > 0) {
+          res = fallbackRes;
+        }
+      }
+
       setWorkOrders(Array.isArray(res) ? res : []);
     } catch (err) {
       console.error("Failed to load work orders for search:", err);
@@ -233,7 +275,7 @@ function WOReleaseSearchContent() {
     } finally {
       setLoading(false);
     }
-  }, [searchQuery, dateType, fromDate, toDate, releaseStatusFilter, stageFilter, castingProcessFilter, sortBy]);
+  }, [debouncedSearch, dateType, fromDate, toDate, releaseStatusFilter, stageFilter, castingProcessFilter, sortBy]);
 
   useEffect(() => {
     fetchData();
@@ -587,6 +629,7 @@ function WOReleaseSearchContent() {
               {[
                 { id: "all", label: "All Dates" },
                 { id: "today", label: "Today" },
+                { id: "tomorrow", label: "Tomorrow" },
                 { id: "yesterday", label: "Yesterday" },
                 { id: "last7", label: "Last 7 Days" },
                 { id: "last30", label: "Last 30 Days" },
@@ -766,6 +809,26 @@ function WOReleaseSearchContent() {
           </div>
         </div>
 
+        {/* Active Search Banner */}
+        {debouncedSearch.trim() && (
+          <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-900/50 text-xs text-sky-800 dark:text-sky-300 shadow-xs">
+            <div className="flex items-center gap-2">
+              <Search className="h-4 w-4 text-sky-600 dark:text-sky-400 shrink-0" />
+              <span>
+                Searching across <strong>all dates</strong> for: <strong className="font-mono font-bold text-sky-900 dark:text-sky-100">&ldquo;{debouncedSearch.trim()}&rdquo;</strong>
+                {workOrders.length > 0 && ` (${workOrders.length} ${workOrders.length === 1 ? "work order found" : "work orders found"})`}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="text-xs font-bold text-sky-700 dark:text-sky-300 hover:underline cursor-pointer shrink-0"
+            >
+              Clear Search
+            </button>
+          </div>
+        )}
+
         {/* Content Area */}
         {loading ? (
           <div className="py-20 text-center bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800">
@@ -773,29 +836,80 @@ function WOReleaseSearchContent() {
             <p className="mt-3 text-xs font-semibold text-zinc-500">Searching Work Orders date-wise...</p>
           </div>
         ) : workOrders.length === 0 ? (
-          <div className="py-20 text-center bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 space-y-3">
-            <div className="mx-auto w-12 h-12 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-zinc-400">
-              <Search className="h-6 w-6" />
+          debouncedSearch.trim() ? (
+            <div className="py-16 text-center bg-white dark:bg-zinc-900 rounded-2xl border border-rose-200 dark:border-rose-900/50 shadow-sm p-6 space-y-4 max-w-xl mx-auto">
+              <div className="mx-auto w-14 h-14 rounded-2xl bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-800/80 flex items-center justify-center text-rose-600 dark:text-rose-400 shadow-xs">
+                <AlertTriangle className="h-7 w-7" />
+              </div>
+              <div>
+                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 dark:bg-rose-900/50 text-rose-700 dark:text-rose-300 uppercase tracking-wide">
+                  WO ID Not Found
+                </span>
+                <h3 className="text-lg font-extrabold text-zinc-900 dark:text-zinc-100 mt-2">
+                  Work Order &ldquo;{debouncedSearch.trim()}&rdquo; not found
+                </h3>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 max-w-md mx-auto">
+                  No Work Order matching <span className="font-mono font-bold text-zinc-800 dark:text-zinc-200">&ldquo;{debouncedSearch.trim()}&rdquo;</span> was found in the system across all dates, stages, and release statuses.
+                </p>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 text-left text-xs text-zinc-600 dark:text-zinc-400 space-y-1.5">
+                <span className="font-bold text-zinc-800 dark:text-zinc-200 block text-[11px] uppercase tracking-wider">Troubleshooting Suggestions:</span>
+                <p>• Verify the Work Order number is typed correctly (e.g. <span className="font-mono font-semibold text-blue-600 dark:text-blue-400">WO-18056</span> or <span className="font-mono font-semibold text-blue-600 dark:text-blue-400">18056</span>).</p>
+                <p>• Check if the Work Order has been generated from Sales OAR in Planning.</p>
+                <p>• If an OAR was just created, visit <strong>Step 1: WO ID Generation</strong> to generate Work Orders for it.</p>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-center gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800 text-xs font-bold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 cursor-pointer transition"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span>Clear Search</span>
+                </button>
+                <Link
+                  href="/planning/wo-generation"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-xs cursor-pointer transition"
+                >
+                  <span>Go to WO Generation</span>
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </Link>
+                <Link
+                  href="/orders/list"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 cursor-pointer transition"
+                >
+                  <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" />
+                  <span>Check OAR &amp; WO List</span>
+                </Link>
+              </div>
             </div>
-            <h3 className="text-sm font-bold text-zinc-800 dark:text-zinc-200">No Work Orders Found</h3>
-            <p className="text-xs text-zinc-500 max-w-sm mx-auto">
-              No Work Orders match the selected date range ({fromDate || "any"} to {toDate || "any"}) and filters.
-            </p>
-            <button
-              type="button"
-              onClick={() => {
-                setSearchQuery("");
-                applyDatePreset("all");
-                setReleaseStatusFilter("all");
-                setStageFilter("all");
-                setCastingProcessFilter("all");
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 text-xs font-bold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              <span>Reset All Filters</span>
-            </button>
-          </div>
+          ) : (
+            <div className="py-20 text-center bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 space-y-3">
+              <div className="mx-auto w-12 h-12 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-zinc-400">
+                <Search className="h-6 w-6" />
+              </div>
+              <h3 className="text-sm font-bold text-zinc-800 dark:text-zinc-200">No Work Orders Found</h3>
+              <p className="text-xs text-zinc-500 max-w-sm mx-auto">
+                No Work Orders match the selected date range ({fromDate || "any"} to {toDate || "any"}) and filters.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery("");
+                  applyDatePreset("all");
+                  setReleaseStatusFilter("all");
+                  setStageFilter("all");
+                  setCastingProcessFilter("all");
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 text-xs font-bold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                <span>Reset All Filters</span>
+              </button>
+            </div>
+          )
         ) : viewMode === "grouped" ? (
           /* ============================================================== */
           /* GROUPED BY DATE VIEW                                           */
