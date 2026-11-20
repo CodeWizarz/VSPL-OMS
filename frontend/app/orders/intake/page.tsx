@@ -104,6 +104,7 @@ function OrderIntakeContent() {
   const [oarNumber, setOarNumber] = useState("");
   const [allPendingPOs, setAllPendingPOs] = useState<any[]>([]);
   const [pendingSearch, setPendingSearch] = useState("");
+  const [displayLimit, setDisplayLimit] = useState(50);
   const [allPendingSchedules, setAllPendingSchedules] = useState<ScheduleOut[]>([]);
   const [loadingPending, setLoadingPending] = useState(false);
 
@@ -635,7 +636,7 @@ function OrderIntakeContent() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                    {filteredPendingPOs.map((p, idx) => (
+                    {filteredPendingPOs.slice(0, displayLimit).map((p, idx) => (
                       <tr key={`${p.po_id}-${p.id}-${idx}`} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
                         <td className="p-2.5">
                           <span className="font-mono font-bold text-blue-600 block">{p.po_number}</span>
@@ -670,6 +671,29 @@ function OrderIntakeContent() {
                     ))}
                   </tbody>
                 </table>
+                {filteredPendingPOs.length > displayLimit && (
+                  <div className="flex items-center justify-between p-2.5 bg-zinc-50 dark:bg-zinc-800/60 border-t border-zinc-200 dark:border-zinc-800 text-xs text-zinc-500">
+                    <span>
+                      Showing {Math.min(displayLimit, filteredPendingPOs.length)} of {filteredPendingPOs.length} pending PO lines
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDisplayLimit((prev) => prev + 50)}
+                        className="px-2.5 py-0.5 font-semibold text-[11px] rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 shadow-sm"
+                      >
+                        Show More (+50)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDisplayLimit(filteredPendingPOs.length)}
+                        className="px-2.5 py-0.5 font-semibold text-[11px] rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-blue-600 dark:text-blue-400 shadow-sm"
+                      >
+                        Show All ({filteredPendingPOs.length})
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )
           ) : (
@@ -702,7 +726,7 @@ function OrderIntakeContent() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                    {filteredPendingSchedules.map((s, idx) => (
+                    {filteredPendingSchedules.slice(0, displayLimit).map((s, idx) => (
                       <tr key={`${s.id}-${idx}`} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
                         <td className="p-2.5">
                           <div className="flex items-center gap-1.5">
@@ -751,6 +775,29 @@ function OrderIntakeContent() {
                     ))}
                   </tbody>
                 </table>
+                {filteredPendingSchedules.length > displayLimit && (
+                  <div className="flex items-center justify-between p-2.5 bg-zinc-50 dark:bg-zinc-800/60 border-t border-zinc-200 dark:border-zinc-800 text-xs text-zinc-500">
+                    <span>
+                      Showing {Math.min(displayLimit, filteredPendingSchedules.length)} of {filteredPendingSchedules.length} pending schedules
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDisplayLimit((prev) => prev + 50)}
+                        className="px-2.5 py-0.5 font-semibold text-[11px] rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 shadow-sm"
+                      >
+                        Show More (+50)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDisplayLimit(filteredPendingSchedules.length)}
+                        className="px-2.5 py-0.5 font-semibold text-[11px] rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-blue-600 dark:text-blue-400 shadow-sm"
+                      >
+                        Show All ({filteredPendingSchedules.length})
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )
           )}

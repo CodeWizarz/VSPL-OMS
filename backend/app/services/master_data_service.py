@@ -543,30 +543,38 @@ class POMasterService:
 
     @staticmethod
     def list_pos(db: Session, customer_code: Optional[str] = None) -> List[POMasterOut]:
-        # Auto-link any unlinked legacy orders where customer_po and part_id match open PO lines
+        # Auto-link any unlinked legacy orders where customer_po and part_id match open PO lines (batch lookup)
         unlinked = (
             db.query(Order)
             .filter(Order.po_line_id.is_(None), Order.customer_po.isnot(None))
             .all()
         )
         if unlinked:
+            cand_lines = (
+                db.query(POLine.id, POMaster.customer_id, func.lower(POMaster.po_number), POLine.part_id)
+                .join(POMaster, POLine.po_id == POMaster.id)
+                .all()
+            )
+            cand_map = {}
+            for lid, cid, po_no, pid in cand_lines:
+                if po_no and cid and pid:
+                    key = (cid, po_no.strip().lower(), pid)
+                    if key not in cand_map:
+                        cand_map[key] = lid
+
+            modified = False
             for ord in unlinked:
-                cand_line = (
-                    db.query(POLine)
-                    .join(POMaster, POLine.po_id == POMaster.id)
-                    .filter(
-                        POMaster.customer_id == ord.customer_id,
-                        func.lower(POMaster.po_number) == func.lower(ord.customer_po.strip()),
-                        POLine.part_id == ord.part_id,
-                    )
-                    .first()
-                )
-                if cand_line:
-                    ord.po_line_id = cand_line.id
-            try:
-                db.flush()
-            except Exception:
-                pass
+                if ord.customer_id and ord.customer_po and ord.part_id:
+                    key = (ord.customer_id, ord.customer_po.strip().lower(), ord.part_id)
+                    matched_id = cand_map.get(key)
+                    if matched_id:
+                        ord.po_line_id = matched_id
+                        modified = True
+            if modified:
+                try:
+                    db.flush()
+                except Exception:
+                    pass
 
         query = db.query(POMaster).options(
             selectinload(POMaster.customer),
@@ -1087,7 +1095,7 @@ class POMasterService:
 
 class ScheduleMasterService:
     @staticmethod
-    def _schedule_out(s: ScheduleMaster, db: Optional[Session] = None) -> ScheduleOut:
+    def _schedule_out(s: ScheduleMaster, db: Optional[Session] = None, cpm_map: Optional[dict] = None) -> ScheduleOut:
         from app.models.order import OrderStatus
         from app.models.work_order import WOStatus
         active_orders = [
@@ -1110,7 +1118,9 @@ class ScheduleMasterService:
             t_val = round(s.scheduled_qty * u_price, 2)
 
         cust_pn = None
-        if db is not None:
+        if cpm_map is not None:
+            cust_pn = cpm_map.get((s.customer_id, s.part_id))
+        elif db is not None:
             m = db.query(CustomerPartMapping).filter(
                 CustomerPartMapping.customer_id == s.customer_id,
                 CustomerPartMapping.part_id == s.part_id,
@@ -1137,14 +1147,20 @@ class ScheduleMasterService:
 
     @staticmethod
     def list_schedules(db: Session, customer_code: Optional[str] = None) -> List[ScheduleOut]:
-        query = db.query(ScheduleMaster)
+        query = db.query(ScheduleMaster).options(
+            selectinload(ScheduleMaster.customer),
+            selectinload(ScheduleMaster.part),
+            selectinload(ScheduleMaster.orders).selectinload(Order.work_orders),
+        )
         if customer_code:
             customer = db.query(Customer).filter(Customer.customer_code == customer_code.strip().upper()).first()
             if not customer:
                 return []
             query = query.filter(ScheduleMaster.customer_id == customer.id)
         rows = query.order_by(ScheduleMaster.created_at.desc()).all()
-        return [ScheduleMasterService._schedule_out(s, db) for s in rows]
+        cpms = db.query(CustomerPartMapping.customer_id, CustomerPartMapping.part_id, CustomerPartMapping.customer_part_number).all()
+        cpm_map = {(c.customer_id, c.part_id): c.customer_part_number for c in cpms}
+        return [ScheduleMasterService._schedule_out(s, db=db, cpm_map=cpm_map) for s in rows]
 
     @staticmethod
     def create_schedule(db: Session, req: ScheduleCreate, current_user: Optional[User] = None) -> ScheduleOut:
