@@ -8,6 +8,8 @@ import {
   updatePOMaster,
   deletePOMaster,
   getParts,
+  createOrderIntake,
+  getNextSequences,
   AdminPart,
   MasterCustomer,
   POMasterOut,
@@ -29,6 +31,7 @@ import {
   Filter,
   Calendar,
   RotateCw,
+  RefreshCw,
 } from "lucide-react";
 
 interface LineDraft {
@@ -60,50 +63,79 @@ const WO_RELEASE_LABELS: Record<string, string> = {
 /** Truthful PO -> OAR -> WO traceability for one PO line. Never fabricates a record:
  * an empty `orders` array renders "OAR not created", and each OAR with no work orders
  * renders "WO not created" -- the real, current linkage state, nothing inferred. */
-function POLineTraceability({ orders }: { orders: POLineOrderSummary[] }) {
-  if (!orders || orders.length === 0) {
-    return (
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <span className="text-zinc-400 italic">OAR not created</span>
-        <a
-          href="/orders/intake"
-          className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300 hover:bg-blue-100 transition"
-        >
-          Generate OAR →
-        </a>
-      </div>
-    );
-  }
+function POLineTraceability({
+  orders,
+  availableQty = 0,
+  onOpenQuickOAR,
+}: {
+  orders: POLineOrderSummary[];
+  availableQty?: number;
+  onOpenQuickOAR?: () => void;
+}) {
+  const hasOrders = orders && orders.length > 0;
+
   return (
     <div className="space-y-1.5">
-      {orders.map((o) => {
-        const coverage = PO_COVERAGE_LABELS[o.po_coverage_status] || PO_COVERAGE_LABELS.UNCONFIRMED;
-        return (
-          <div key={o.oar_id} className="flex flex-col gap-0.5">
-            <div className="flex items-center gap-1.5">
-              <span className="font-mono font-medium">{o.oar_number || "(OAR)"}</span>
-              <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${coverage.className}`}>
-                {coverage.label}
-              </span>
-            </div>
-            {o.work_orders.length === 0 ? (
-              <span className="text-zinc-400 italic text-[11px] pl-1">WO not created</span>
-            ) : (
-              <div className="flex flex-wrap gap-1 pl-1">
-                {o.work_orders.map((wo) => (
-                  <span
-                    key={wo.wo_id}
-                    className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-[10px] font-mono"
-                    title={WO_RELEASE_LABELS[wo.release_status] || wo.release_status}
-                  >
-                    {wo.wo_number} - {WO_RELEASE_LABELS[wo.release_status] || wo.release_status}
+      {!hasOrders && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-zinc-400 italic text-[11px]">OAR not created</span>
+          {onOpenQuickOAR && (
+            <button
+              type="button"
+              onClick={onOpenQuickOAR}
+              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/50 transition cursor-pointer"
+            >
+              Generate OAR →
+            </button>
+          )}
+        </div>
+      )}
+
+      {hasOrders && (
+        <div className="space-y-1.5">
+          {orders.map((o) => {
+            const coverage = PO_COVERAGE_LABELS[o.po_coverage_status] || PO_COVERAGE_LABELS.UNCONFIRMED;
+            return (
+              <div key={o.oar_id} className="flex flex-col gap-0.5">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono font-medium">{o.oar_number || "(OAR)"}</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${coverage.className}`}>
+                    {coverage.label}
                   </span>
-                ))}
+                </div>
+                {o.work_orders.length === 0 ? (
+                  <span className="text-zinc-400 italic text-[11px] pl-1">WO not created</span>
+                ) : (
+                  <div className="flex flex-wrap gap-1 pl-1">
+                    {o.work_orders.map((wo) => (
+                      <span
+                        key={wo.wo_id}
+                        className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-[10px] font-mono"
+                        title={WO_RELEASE_LABELS[wo.release_status] || wo.release_status}
+                      >
+                        {wo.wo_number} - {WO_RELEASE_LABELS[wo.release_status] || wo.release_status}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        );
-      })}
+            );
+          })}
+
+          {availableQty > 0 && onOpenQuickOAR && (
+            <div className="pt-0.5">
+              <button
+                type="button"
+                onClick={onOpenQuickOAR}
+                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300 hover:bg-amber-100 transition cursor-pointer"
+                title={`Generate OAR for remaining ${availableQty} pcs`}
+              >
+                + OAR for remaining ({availableQty}) →
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -255,8 +287,85 @@ export default function POMasterPage() {
     return acc;
   }, {});
 
-  async function loadAll() {
-    setLoading(true);
+  // Quick OAR Generation modal state
+  const [quickOARData, setQuickOARData] = useState<{
+    po: POMasterOut;
+    line: POLineOut;
+  } | null>(null);
+  const [quickOARQty, setQuickOARQty] = useState<number>(0);
+  const [quickOARDeliveryDate, setQuickOARDeliveryDate] = useState("");
+  const [quickOARCommitmentDate, setQuickOARCommitmentDate] = useState("");
+  const [quickOARNumber, setQuickOARNumber] = useState("");
+  const [quickOARCreateWOs, setQuickOARCreateWOs] = useState(false);
+  const [quickOARSaving, setQuickOARSaving] = useState(false);
+  const [quickOARError, setQuickOARError] = useState("");
+  const [quickOARSuccess, setQuickOARSuccess] = useState("");
+
+  function openQuickOAR(po: POMasterOut, line: POLineOut) {
+    const qty = line.available_qty > 0 ? line.available_qty : line.po_qty;
+    setQuickOARData({ po, line });
+    setQuickOARQty(qty);
+    setQuickOARDeliveryDate(line.required_date || po.validity_date || "");
+    setQuickOARCommitmentDate(line.required_date || po.validity_date || "");
+    setQuickOARCreateWOs(false);
+    setQuickOARError("");
+    setQuickOARSuccess("");
+    getNextSequences()
+      .then((seq) => setQuickOARNumber(seq.next_oar_number))
+      .catch(() => setQuickOARNumber(""));
+  }
+
+  async function handleQuickGenerateOAR(e: React.FormEvent) {
+    e.preventDefault();
+    if (!quickOARData) return;
+    const { po, line } = quickOARData;
+    const qty = Number(quickOARQty);
+    if (!qty || qty <= 0) {
+      setQuickOARError("OAR Quantity must be greater than 0.");
+      return;
+    }
+    if (line.available_qty > 0 && qty > line.available_qty) {
+      setQuickOARError(`Quantity cannot exceed available quantity (${line.available_qty} pcs).`);
+      return;
+    }
+
+    setQuickOARSaving(true);
+    setQuickOARError("");
+    try {
+      const res = await createOrderIntake({
+        customer_code: po.customer_code,
+        customer_name: po.customer_name || po.customer_code,
+        customer_po: po.po_number,
+        part_number: line.part_number,
+        customer_part_number: line.customer_part_number || undefined,
+        po_quantity: qty,
+        max_batch_size: qty,
+        delivery_date: quickOARDeliveryDate || undefined,
+        commitment_date: quickOARCommitmentDate || undefined,
+        order_type: "PO",
+        source_type: "po",
+        po_line_id: line.id,
+        oar_number: quickOARNumber.trim() || undefined,
+        create_wos: quickOARCreateWOs,
+      });
+
+      setQuickOARSuccess(`OAR ${res.oar_number} generated successfully!`);
+      await loadAll(false);
+      setTimeout(() => {
+        setQuickOARData(null);
+        setQuickOARSuccess("");
+      }, 1200);
+    } catch (err: any) {
+      setQuickOARError(err?.response?.data?.detail || err?.message || "Could not generate OAR.");
+    } finally {
+      setQuickOARSaving(false);
+    }
+  }
+
+  async function loadAll(showSpinner = true) {
+    if (showSpinner) {
+      setLoading(true);
+    }
     setListError("");
     try {
       const [c, p, pts] = await Promise.all([
@@ -269,14 +378,35 @@ export default function POMasterPage() {
       setMasterParts(pts);
       if (!customerCode && c.length) setCustomerCode(c[0].customer_code);
     } catch (err: any) {
-      setListError(err?.response?.data?.detail || "Could not load PO data.");
+      if (showSpinner) {
+        setListError(err?.response?.data?.detail || "Could not load PO data.");
+      }
     } finally {
-      setLoading(false);
+      if (showSpinner) {
+        setLoading(false);
+      }
     }
   }
 
   useEffect(() => {
-    loadAll();
+    loadAll(true);
+
+    const onFocus = () => {
+      loadAll(false);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        loadAll(false);
+      }
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -711,20 +841,31 @@ export default function POMasterPage() {
                 </div>
               </div>
 
-              {/* Quick Reset Filters button if any active */}
-              {(filterCustomerCode || searchQuery || statusFilter) && (
+              <div className="flex items-center gap-2 self-start sm:self-auto">
                 <button
                   type="button"
-                  onClick={() => {
-                    setFilterCustomerCode("");
-                    setSearchQuery("");
-                    setStatusFilter("");
-                  }}
-                  className="flex items-center gap-1 self-start sm:self-auto rounded-lg bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 px-2.5 py-1 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300 transition-colors"
+                  onClick={() => loadAll(true)}
+                  disabled={loading}
+                  className="flex items-center gap-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-700 px-2.5 py-1 text-[11px] font-semibold text-zinc-700 dark:text-zinc-200 shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+                  title="Reload POs and refresh live OAR/WO linkages"
                 >
-                  <X className="h-3 w-3" /> Clear Filters
+                  <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin text-blue-600" : "text-zinc-500"}`} />
+                  <span>Refresh</span>
                 </button>
-              )}
+                {(filterCustomerCode || searchQuery || statusFilter) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilterCustomerCode("");
+                      setSearchQuery("");
+                      setStatusFilter("");
+                    }}
+                    className="flex items-center gap-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 px-2.5 py-1 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300 transition-colors cursor-pointer"
+                  >
+                    <X className="h-3 w-3" /> Clear Filters
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Filter and Search Controls Bar */}
@@ -968,7 +1109,11 @@ export default function POMasterPage() {
                                 </td>
                                 <td className="py-1.5 text-zinc-500">{l.required_date || "-"}</td>
                                 <td className="py-1.5">
-                                  <POLineTraceability orders={l.orders} />
+                                  <POLineTraceability
+                                    orders={l.orders}
+                                    availableQty={l.available_qty}
+                                    onOpenQuickOAR={() => openQuickOAR(po, l)}
+                                  />
                                 </td>
                               </tr>
                             );
@@ -1391,6 +1536,188 @@ export default function POMasterPage() {
             </div>
           </div>
         )}
+        {/* Quick Generate OAR Modal */}
+        {quickOARData && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+            <div className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-2xl space-y-4">
+              <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
+                    <FileSpreadsheet className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-100">
+                      Generate Sales OAR
+                    </h3>
+                    <p className="text-xs text-zinc-500 font-mono">
+                      PO: {quickOARData.po.po_number} • {quickOARData.po.customer_name || quickOARData.po.customer_code}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setQuickOARData(null)}
+                  className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Line Context Summary */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200/70 dark:border-zinc-700/60 text-xs">
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-zinc-400 block">Customer Part</span>
+                  <span className="font-mono font-bold text-zinc-900 dark:text-zinc-100">
+                    {quickOARData.line.customer_part_number || "—"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-zinc-400 block">Internal Code</span>
+                  <span className="font-mono font-bold text-blue-600 dark:text-blue-400">
+                    {quickOARData.line.part_number}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-zinc-400 block">PO Total Qty</span>
+                  <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                    {quickOARData.line.po_qty} pcs
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-zinc-400 block">Available Qty</span>
+                  <span className="font-bold text-emerald-600 dark:text-emerald-400">
+                    {quickOARData.line.available_qty} pcs
+                  </span>
+                </div>
+              </div>
+
+              {quickOARError && (
+                <div className="flex items-start gap-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 p-3 text-xs font-medium text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-900/50">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{quickOARError}</span>
+                </div>
+              )}
+
+              {quickOARSuccess && (
+                <div className="flex items-start gap-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 p-3 text-xs font-medium text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-900/50">
+                  <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{quickOARSuccess}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleQuickGenerateOAR} className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[11px] font-bold text-zinc-700 dark:text-zinc-300 block mb-1">
+                      OAR Reference Number <span className="text-zinc-400 font-normal">(Auto or Manual)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={quickOARNumber}
+                      onChange={(e) => setQuickOARNumber(e.target.value)}
+                      placeholder="e.g. OAR-8800"
+                      className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold text-zinc-700 dark:text-zinc-300 block mb-1">
+                      OAR Quantity (pcs) *
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={quickOARData.line.available_qty > 0 ? quickOARData.line.available_qty : undefined}
+                      value={quickOARQty || ""}
+                      onChange={(e) => setQuickOARQty(Number(e.target.value))}
+                      required
+                      className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2 text-xs font-bold text-zinc-900 dark:text-zinc-100"
+                    />
+                    <span className="text-[10px] text-zinc-400 mt-0.5 block">
+                      Max available for this PO line: {quickOARData.line.available_qty} pcs
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[11px] font-bold text-zinc-700 dark:text-zinc-300 block mb-1">
+                      Delivery Date (Customer Expected)
+                    </label>
+                    <input
+                      type="date"
+                      value={quickOARDeliveryDate}
+                      onChange={(e) => setQuickOARDeliveryDate(e.target.value)}
+                      className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-900 dark:text-zinc-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold text-zinc-700 dark:text-zinc-300 block mb-1">
+                      Commitment Date (Factory Promised)
+                    </label>
+                    <input
+                      type="date"
+                      value={quickOARCommitmentDate}
+                      onChange={(e) => setQuickOARCommitmentDate(e.target.value)}
+                      className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-900 dark:text-zinc-100"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="checkbox"
+                    id="quick-create-wos"
+                    checked={quickOARCreateWOs}
+                    onChange={(e) => setQuickOARCreateWOs(e.target.checked)}
+                    className="h-4 w-4 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                  />
+                  <label htmlFor="quick-create-wos" className="text-xs text-zinc-700 dark:text-zinc-300 cursor-pointer">
+                    Also initialize initial Work Order(s) immediately at Stage F1
+                  </label>
+                </div>
+
+                <div className="border-t border-zinc-100 dark:border-zinc-800 pt-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+                  <a
+                    href={`/orders/intake?po_line_id=${quickOARData.line.id}&customer_code=${encodeURIComponent(quickOARData.po.customer_code)}&po_number=${encodeURIComponent(quickOARData.po.po_number)}`}
+                    className="text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-medium"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open full Order Intake page in new tab ↗
+                  </a>
+                  <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setQuickOARData(null)}
+                      disabled={quickOARSaving}
+                      className="rounded-xl border border-zinc-200 dark:border-zinc-700 px-4 py-2 text-xs font-bold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={quickOARSaving || !quickOARQty || quickOARQty <= 0}
+                      className="rounded-xl bg-blue-600 hover:bg-blue-500 px-5 py-2 text-xs font-bold text-white shadow-sm flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                    >
+                      {quickOARSaving ? (
+                        <>
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                          <span>Generating OAR...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          <span>Generate OAR ({quickOARQty || 0} pcs)</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
         {/* Customer Parts Suggestion Datalists */}
         <datalist id="new-po-parts">
           {masterParts

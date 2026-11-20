@@ -8,8 +8,9 @@ function extractErrorMessage(err: any, fallback: string): string {
   return err?.message || fallback;
 }
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   FilePlus,
   CheckCircle2,
@@ -50,6 +51,26 @@ const PRESET_PARTS = [
 ];
 
 export default function OrderIntakePage() {
+  return (
+    <Suspense
+      fallback={
+        <AppShell>
+          <div className="max-w-3xl mx-auto py-12 text-center text-xs text-zinc-500 font-mono">
+            Loading Order Intake...
+          </div>
+        </AppShell>
+      }
+    >
+      <OrderIntakeContent />
+    </Suspense>
+  );
+}
+
+function OrderIntakeContent() {
+  const searchParams = useSearchParams();
+  const paramPoLineId = searchParams.get("po_line_id") || "";
+  const autoSelectedRef = useRef(false);
+
   const [masterCustomers, setMasterCustomers] = useState<MasterCustomer[]>([]);
   const customerOptions = masterCustomers.length
     ? masterCustomers.map((c) => ({ code: c.customer_code, name: c.name }))
@@ -253,6 +274,17 @@ export default function OrderIntakePage() {
 
     document.getElementById("oar-entry-form")?.scrollIntoView({ behavior: "smooth" });
   };
+
+  useEffect(() => {
+    if (paramPoLineId && allPendingPOs.length > 0 && !autoSelectedRef.current) {
+      const match = allPendingPOs.find((p) => String(p.id) === String(paramPoLineId));
+      if (match) {
+        autoSelectedRef.current = true;
+        handleSelectPendingPO(match);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paramPoLineId, allPendingPOs]);
 
   const handleSelectPendingSchedule = (s: ScheduleOut) => {
     isSelectingPending.current = true;
@@ -784,7 +816,7 @@ export default function OrderIntakePage() {
               </div>
             )}
 
-            <div className="pt-1 flex items-center gap-4 text-xs font-bold">
+            <div className="pt-1 flex items-center gap-4 text-xs font-bold flex-wrap">
               <Link
                 href="/orders/list"
                 className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 hover:underline"
@@ -798,6 +830,12 @@ export default function OrderIntakePage() {
               >
                 <span>Open Work Order Generation</span>
                 <ArrowRight className="h-3 w-3" />
+              </Link>
+              <Link
+                href="/masters/pos"
+                className="inline-flex items-center gap-1.5 text-zinc-700 dark:text-zinc-300 hover:underline"
+              >
+                <span>← Return to PO Master</span>
               </Link>
             </div>
           </div>
