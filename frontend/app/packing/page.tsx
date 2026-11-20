@@ -14,16 +14,16 @@ import {
 import { AppShell } from "@/app/components/layout/AppShell";
 import { Badge, getRAGVariant } from "@/app/components/ui/Badge";
 import { Modal } from "@/app/components/ui/Modal";
-import { getPackingQueue, updatePacking } from "@/lib/api";
+import { getPackingQueue, updatePacking, PackingQueueItem } from "@/lib/api";
 
 export default function PackingPage() {
-  const [queue, setQueue] = useState<any[]>([]);
+  const [queue, setQueue] = useState<PackingQueueItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
 
   // Pack Action Modal
-  const [selectedWO, setSelectedWO] = useState<any>(null);
+  const [selectedWO, setSelectedWO] = useState<PackingQueueItem | null>(null);
   const [packQty, setPackQty] = useState<number | "">("");
   const [boxCount, setBoxCount] = useState(1);
   const [packageType, setPackageType] = useState("Standard Wooden Box");
@@ -96,13 +96,18 @@ export default function PackingPage() {
     }
   };
 
-  const filteredQueue = queue.filter(
-    (item) =>
-      !search ||
-      item.wo_number.toLowerCase().includes(search.toLowerCase()) ||
-      item.part_number.toLowerCase().includes(search.toLowerCase()) ||
-      item.customer_name.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredQueue = queue.filter((item) => {
+    if (!search.trim()) return true;
+    const s = search.toLowerCase().trim();
+    return (
+      item.wo_number?.toLowerCase().includes(s) ||
+      item.customer_part_number?.toLowerCase().includes(s) ||
+      item.part_number?.toLowerCase().includes(s) ||
+      item.customer_name?.toLowerCase().includes(s) ||
+      item.oar_number?.toLowerCase().includes(s) ||
+      item.grade?.toLowerCase().includes(s)
+    );
+  });
 
   return (
     <AppShell>
@@ -145,15 +150,20 @@ export default function PackingPage() {
 
         {/* Search */}
         <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 shadow-sm">
-          <div className="relative">
-            <Search className="absolute left-3.5 top-3 h-4 w-4 text-zinc-400" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search Packing Queue by WO Number, Part Number, or Customer..."
-              className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 pl-10 pr-4 py-2 text-xs text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:border-blue-500 focus:outline-none"
-            />
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="relative flex-1">
+              <Search className="absolute left-3.5 top-3 h-4 w-4 text-zinc-400" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search Packing Queue by WO Number, Customer Part #, Part Number, Customer..."
+                className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 pl-10 pr-4 py-2 text-xs text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="text-xs text-zinc-500">
+              Showing <span className="font-bold text-zinc-900 dark:text-zinc-100">{filteredQueue.length}</span> of {queue.length} work orders
+            </div>
           </div>
         </div>
 
@@ -171,6 +181,7 @@ export default function PackingPage() {
                 <tr>
                   <th className="py-3 px-3">Work Order</th>
                   <th className="py-3 px-3">Customer</th>
+                  <th className="py-3 px-3">Customer Part #</th>
                   <th className="py-3 px-3">Part Details</th>
                   <th className="py-3 px-3 text-right">FI Approved</th>
                   <th className="py-3 px-3 text-right">Packed / Done</th>
@@ -182,52 +193,65 @@ export default function PackingPage() {
               </thead>
 
               <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800/60 font-medium">
-                {filteredQueue.map((item) => (
-                  <tr key={item.id} className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/40">
-                    <td className="py-3 px-3 font-mono font-bold">
-                      <Link
-                        href={`/production/tracking?wo=${item.wo_number}`}
-                        className="text-blue-600 dark:text-blue-400 hover:underline"
-                      >
-                        {item.wo_number}
-                      </Link>
-                    </td>
-                    <td className="py-3 px-3 text-zinc-700 dark:text-zinc-300 truncate max-w-[150px]">
-                      {item.customer_name}
-                    </td>
-                    <td className="py-3 px-3">
-                      <span className="font-semibold text-zinc-900 dark:text-zinc-100">{item.part_number}</span>
-                      <span className="text-[10px] text-zinc-400 block">{item.grade || "Standard Bronze"}</span>
-                    </td>
-                    <td className="py-3 px-3 text-right font-bold text-zinc-800 dark:text-zinc-200 font-mono">
-                      {item.fi_approved_qty} pcs
-                    </td>
-                    <td className="py-3 px-3 text-right font-bold text-zinc-600 dark:text-zinc-400 font-mono">
-                      {item.packed_qty} pcs
-                    </td>
-                    <td className="py-3 px-3 text-right font-mono font-extrabold text-purple-600 dark:text-purple-400">
-                      {item.pending_qty} pcs
-                    </td>
-                    <td className="py-3 px-3 text-right font-mono font-extrabold text-emerald-600 dark:text-emerald-400">
-                      {item.ready_for_dispatch_qty} pcs
-                    </td>
-                    <td className="py-3 px-3">
-                      <Badge variant={getRAGVariant(item.status)} size="sm">
-                        {item.status}
-                      </Badge>
-                    </td>
-                    <td className="py-3 px-3 text-center">
-                      <button
-                        type="button"
-                        onClick={() => openPackModal(item)}
-                        disabled={item.pending_qty <= 0}
-                        className="rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-purple-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                      >
-                        Pack Parts
-                      </button>
+                {filteredQueue.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="py-8 text-center text-zinc-400 text-xs">
+                      {queue.length === 0
+                        ? "No Work Orders currently in the Packing queue."
+                        : "No matching Work Orders found for your search."}
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  filteredQueue.map((item) => (
+                    <tr key={item.id} className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/40">
+                      <td className="py-3 px-3 font-mono font-bold">
+                        <Link
+                          href={`/production/tracking?wo=${item.wo_number}`}
+                          className="text-blue-600 dark:text-blue-400 hover:underline"
+                        >
+                          {item.wo_number}
+                        </Link>
+                      </td>
+                      <td className="py-3 px-3 text-zinc-700 dark:text-zinc-300 truncate max-w-[150px]">
+                        {item.customer_name}
+                      </td>
+                      <td className="py-3 px-3 font-mono font-bold text-zinc-800 dark:text-zinc-200">
+                        {item.customer_part_number || "-"}
+                      </td>
+                      <td className="py-3 px-3">
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100">{item.part_number}</span>
+                        <span className="text-[10px] text-zinc-400 block">{item.grade || "Standard Bronze"}</span>
+                      </td>
+                      <td className="py-3 px-3 text-right font-bold text-zinc-800 dark:text-zinc-200 font-mono">
+                        {item.fi_approved_qty} pcs
+                      </td>
+                      <td className="py-3 px-3 text-right font-bold text-zinc-600 dark:text-zinc-400 font-mono">
+                        {item.packed_qty} pcs
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono font-extrabold text-purple-600 dark:text-purple-400">
+                        {item.pending_qty} pcs
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono font-extrabold text-emerald-600 dark:text-emerald-400">
+                        {item.ready_for_dispatch_qty} pcs
+                      </td>
+                      <td className="py-3 px-3">
+                        <Badge variant={getRAGVariant(item.status)} size="sm">
+                          {item.status}
+                        </Badge>
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        <button
+                          type="button"
+                          onClick={() => openPackModal(item)}
+                          disabled={item.pending_qty <= 0}
+                          className="rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-purple-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        >
+                          Pack Parts
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -238,12 +262,19 @@ export default function PackingPage() {
           isOpen={!!selectedWO}
           onClose={() => setSelectedWO(null)}
           title={`Pack Parts & Complete BSR — ${selectedWO?.wo_number}`}
-          subtitle={`FI Approved: ${selectedWO?.fi_approved_qty} pcs | Pending Packing: ${selectedWO?.pending_qty} pcs`}
+          subtitle={`Part: ${selectedWO?.part_number}${selectedWO?.customer_part_number ? ` (Cust Part: ${selectedWO.customer_part_number})` : ""} | FI Approved: ${selectedWO?.fi_approved_qty} pcs | Pending Packing: ${selectedWO?.pending_qty} pcs`}
         >
           <form onSubmit={handlePackSubmit} className="space-y-4">
             {modalError && (
               <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs font-semibold text-rose-500">
                 {modalError}
+              </div>
+            )}
+
+            {selectedWO?.customer_part_number && (
+              <div className="flex items-center justify-between p-2.5 rounded-xl bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-900/40 text-xs">
+                <span className="text-zinc-500 dark:text-zinc-400 font-medium">Customer Part Number:</span>
+                <span className="font-mono font-bold text-purple-700 dark:text-purple-300">{selectedWO.customer_part_number}</span>
               </div>
             )}
 

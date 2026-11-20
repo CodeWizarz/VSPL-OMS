@@ -11,6 +11,7 @@ class PackingQueueItem(BaseModel):
     oar_number: Optional[str] = None
     customer_name: str
     part_number: str
+    customer_part_number: Optional[str] = None
     part_name: Optional[str] = None
     grade: Optional[str] = None
     order_qty: int

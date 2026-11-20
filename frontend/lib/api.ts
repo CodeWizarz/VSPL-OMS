@@ -550,7 +550,29 @@ export async function getPlantReconciliation() {
 }
 
 // Packing / BSR
-export async function getPackingQueue() {
+export interface PackingQueueItem {
+  id: string;
+  work_order_id: string;
+  wo_number: string;
+  oar_number?: string | null;
+  customer_name: string;
+  part_number: string;
+  customer_part_number?: string | null;
+  part_name?: string | null;
+  grade?: string | null;
+  order_qty: number;
+  fi_approved_qty: number;
+  available_for_packing: number;
+  received_qty: number;
+  packed_qty: number;
+  pending_qty: number;
+  ready_for_dispatch_qty: number;
+  dispatched_qty: number;
+  status: string;
+  updated_at: string;
+}
+
+export async function getPackingQueue(): Promise<PackingQueueItem[]> {
   const { data } = await api.get("/api/v1/packing/queue");
   return data;
 }

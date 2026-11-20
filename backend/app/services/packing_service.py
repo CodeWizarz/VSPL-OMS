@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from app.models.work_order import WorkOrder, WOStatus
 from app.models.production_movement import StageWIP
 from app.models.packing import PackingRecord, PackingTransaction
+from app.models.customer_part_mapping import CustomerPartMapping
 from app.models.audit import AuditLog
 from app.models.user import User
 from app.schemas.packing import PackingQueueItem, PackingUpdateRequest, PackingUpdateResponse
@@ -31,6 +32,9 @@ class PackingService:
     @staticmethod
     def get_packing_queue(db: Session) -> List[PackingQueueItem]:
         records = db.query(PackingRecord).join(WorkOrder).all()
+        cpms = db.query(CustomerPartMapping.customer_id, CustomerPartMapping.part_id, CustomerPartMapping.customer_part_number).all()
+        cpm_map = {(c.customer_id, c.part_id): c.customer_part_number for c in cpms}
+
         results = []
         for r in records:
             wo = r.work_order
@@ -42,6 +46,16 @@ class PackingService:
             order_qty = wo.physical_wo_qty if wo else 0
             oar_number = order.oar_number if order else None
 
+            cust_part_no = (
+                order.customer_part_number
+                if (order and order.customer_part_number)
+                else (order.po_line.customer_part_number if (order and order.po_line and order.po_line.customer_part_number) else None)
+            )
+            if not cust_part_no and order and order.customer_id and order.part_id:
+                cust_part_no = cpm_map.get((order.customer_id, order.part_id))
+            if not cust_part_no and order and order.part:
+                cust_part_no = order.part.description or None
+
             results.append(PackingQueueItem(
                 id=str(r.id),
                 work_order_id=str(wo.id),
@@ -49,6 +63,7 @@ class PackingService:
                 oar_number=oar_number,
                 customer_name=customer_name,
                 part_number=part_number,
+                customer_part_number=cust_part_no,
                 part_name=part_name,
                 grade=grade,
                 order_qty=order_qty,
