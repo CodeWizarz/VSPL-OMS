@@ -306,7 +306,7 @@ class OMSIntegrationService:
 
         # 3. Projected Final Good & Shortfall Calculation
         good = wo.physical_wo_qty
-        prod_routes = [r for r in routes if r.stage.upper() not in ("DISPATCH",)]
+        prod_routes = [r for r in routes if r.stage.upper() not in ("DISPATCH", "PACKING", "BSR", "PACKING / BSR", "PACKING/BSR")]
         proj = good
         last_ok_stage = None
         for pr_route in prod_routes:
@@ -334,10 +334,16 @@ class OMSIntegrationService:
             lp_w = wip_map.get(last_prod)
             prod_done = lp_w is not None and (lp_w.ok_qty > 0 or lp_w.rejected_qty > 0)
 
+        cur_upper = (cur or "").upper()
         if (pr and pr.dispatched_qty > 0 and pr.ready_for_dispatch_qty == 0 and pr.pending_qty == 0) or str(wo.status).lower() in ("dispatched", "wostatus.dispatched"):
             wo.status = WOStatus.DISPATCHED
             wo.current_stage = "Completed"
-        elif prod_done or cur in ("DISPATCH", "Completed"):
+        elif cur_upper in ("DISPATCH", "COMPLETED"):
+            wo.status = WOStatus.READY
+        elif cur_upper in ("PACKING", "BSR", "PACKING / BSR", "PACKING/BSR"):
+            # Material has finished manufacturing & QA and is now in post-production packaging
+            wo.status = WOStatus.READY
+        elif prod_done:
             wo.status = WOStatus.READY
         else:
             wo.status = WOStatus.IN_PRODUCTION

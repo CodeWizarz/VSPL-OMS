@@ -543,45 +543,10 @@ class POMasterService:
 
     @staticmethod
     def list_pos(db: Session, customer_code: Optional[str] = None) -> List[POMasterOut]:
-        # Auto-link any unlinked legacy orders where customer_po and part_id match open PO lines (batch lookup)
-        unlinked = (
-            db.query(Order)
-            .filter(Order.po_line_id.is_(None), Order.customer_po.isnot(None))
-            .all()
-        )
-        if unlinked:
-            cand_lines = (
-                db.query(POLine.id, POMaster.customer_id, func.lower(POMaster.po_number), POLine.part_id)
-                .join(POMaster, POLine.po_id == POMaster.id)
-                .all()
-            )
-            cand_map = {}
-            for lid, cid, po_no, pid in cand_lines:
-                if po_no and cid and pid:
-                    key = (cid, po_no.strip().lower(), pid)
-                    if key not in cand_map:
-                        cand_map[key] = lid
-
-            modified = False
-            for ord in unlinked:
-                if ord.customer_id and ord.customer_po and ord.part_id:
-                    key = (ord.customer_id, ord.customer_po.strip().lower(), ord.part_id)
-                    matched_id = cand_map.get(key)
-                    if matched_id:
-                        ord.po_line_id = matched_id
-                        modified = True
-            if modified:
-                try:
-                    db.flush()
-                except Exception:
-                    pass
-
         query = db.query(POMaster).options(
             selectinload(POMaster.customer),
             selectinload(POMaster.lines).selectinload(POLine.part),
             selectinload(POMaster.lines).selectinload(POLine.orders).selectinload(Order.work_orders),
-            selectinload(POMaster.lines).selectinload(POLine.orders).selectinload(Order.customer),
-            selectinload(POMaster.lines).selectinload(POLine.orders).selectinload(Order.po_line).selectinload(POLine.po),
         )
         if customer_code:
             customer = db.query(Customer).filter(Customer.customer_code == customer_code.strip().upper()).first()

@@ -6,6 +6,7 @@ import {
   Factory,
   Building2,
   Truck,
+  Package,
   Search,
   CheckCircle2,
   AlertTriangle,
@@ -722,14 +723,22 @@ export function ProductionEntryContent() {
                           (w.vendor_dispatch_stage === activeGate ||
                             w.vendor_target_return_stage === activeGate))
                     )
-                    .map((w) => (
-                      <option key={w.wo_number} value={w.wo_number}>
-                        {w.wo_number} — {w.current_stage} ({w.customer_code})
-                        {w.is_at_vendor
-                          ? ` [VEND: ${w.vendor_name || "Vendor"}]`
-                          : ""}
-                      </option>
-                    ))}
+                    .map((w) => {
+                      const isPacking = w.current_stage?.toUpperCase().includes("PACK") || w.current_stage?.toUpperCase().includes("BSR");
+                      const isDispatch = w.current_stage?.toUpperCase().includes("DISPATCH");
+                      return (
+                        <option key={w.wo_number} value={w.wo_number}>
+                          {w.wo_number} — {w.current_stage} ({w.customer_code})
+                          {w.is_at_vendor
+                            ? ` [VEND: ${w.vendor_name || "Vendor"}]`
+                            : isPacking
+                            ? " [IN PACKING]"
+                            : isDispatch
+                            ? " [READY TO SHIP]"
+                            : ""}
+                        </option>
+                      );
+                    })}
                 </select>
               )}
             </div>
@@ -830,7 +839,15 @@ export function ProductionEntryContent() {
                     <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
                     <span className="font-mono font-extrabold text-emerald-600 text-sm">{woData.current_stage}</span>
                   </div>
-                  <p className="text-[10px] text-zinc-500">{woData.status.toUpperCase()}</p>
+                  <p className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                    {woData.current_stage?.toUpperCase().includes("PACK") || woData.current_stage?.toUpperCase().includes("BSR")
+                      ? "IN PACKING / BSR"
+                      : woData.current_stage?.toUpperCase().includes("DISPATCH")
+                      ? "READY FOR DISPATCH"
+                      : woData.status?.toUpperCase() === "IN_PRODUCTION"
+                      ? "IN PRODUCTION"
+                      : (woData.status || "").toUpperCase()}
+                  </p>
                 </div>
               </div>
 
@@ -980,7 +997,63 @@ export function ProductionEntryContent() {
 
               {/* Step 6: Production Input Form OR Completed State */}
               <div className="lg:col-span-2 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm">
-                {activeStage.is_gate_locked ? (
+                {selectedStage?.toUpperCase().includes("PACK") || selectedStage?.toUpperCase().includes("BSR") ? (
+                  <div className="py-12 px-6 flex flex-col items-center justify-center text-center space-y-4">
+                    <div className="w-16 h-16 rounded-2xl bg-blue-100 dark:bg-blue-950/40 flex items-center justify-center text-blue-600 dark:text-blue-400 shadow-inner">
+                      <Package className="h-8 w-8" />
+                    </div>
+                    <div>
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-300">
+                        Post-Production Warehouse Stage
+                      </span>
+                      <h3 className="text-xl font-extrabold text-zinc-900 dark:text-zinc-50 mt-2">
+                        Work Order in Packing &amp; BSR Queue
+                      </h3>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1.5 max-w-md mx-auto">
+                        This work order has completed shop floor machining/casting and is currently in the Packing / BSR bay. Final visual inspection, weighing, bundling, and box packaging are executed in the Packing Center.
+                      </p>
+                    </div>
+
+                    <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+                      <Link
+                        href={`/packing?wo=${woData.wo_number}`}
+                        className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-xs font-bold text-white hover:bg-blue-500 shadow-md transition-all cursor-pointer"
+                      >
+                        <Package className="h-4 w-4" />
+                        <span>Open in Packing &amp; BSR Queue</span>
+                        <ArrowRight className="h-4 w-4" />
+                      </Link>
+                    </div>
+                  </div>
+                ) : selectedStage?.toUpperCase().includes("DISPATCH") ? (
+                  <div className="py-12 px-6 flex flex-col items-center justify-center text-center space-y-4">
+                    <div className="w-16 h-16 rounded-2xl bg-emerald-100 dark:bg-emerald-950/40 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shadow-inner">
+                      <Truck className="h-8 w-8" />
+                    </div>
+                    <div>
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300">
+                        Outward Shipping Gate
+                      </span>
+                      <h3 className="text-xl font-extrabold text-zinc-900 dark:text-zinc-50 mt-2">
+                        Work Order Ready for Dispatch
+                      </h3>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1.5 max-w-md mx-auto">
+                        Finished goods are packed and staged in the dispatch bay. Shipping invoices, DC generation, customer delivery challans, and payment tracking are executed at the Dispatch Center.
+                      </p>
+                    </div>
+
+                    <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+                      <Link
+                        href={`/dispatch?wo=${woData.wo_number}`}
+                        className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-xs font-bold text-white hover:bg-emerald-500 shadow-md transition-all cursor-pointer"
+                      >
+                        <Truck className="h-4 w-4" />
+                        <span>Open in Dispatch Center</span>
+                        <ArrowRight className="h-4 w-4" />
+                      </Link>
+                    </div>
+                  </div>
+                ) : activeStage.is_gate_locked ? (
                   <div className="py-12 px-6 flex flex-col items-center justify-center text-center space-y-4">
                     <div className="w-16 h-16 rounded-2xl bg-emerald-100 dark:bg-emerald-950/40 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shadow-inner">
                       <CheckCircle2 className="h-8 w-8" />

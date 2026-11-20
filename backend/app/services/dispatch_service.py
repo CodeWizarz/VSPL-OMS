@@ -14,6 +14,7 @@ from app.models.dispatch import Dispatch
 from app.models.customer_return import CustomerReturn, next_return_number
 from app.models.order import Order, Customer, Part, OrderStatus
 from app.models.master_data import POMaster, POLine, ScheduleMaster, POStatus
+from app.models.customer_part_mapping import CustomerPartMapping
 from app.models.audit import AuditLog
 from app.models.user import User
 from app.schemas.dispatch import (
@@ -37,6 +38,20 @@ class DispatchService:
             customer_po = order.customer_po if order else "PO-GEN"
             part_number = order.part.part_number if (order and order.part) else "N/A"
             part_name = order.part.description if (order and order.part) else None
+            cust_part_no = None
+            if order:
+                cust_part_no = order.customer_part_number
+                if not cust_part_no and order.po_line:
+                    cust_part_no = getattr(order.po_line, "customer_part_number", None)
+                if not cust_part_no and order.customer_id and order.part_id:
+                    cpm = db.query(CustomerPartMapping).filter(
+                        CustomerPartMapping.customer_id == order.customer_id,
+                        CustomerPartMapping.part_id == order.part_id
+                    ).first()
+                    if cpm:
+                        cust_part_no = cpm.customer_part_number
+                if not cust_part_no and order.part:
+                    cust_part_no = order.part.description or None
             order_qty = wo.physical_wo_qty if wo else 0
             oar_number = order.oar_number if order else None
 
@@ -63,6 +78,7 @@ class DispatchService:
                 customer_po=customer_po,
                 part_number=part_number,
                 part_name=part_name,
+                customer_part_number=cust_part_no,
                 order_qty=order_qty,
                 packed_completed_qty=pr.packed_qty,
                 ready_for_dispatch_qty=pr.ready_for_dispatch_qty,
@@ -377,6 +393,13 @@ class DispatchService:
             cust_name = order.customer.name if (order and order.customer) else "VSPL Customer"
             part_no = order.part.part_number if (order and order.part) else "N/A"
             dispatcher = d.dispatcher.full_name if d.dispatcher else "Dispatch Dept"
+            cust_part_no = None
+            if order:
+                cust_part_no = order.customer_part_number
+                if not cust_part_no and order.po_line:
+                    cust_part_no = getattr(order.po_line, "customer_part_number", None)
+                if not cust_part_no and order.part:
+                    cust_part_no = order.part.description or None
 
             # Fallback unit price calculation if not populated on older legacy rows
             u_price = d.unit_price or 0.0
@@ -390,6 +413,7 @@ class DispatchService:
                 customer_name=cust_name,
                 customer_po=d.customer_po or (order.customer_po if order else ""),
                 part_number=part_no,
+                customer_part_number=cust_part_no,
                 invoice_number=d.invoice_number or "N/A",
                 dispatched_qty=d.dispatched_qty,
                 dispatch_date=d.dispatch_date or datetime.now(),

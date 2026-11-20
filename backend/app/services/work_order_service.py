@@ -1541,7 +1541,7 @@ class WorkOrderService:
 
         active_in_production_count = db.query(WorkOrder).filter(
             WorkOrder.status.in_([WOStatus.IN_PRODUCTION, WOStatus.RELEASED]),
-            WorkOrder.current_stage != "Completed"
+            ~WorkOrder.current_stage.in_(["Completed", "DISPATCH", "PACKING", "BSR", "PACKING / BSR", "PACKING/BSR"])
         ).count()
 
         total_active_wos = db.query(WorkOrder).filter(

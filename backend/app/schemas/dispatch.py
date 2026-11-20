@@ -14,6 +14,7 @@ class DispatchQueueItem(BaseModel):
     customer_po: str
     part_number: str
     part_name: Optional[str] = None
+    customer_part_number: Optional[str] = None
     order_qty: int
     packed_completed_qty: int
     ready_for_dispatch_qty: int
@@ -59,6 +60,7 @@ class DispatchHistoryItem(BaseModel):
     customer_name: str
     customer_po: str
     part_number: str
+    customer_part_number: Optional[str] = None
     invoice_number: str
     dispatched_qty: int
     dispatch_date: datetime

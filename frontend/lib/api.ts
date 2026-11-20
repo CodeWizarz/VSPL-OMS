@@ -575,6 +575,7 @@ export interface DispatchItem {
   customer_name: string;
   customer_po: string;
   part_number: string;
+  customer_part_number?: string | null;
   invoice_number: string;
   dispatched_qty: number;
   dispatch_date: string;

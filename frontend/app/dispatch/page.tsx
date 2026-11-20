@@ -321,6 +321,21 @@ export default function DispatchPage() {
     }
   };
 
+  const filteredQueue = queue.filter((q) => {
+    if (!search.trim()) return true;
+    const s = search.toLowerCase().trim();
+    return (
+      q.wo_number?.toLowerCase().includes(s) ||
+      q.customer_code?.toLowerCase().includes(s) ||
+      q.customer_name?.toLowerCase().includes(s) ||
+      q.customer_po?.toLowerCase().includes(s) ||
+      q.part_number?.toLowerCase().includes(s) ||
+      q.customer_part_number?.toLowerCase().includes(s) ||
+      q.part_name?.toLowerCase().includes(s) ||
+      q.oar_number?.toLowerCase().includes(s)
+    );
+  });
+
   const filteredHistory = history.filter((h) => {
     if (!search.trim()) return true;
     const s = search.toLowerCase();
@@ -329,7 +344,9 @@ export default function DispatchPage() {
       h.wo_number?.toLowerCase().includes(s) ||
       h.customer_name?.toLowerCase().includes(s) ||
       h.customer_code?.toLowerCase().includes(s) ||
+      h.customer_po?.toLowerCase().includes(s) ||
       h.part_number?.toLowerCase().includes(s) ||
+      h.customer_part_number?.toLowerCase().includes(s) ||
       h.payment_status?.toLowerCase().includes(s)
     );
   });
@@ -505,67 +522,91 @@ export default function DispatchPage() {
 
         {/* Tab 1: Ready Queue */}
         {activeTab === "queue" && (
-          <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-zinc-200 dark:border-zinc-800 text-zinc-400 uppercase text-[10px] font-bold">
-                  <tr>
-                    <th className="py-3 px-3">Work Order</th>
-                    <th className="py-3 px-3">Customer Code</th>
-                    <th className="py-3 px-3">Customer Name</th>
-                    <th className="py-3 px-3">Customer PO</th>
-                    <th className="py-3 px-3">Part Number</th>
-                    <th className="py-3 px-3 text-right">Order Qty</th>
-                    <th className="py-3 px-3 text-right font-extrabold text-emerald-600">Ready for Dispatch</th>
-                    <th className="py-3 px-3 text-right text-zinc-400">Already Shipped</th>
-                    <th className="py-3 px-3 text-center">Action</th>
-                  </tr>
-                </thead>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="relative flex-1 max-w-sm">
+                <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-zinc-400" />
+                <input
+                  type="text"
+                  placeholder="Search WO, Customer Part #, Part, PO, Customer..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 pl-9 pr-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div className="text-xs text-zinc-500">
+                Showing <span className="font-bold text-zinc-900 dark:text-zinc-100">{filteredQueue.length}</span> of {queue.length} ready work orders
+              </div>
+            </div>
 
-                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800/60 font-medium">
-                  {queue.length === 0 ? (
+            <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-zinc-200 dark:border-zinc-800 text-zinc-400 uppercase text-[10px] font-bold">
                     <tr>
-                      <td colSpan={9} className="py-8 text-center text-zinc-400 text-xs">
-                        No goods currently in the Ready for Dispatch queue. Complete Packing / BSR first.
-                      </td>
+                      <th className="py-3 px-3">Work Order</th>
+                      <th className="py-3 px-3">Customer Code</th>
+                      <th className="py-3 px-3">Customer Name</th>
+                      <th className="py-3 px-3">Customer PO</th>
+                      <th className="py-3 px-3">Customer Part #</th>
+                      <th className="py-3 px-3">Part Number</th>
+                      <th className="py-3 px-3 text-right">Order Qty</th>
+                      <th className="py-3 px-3 text-right font-extrabold text-emerald-600">Ready for Dispatch</th>
+                      <th className="py-3 px-3 text-right text-zinc-400">Already Shipped</th>
+                      <th className="py-3 px-3 text-center">Action</th>
                     </tr>
-                  ) : (
-                    queue.map((item) => (
-                      <tr key={item.id} className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/40">
-                        <td className="py-3 px-3 font-mono font-bold">
-                          <Link
-                            href={`/production/tracking?wo=${item.wo_number}`}
-                            className="text-blue-600 dark:text-blue-400 hover:underline"
-                          >
-                            {item.wo_number}
-                          </Link>
-                        </td>
-                        <td className="py-3 px-3 font-mono text-zinc-500">{item.customer_code}</td>
-                        <td className="py-3 px-3 text-zinc-700 dark:text-zinc-300 truncate max-w-[150px]">
-                          {item.customer_name}
-                        </td>
-                        <td className="py-3 px-3 font-mono text-zinc-700 dark:text-zinc-300">{item.customer_po}</td>
-                        <td className="py-3 px-3 font-semibold text-zinc-900 dark:text-zinc-100">{item.part_number}</td>
-                        <td className="py-3 px-3 text-right text-zinc-500 font-mono">{item.order_qty} pcs</td>
-                        <td className="py-3 px-3 text-right font-mono font-extrabold text-emerald-600 dark:text-emerald-400 text-sm">
-                          {item.ready_for_dispatch_qty} pcs
-                        </td>
-                        <td className="py-3 px-3 text-right text-zinc-400 font-mono">{item.already_dispatched_qty} pcs</td>
-                        <td className="py-3 px-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => openShipModal(item)}
-                            disabled={item.ready_for_dispatch_qty <= 0}
-                            className="rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-emerald-500 disabled:opacity-30 transition-colors"
-                          >
-                            Ship Goods
-                          </button>
+                  </thead>
+
+                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800/60 font-medium">
+                    {filteredQueue.length === 0 ? (
+                      <tr>
+                        <td colSpan={10} className="py-8 text-center text-zinc-400 text-xs">
+                          {queue.length === 0
+                            ? "No goods currently in the Ready for Dispatch queue. Complete Packing / BSR first."
+                            : "No ready work orders matching your search."}
                         </td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                    ) : (
+                      filteredQueue.map((item) => (
+                        <tr key={item.id} className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/40">
+                          <td className="py-3 px-3 font-mono font-bold">
+                            <Link
+                              href={`/production/tracking?wo=${item.wo_number}`}
+                              className="text-blue-600 dark:text-blue-400 hover:underline"
+                            >
+                              {item.wo_number}
+                            </Link>
+                          </td>
+                          <td className="py-3 px-3 font-mono text-zinc-500">{item.customer_code}</td>
+                          <td className="py-3 px-3 text-zinc-700 dark:text-zinc-300 truncate max-w-[150px]">
+                            {item.customer_name}
+                          </td>
+                          <td className="py-3 px-3 font-mono text-zinc-700 dark:text-zinc-300">{item.customer_po}</td>
+                          <td className="py-3 px-3 font-mono text-zinc-600 dark:text-zinc-300">
+                            {item.customer_part_number || "-"}
+                          </td>
+                          <td className="py-3 px-3 font-semibold text-zinc-900 dark:text-zinc-100">{item.part_number}</td>
+                          <td className="py-3 px-3 text-right text-zinc-500 font-mono">{item.order_qty} pcs</td>
+                          <td className="py-3 px-3 text-right font-mono font-extrabold text-emerald-600 dark:text-emerald-400 text-sm">
+                            {item.ready_for_dispatch_qty} pcs
+                          </td>
+                          <td className="py-3 px-3 text-right text-zinc-400 font-mono">{item.already_dispatched_qty} pcs</td>
+                          <td className="py-3 px-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() => openShipModal(item)}
+                              disabled={item.ready_for_dispatch_qty <= 0}
+                              className="rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-emerald-500 disabled:opacity-30 transition-colors"
+                            >
+                              Ship Goods
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
@@ -633,7 +674,12 @@ export default function DispatchPage() {
                               <div>{h.customer_name}</div>
                               <div className="text-[10px] text-zinc-400 font-mono">{h.customer_po}</div>
                             </td>
-                            <td className="py-3 px-3 font-semibold text-zinc-900 dark:text-zinc-100">{h.part_number}</td>
+                            <td className="py-3 px-3">
+                              <div className="font-semibold text-zinc-900 dark:text-zinc-100">{h.part_number}</div>
+                              {h.customer_part_number && (
+                                <div className="text-[10px] text-zinc-400 font-mono">Cust Part: {h.customer_part_number}</div>
+                              )}
+                            </td>
                             <td className="py-3 px-3 text-right font-mono font-bold text-emerald-600">
                               {h.dispatched_qty} pcs
                             </td>
