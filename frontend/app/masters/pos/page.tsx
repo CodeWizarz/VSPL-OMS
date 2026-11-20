@@ -329,6 +329,11 @@ export default function POMasterPage() {
       return;
     }
 
+    if (!quickOARCommitmentDate || !quickOARCommitmentDate.trim()) {
+      setQuickOARError("Commitment Date is mandatory. You cannot generate an OAR without providing a Commitment Date.");
+      return;
+    }
+
     setQuickOARSaving(true);
     setQuickOARError("");
     try {
@@ -1651,15 +1656,24 @@ export default function POMasterPage() {
                     />
                   </div>
                   <div>
-                    <label className="text-[11px] font-bold text-zinc-700 dark:text-zinc-300 block mb-1">
-                      Commitment Date (Factory Promised)
+                    <label className="text-[11px] font-bold text-zinc-700 dark:text-zinc-300 flex items-center justify-between mb-1">
+                      <span>Commitment Date (Factory Promised)</span>
+                      <span className="text-[10px] font-bold text-rose-500 uppercase tracking-wider">* Mandatory</span>
                     </label>
                     <input
                       type="date"
+                      required
                       value={quickOARCommitmentDate}
                       onChange={(e) => setQuickOARCommitmentDate(e.target.value)}
-                      className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-900 dark:text-zinc-100"
+                      className={`w-full rounded-xl border ${
+                        !quickOARCommitmentDate ? "border-rose-400 dark:border-rose-600 bg-rose-50/20" : "border-zinc-200 dark:border-zinc-700"
+                      } bg-white dark:bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-900 dark:text-zinc-100`}
                     />
+                    {!quickOARCommitmentDate && (
+                      <span className="text-[10px] text-rose-500 font-semibold mt-0.5 block">
+                        Commitment Date is required to generate OAR
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -1696,7 +1710,7 @@ export default function POMasterPage() {
                     </button>
                     <button
                       type="submit"
-                      disabled={quickOARSaving || !quickOARQty || quickOARQty <= 0}
+                      disabled={quickOARSaving || !quickOARQty || quickOARQty <= 0 || !quickOARCommitmentDate}
                       className="rounded-xl bg-blue-600 hover:bg-blue-500 px-5 py-2 text-xs font-bold text-white shadow-sm flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
                     >
                       {quickOARSaving ? (

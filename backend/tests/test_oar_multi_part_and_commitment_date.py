@@ -76,12 +76,32 @@ def test_multi_part_same_po_unique_oar_numbers(client):
             "customer_po": po_num,
             "part_number": "BRZ-SLV-400",
             "po_quantity": 30,
+            "commitment_date": "2026-11-20",
             "oar_number": oar1,
             "create_wos": False,
         },
     )
     assert resp3.status_code == 400
     assert "already exists" in resp3.json()["detail"]
+
+def test_oar_generation_fails_without_commitment_date(client):
+    """Enforce that OAR creation strictly requires commitment_date."""
+    headers = _auth(_login(client))
+    resp = client.post(
+        "/api/v1/operations/intake",
+        headers=headers,
+        json={
+            "customer_code": "CUST-VALVE",
+            "customer_name": "Flowserve Controls Ltd",
+            "customer_po": f"PO-NOCOMMIT-{uuid.uuid4().hex[:6]}",
+            "part_number": "BRZ-BUSH-100",
+            "po_quantity": 50,
+            # commitment_date omitted
+            "create_wos": False,
+        },
+    )
+    assert resp.status_code == 400
+    assert "Commitment date is mandatory" in resp.json()["detail"]
 
 def test_auto_link_po_line_and_allocated_qty(client):
     """When creating OAR against a Customer PO, po_line_id is auto-linked even if omitted,

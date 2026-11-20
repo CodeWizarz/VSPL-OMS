@@ -96,8 +96,8 @@ function OrderIntakeContent() {
   const [partDesc, setPartDesc] = useState("Centrifugal Cast Bushing OD 120mm x ID 80mm");
   const [poQty, setPoQty] = useState<number | "">(1000);
   const [batchSize, setBatchSize] = useState<number | "">(500);
-  const [deliveryDate, setDeliveryDate] = useState("2026-09-20");
-  const [commitmentDate, setCommitmentDate] = useState("2026-09-20");
+  const [deliveryDate, setDeliveryDate] = useState("");
+  const [commitmentDate, setCommitmentDate] = useState("");
   const [orderType, setOrderType] = useState<"Production" | "NPD">("Production");
 
   // OAR Number (manual or auto-generated next sequence)
@@ -421,6 +421,12 @@ function OrderIntakeContent() {
 
     if (qty <= 0) {
       setError("PO Quantity must be greater than 0.");
+      return;
+    }
+
+    if (!commitmentDate || !commitmentDate.trim()) {
+      setError("Commitment Date is mandatory. You cannot generate an OAR without providing a Commitment Date.");
+      document.getElementById("commitment-date-input")?.focus();
       return;
     }
 
@@ -1218,14 +1224,27 @@ function OrderIntakeContent() {
             </div>
 
             <div>
-              <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">Commitment Date</label>
+              <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300 flex items-center justify-between">
+                <span>Commitment Date</span>
+                <span className="text-[10px] font-bold text-rose-500 uppercase tracking-wider">* Mandatory</span>
+              </label>
               <input
+                id="commitment-date-input"
                 type="date"
+                required
                 value={commitmentDate}
                 onChange={(e) => setCommitmentDate(e.target.value)}
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                className={`mt-1.5 w-full rounded-xl border ${
+                  !commitmentDate
+                    ? "border-rose-400 dark:border-rose-600 bg-rose-50/20 focus:ring-rose-500"
+                    : "border-zinc-200 dark:border-zinc-800"
+                } bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2`}
               />
-              <p className="mt-1 text-[10px] text-zinc-400">Committed date by Sales to customer</p>
+              <p className={`mt-1 text-[10px] ${!commitmentDate ? "text-rose-500 font-semibold" : "text-zinc-400"}`}>
+                {!commitmentDate
+                  ? "⚠️ Mandatory: Factory commitment date is required to generate OAR."
+                  : "Committed delivery date promised by Sales to customer"}
+              </p>
             </div>
           </div>
 
@@ -1352,6 +1371,7 @@ function OrderIntakeContent() {
                 loading ||
                 !poQty ||
                 !batchSize ||
+                !commitmentDate ||
                 (generateWOsImmediately && splitMode === "manual" && !manualComplete)
               }
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 py-3.5 text-xs font-bold text-white shadow-sm hover:bg-blue-500 disabled:opacity-50 transition-colors cursor-pointer"
@@ -1362,11 +1382,18 @@ function OrderIntakeContent() {
                   ? generateWOsImmediately
                     ? "Creating OAR & Work Orders..."
                     : "Generating Order Acceptance Receipt (OAR)..."
+                  : !commitmentDate
+                  ? "Select Commitment Date to Generate OAR"
                   : generateWOsImmediately
                   ? "Accept Order & Create Work Orders"
                   : "Generate Order Acceptance Receipt (OAR)"}
               </span>
             </button>
+            {!commitmentDate && (
+              <p className="text-center text-[11px] font-semibold text-rose-500 mt-2">
+                ⚠️ Commitment Date is required before generating the OAR.
+              </p>
+            )}
           </div>
         </form>
       </div>

@@ -41,6 +41,11 @@ def create_order_intake(
 ):
     """Step 1: Sales / Planning Order Intake (OAR) creation. Creates an OAR
     linked to confirmed customer PO or schedule without creating WOs by default."""
+    if not payload.commitment_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Commitment date is mandatory. Cannot generate an OAR without a commitment date."
+        )
     return OperationsService.create_order_intake(db, payload, current_user=user)
 
 @router.post("/work-orders", response_model=WorkOrderCreateResponse)
