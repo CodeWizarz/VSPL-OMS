@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, Suspense, useCallback } from "react";
+import React, { useState, useEffect, Suspense, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
@@ -153,11 +153,20 @@ function WOGenerationContent() {
     }
   };
 
+  const searchOarRef = useRef(searchOar);
+  useEffect(() => {
+    searchOarRef.current = searchOar;
+  }, [searchOar]);
+
   // Load OARs
-  const loadOars = useCallback(async () => {
+  const loadOars = useCallback(async (queryText?: string) => {
     setLoadingOars(true);
     try {
-      const data = await getOarList({ limit: 1000 });
+      const q = typeof queryText === "string" ? queryText.trim() : (searchOarRef.current ? searchOarRef.current.trim() : (urlOar ? urlOar.trim() : ""));
+      const data = await getOarList({
+        search: q || undefined,
+        limit: 1000,
+      });
       setOars(data);
       if (urlOar) {
         const found = data.find((o) => o.oar_number.toLowerCase() === urlOar.toLowerCase());
@@ -207,15 +216,28 @@ function WOGenerationContent() {
     }
   };
 
+  // Initial load
   useEffect(() => {
-    loadOars();
+    loadOars(urlOar || undefined);
     loadRecentWOs();
     loadNextWoSequence();
-  }, [loadOars]);
+  }, [loadOars, urlOar]);
+
+  // Debounced search when user types in the search box
+  const isInitialMount = useRef(true);
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      loadOars(searchOar);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [searchOar, loadOars]);
 
   const handleSelectOar = (oar: OARListItem) => {
     setSelectedOar(oar);
-    setSearchOar(oar.oar_number);
     const initialQty = oar.remaining_qty > 0 ? oar.remaining_qty : 0;
     setWoQty(initialQty || "");
     setManualQtys([String(Math.ceil((initialQty || 10) / 2)), String(Math.floor((initialQty || 10) / 2))]);
@@ -545,7 +567,7 @@ function WOGenerationContent() {
 
   // Filtered OARs
   const filteredOars = oars.filter((o) => {
-    if (filterPendingOnly && o.remaining_qty <= 0) return false;
+    if (filterPendingOnly && !searchOar.trim() && o.remaining_qty <= 0) return false;
     if (!searchOar.trim()) return true;
     const q = searchOar.toLowerCase().trim();
     return (
@@ -647,6 +669,12 @@ function WOGenerationContent() {
                   type="text"
                   value={searchOar}
                   onChange={(e) => setSearchOar(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      loadOars(searchOar);
+                    }
+                  }}
                   placeholder="Filter OAR, customer, part..."
                   className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 focus:outline-none w-48 sm:w-60"
                 />
@@ -654,7 +682,7 @@ function WOGenerationContent() {
 
               <button
                 type="button"
-                onClick={loadOars}
+                onClick={() => loadOars(searchOar)}
                 disabled={loadingOars}
                 className="p-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800"
                 title="Refresh OARs"

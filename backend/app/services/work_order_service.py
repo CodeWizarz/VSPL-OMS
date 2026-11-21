@@ -3,7 +3,7 @@ import uuid
 from typing import List, Optional
 from datetime import datetime, date
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_, cast, String
+from sqlalchemy import or_, cast, String, nullslast
 from app.models.work_order import WorkOrder, WORoute, WOStatus, WorkOrderOARAllocation
 from app.models.production_movement import ProductionMovement, StageWIP
 from app.models.production import ProductionUpdate
@@ -1106,7 +1106,7 @@ class WorkOrderService:
 
         if search:
             s = f"%{search.strip()}%"
-            query = query.filter(
+            query = query.outerjoin(POLine, Order.po_line_id == POLine.id).filter(
                 or_(
                     Order.oar_number.ilike(s),
                     Order.customer_po.ilike(s),
@@ -1114,6 +1114,8 @@ class WorkOrderService:
                     Customer.customer_code.ilike(s),
                     Customer.name.ilike(s),
                     Part.part_number.ilike(s),
+                    Part.description.ilike(s),
+                    POLine.customer_part_number.ilike(s),
                     Order.work_orders.any(WorkOrder.wo_number.ilike(s)),
                     Order.wo_allocations.any(WorkOrderOARAllocation.work_order.has(WorkOrder.wo_number.ilike(s)))
                 )
@@ -1136,7 +1138,7 @@ class WorkOrderService:
                 joinedload(Order.po_line).joinedload(POLine.po),
                 joinedload(Order.schedule)
             )
-            .order_by(Order.created_at.desc())
+            .order_by(nullslast(Order.created_at.desc()), Order.id.desc())
             .offset(offset)
             .limit(limit)
             .all()
