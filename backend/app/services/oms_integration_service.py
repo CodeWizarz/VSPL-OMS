@@ -37,7 +37,7 @@ def parse_route(route_str: Union[str, List[str]]) -> List[str]:
     'F1 > F2 > F3 > SP > FI > Packing > Dispatch' -> ['F1', 'F2', 'F3', 'SP', 'FI', 'Packing', 'Dispatch']
     """
     if not route_str:
-        return ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+        return ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
     if isinstance(route_str, list):
         parts = [str(x).strip() for x in route_str]
     else:
@@ -86,7 +86,7 @@ def calculate_stage_targets(good_target: int, yields: Optional[Dict[str, float]]
     Back-calculates stage target quantities from good target using stage yields over the route.
     """
     yd = yields or DEFAULT_YIELDS
-    rt = route or ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+    rt = route or ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
     prod = [s for s in rt if s.upper() not in ("DISPATCH", "PACKING", "BSR", "PACKING / BSR")]
     targets: Dict[str, int] = {}
     need = float(good_target)
@@ -484,7 +484,7 @@ class OMSIntegrationService:
         db.query(WORoute).filter(WORoute.work_order_id == wo.id).delete()
         db.query(StageWIP).filter(StageWIP.work_order_id == wo.id).delete()
 
-        stage_list = parse_route(route_str) if route_str else ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+        stage_list = parse_route(route_str) if route_str else ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
 
         created_routes = []
         for seq, stg in enumerate(stage_list, start=1):

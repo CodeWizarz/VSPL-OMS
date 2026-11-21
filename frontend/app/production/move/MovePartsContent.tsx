@@ -429,15 +429,15 @@ export function MovePartsContent() {
         to_stage: destStageNow,
         quantity_moved: moveQtyNum,
         rejected_quantity: 0,
-        machine_id: originStageNow === "F2" && productionType === "VENDOR" ? undefined : selectedMachine,
+        machine_id: productionType === "VENDOR" ? undefined : selectedMachine,
         operator_name: operatorName,
         shift: shift,
         remarks: remarks || undefined,
         heat_number: heatNumber.trim() || undefined,
         client_request_id: clientReqId,
-        production_type: originStageNow === "F2" ? productionType : "IN_HOUSE",
-        vendor_name: originStageNow === "F2" && productionType === "VENDOR" ? vendorName.trim() : undefined,
-        dc_number: originStageNow === "F2" && productionType === "VENDOR" ? dcNumber.trim() : undefined,
+        production_type: productionType,
+        vendor_name: productionType === "VENDOR" ? vendorName.trim() : undefined,
+        dc_number: productionType === "VENDOR" ? dcNumber.trim() : undefined,
       });
 
       setResultData({
@@ -1149,16 +1149,16 @@ export function MovePartsContent() {
                     )}
 
 
-                    {/* F2 Special Routing: In-House vs At Vendor Toggle */}
-                    {originStage === "F2" && (
+                    {/* Special Routing: In-House vs At Vendor Toggle */}
+                    {originStage !== "DISPATCH" && (
                       <div className="p-4 rounded-xl border border-indigo-200 dark:border-indigo-900/60 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-3">
                         <div className="flex items-center justify-between">
                           <label className="text-xs font-bold text-indigo-950 dark:text-indigo-200 flex items-center gap-1.5">
                             <Factory className="h-4 w-4 text-indigo-600" />
-                            F2 PRODUCTION MODE / ROUTING *
+                            STAGE {originStage} PRODUCTION MODE / ROUTING *
                           </label>
                           <span className="text-[10px] uppercase tracking-wider font-extrabold text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-900/60 px-2 py-0.5 rounded-md">
-                            Stage F2 Specific
+                            Stage {originStage} Execution
                           </span>
                         </div>
 

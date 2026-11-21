@@ -77,6 +77,24 @@ LIFESPAN_STATUS = {"started_at": None, "create_all_ran": False}
 SCHEMA_SYNC_LAST_RESULT = None
 
 
+def _fix_sqlite_orders_unique(eng):
+    try:
+        with eng.begin() as conn:
+            sql_row = conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='orders'")).fetchone()
+            if sql_row and "UNIQUE (oar_number)" in sql_row[0]:
+                cols_info = conn.execute(text("PRAGMA table_info(orders)")).fetchall()
+                col_names = [r[1] for r in cols_info]
+                col_list = ", ".join(col_names)
+                old_sql = sql_row[0]
+                new_sql = old_sql.replace("UNIQUE (oar_number),", "").replace(", UNIQUE (oar_number)", "").replace("UNIQUE (oar_number)", "")
+                conn.execute(text("ALTER TABLE orders RENAME TO orders_old_oar_uniq;"))
+                conn.execute(text(new_sql))
+                conn.execute(text(f"INSERT INTO orders ({col_list}) SELECT {col_list} FROM orders_old_oar_uniq;"))
+                conn.execute(text("DROP TABLE orders_old_oar_uniq;"))
+    except Exception:
+        pass
+
+
 def auto_migrate_schema():
     """Auto-migrate schema to ensure newly added columns and enum types exist in PostgreSQL/SQLite.
 
@@ -433,13 +451,15 @@ def auto_migrate_schema():
         "CREATE INDEX IF NOT EXISTS ix_customer_returns_return_number ON customer_returns (return_number);",
         "CREATE INDEX IF NOT EXISTS ix_customer_returns_conversion_wo ON customer_returns (conversion_wo_number);",
 
-        # Vendor Dispatches (Outside subcontracting from F2 to FI)
+        # Vendor Dispatches (Outside subcontracting from any gate e.g. F1, F2, F3, SP, FI)
         "CREATE TABLE IF NOT EXISTS vendor_dispatches ("
         "    id UUID PRIMARY KEY,"
         "    work_order_id UUID NOT NULL REFERENCES work_orders(id),"
         "    dispatch_stage VARCHAR(50) NOT NULL DEFAULT 'F2',"
         "    vendor_name VARCHAR(200) NOT NULL,"
         "    dc_number VARCHAR(100) NOT NULL,"
+        "    target_return_stage VARCHAR(50) DEFAULT 'FI',"
+        "    received_stage VARCHAR(50),"
         "    dispatched_qty INTEGER NOT NULL,"
         "    received_qty INTEGER NOT NULL DEFAULT 0,"
         "    scrap_qty INTEGER NOT NULL DEFAULT 0,"
@@ -452,6 +472,8 @@ def auto_migrate_schema():
         "    created_at TIMESTAMPTZ DEFAULT NOW(),"
         "    updated_at TIMESTAMPTZ DEFAULT NOW()"
         ");",
+        "ALTER TABLE vendor_dispatches ADD COLUMN IF NOT EXISTS target_return_stage VARCHAR(50) DEFAULT 'FI';",
+        "ALTER TABLE vendor_dispatches ADD COLUMN IF NOT EXISTS received_stage VARCHAR(50);",
         "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_status ON vendor_dispatches (status);",
         "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_vendor_name ON vendor_dispatches (vendor_name);",
         "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_dc_number ON vendor_dispatches (dc_number);",
@@ -482,6 +504,17 @@ def auto_migrate_schema():
         ");",
         "CREATE INDEX IF NOT EXISTS ix_wo_oar_alloc_wo_id ON work_order_oar_allocations (work_order_id);",
         "CREATE INDEX IF NOT EXISTS ix_wo_oar_alloc_order_id ON work_order_oar_allocations (order_id);",
+
+        # BSR Gate decoupling: migrate legacy composite stage strings to discrete PACKING
+        "UPDATE work_orders SET current_stage = 'PACKING' WHERE current_stage IN ('PACKING / BSR', 'PACKING/BSR');",
+        "UPDATE stage_wip SET stage = 'PACKING' WHERE stage IN ('PACKING / BSR', 'PACKING/BSR');",
+        "UPDATE wo_routes SET stage = 'PACKING' WHERE stage IN ('PACKING / BSR', 'PACKING/BSR');",
+
+        # PO Master & PO Line quantity adjustments (customer PO APP/PRO/071/26-27 AMS121=5, AMS119=10)
+        "UPDATE po_lines SET po_qty = 5, available_qty = 5 WHERE po_number = 'APP/PRO/071/26-27' AND (customer_part_number = 'CCC37-200291' OR part_id IN (SELECT id FROM parts WHERE part_number = 'AMS121'));",
+        "UPDATE po_lines SET po_qty = 10, available_qty = 10 WHERE po_number = 'APP/PRO/071/26-27' AND (customer_part_number = 'CCC37-200153' OR part_id IN (SELECT id FROM parts WHERE part_number = 'AMS119'));",
+        "UPDATE orders SET po_qty = 5 WHERE customer_po = 'APP/PRO/071/26-27' AND (customer_part_number = 'CCC37-200291' OR part_id IN (SELECT id FROM parts WHERE part_number = 'AMS121'));",
+        "UPDATE orders SET po_qty = 10 WHERE customer_po = 'APP/PRO/071/26-27' AND (customer_part_number = 'CCC37-200153' OR part_id IN (SELECT id FROM parts WHERE part_number = 'AMS119'));",
     ]
 
 
@@ -494,21 +527,7 @@ def auto_migrate_schema():
     # it silently no-op.
     is_sqlite = engine.dialect.name == "sqlite"
     if is_sqlite:
-        try:
-            with engine.begin() as conn:
-                sql_row = conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='orders'")).fetchone()
-                if sql_row and "UNIQUE (oar_number)" in sql_row[0]:
-                    cols_info = conn.execute(text("PRAGMA table_info(orders)")).fetchall()
-                    col_names = [r[1] for r in cols_info]
-                    col_list = ", ".join(col_names)
-                    old_sql = sql_row[0]
-                    new_sql = old_sql.replace("UNIQUE (oar_number),", "").replace(", UNIQUE (oar_number)", "").replace("UNIQUE (oar_number)", "")
-                    conn.execute(text("ALTER TABLE orders RENAME TO orders_old_oar_uniq;"))
-                    conn.execute(text(new_sql))
-                    conn.execute(text(f"INSERT INTO orders ({col_list}) SELECT {col_list} FROM orders_old_oar_uniq;"))
-                    conn.execute(text("DROP TABLE orders_old_oar_uniq;"))
-        except Exception:
-            pass
+        _fix_sqlite_orders_unique(engine)
 
     add_col_re = re.compile(
         r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+) (.+?);\s*$", re.IGNORECASE

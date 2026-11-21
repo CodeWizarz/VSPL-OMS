@@ -423,7 +423,7 @@ def build_open_orders_and_wos_workbook(db: Session, classification_filter: Optio
         ("wo_number", "Work Order", "Text", "MANDATORY", "WO-00100, WO-NPD-005", "Unique Work Order code tracking the physical metal batch through the foundry."),
         ("physical_wo_qty", "Work Order", "Integer (> 0)", "MANDATORY", "250, 500", "Quantity allocated to this physical batch. Sum of WOs must not exceed OAR PO Qty without amendment."),
         ("heat_number", "Work Order", "Text", "OPTIONAL / CONDITIONAL", "H-24-9081, MELT-04", "Furnace heat / melt heat number. Mandatory for aerospace/automotive critical traceability."),
-        ("current_stage", "Shop Floor", "Text (Stage Code)", "MANDATORY", "F1, F2, F3, SP, FI, PACKING / BSR, DISPATCH", "Current physical manufacturing stage holding the balance pieces."),
+        ("current_stage", "Shop Floor", "Text (Stage Code)", "MANDATORY", "F1, F2, F3, SP, FI, PACKING, BSR, DISPATCH", "Current physical manufacturing stage holding the balance pieces."),
         ("available_wip", "Shop Floor", "Integer (>= 0)", "SYSTEM CALCULATED", "250", "Net usable inventory waiting to be processed or transferred to the next stage."),
         ("good_qty", "Production Update", "Integer (>= 0)", "MANDATORY on Movement", "240", "Pcs that passed stage inspection and moved forward."),
         ("reject_qty", "Production Update", "Integer (>= 0)", "MANDATORY on Movement", "10", "Pcs rejected/scrapped at this stage. Automatically logged in NC / MRB log.")
@@ -475,7 +475,8 @@ def build_open_orders_and_wos_workbook(db: Session, classification_filter: Optio
         ("F3", "Fettling 3: Fine Finishing, Chipping, Dressing"),
         ("SP", "Special Processing: Heat Treatment, Primer Painting, or Rough Machining"),
         ("FI", "Final Inspection: Dimensional, Hardness, Visual & MPI Testing"),
-        ("PACKING / BSR", "Bonded Store / Final Packing & Palletizing"),
+        ("PACKING", "Protective Packing & Palletizing"),
+        ("BSR", "Bonded Storage Room (FG Inventory)"),
         ("DISPATCH", "Outbound Shipping, DC & Tax Invoicing")
     ]
     for idx, (code, desc) in enumerate(stage_data, 9):

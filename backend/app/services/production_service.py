@@ -199,7 +199,7 @@ class ProductionService:
         # 3. Validate Work Order Route
         routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
         if not routes:
-            default_stages = ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+            default_stages = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
             targets = calculate_stage_targets(wo.physical_wo_qty, route=default_stages)
             routes = []
             for seq, stg in enumerate(default_stages, start=1):
@@ -295,6 +295,14 @@ class ProductionService:
         ).all()
         at_vendor_qty = sum(max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0) for d in v_dispatches)
         available_onhand = from_wip.onhand_qty if from_wip else 0
+        if available_onhand <= 0 and matched_from.upper() == "PACKING":
+            packing_rec = db.query(PackingRecord).filter(PackingRecord.work_order_id == wo.id).first()
+            if packing_rec and packing_rec.packed_qty > 0:
+                available_onhand = max(packing_rec.packed_qty - (from_wip.moved_out_qty or 0), 0)
+                if from_wip:
+                    from_wip.onhand_qty = available_onhand
+                    from_wip.ok_qty = max(from_wip.ok_qty or 0, packing_rec.packed_qty)
+
         if available_onhand <= 0:
             if at_vendor_qty > 0:
                 raise HTTPException(

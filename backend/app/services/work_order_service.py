@@ -36,7 +36,7 @@ SCHEDULE_KEYWORDS_REGEX = re.compile(
     re.IGNORECASE
 )
 
-STANDARD_STAGES = ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+STANDARD_STAGES = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
 
 
 def get_wo_oar_allocations(db: Session, wo: WorkOrder) -> List[WorkOrderOARAllocation]:
@@ -1448,16 +1448,16 @@ class WorkOrderService:
             
             for w in wips:
                 stg_key = w.stage
-                if stg_key in ("PACKING", "BSR", "PACKING/BSR", "PACKING / BSR"):
-                    stg_key = "PACKING / BSR"
+                if stg_key in ("PACKING/BSR", "PACKING / BSR"):
+                    stg_key = "PACKING"
                 wip_dict[stg_key] = wip_dict.get(stg_key, 0) + w.available_wip
                 inproc_dict[stg_key] = inproc_dict.get(stg_key, 0) + w.inproc_qty
                 onhand_dict[stg_key] = onhand_dict.get(stg_key, 0) + w.onhand_qty
 
             if not wip_dict:
                 cur_stg = wo.current_stage or "F1"
-                if cur_stg in ("PACKING", "BSR", "PACKING/BSR", "PACKING / BSR"):
-                    cur_stg = "PACKING / BSR"
+                if cur_stg in ("PACKING/BSR", "PACKING / BSR"):
+                    cur_stg = "PACKING"
                 wip_dict[cur_stg] = wo.physical_wo_qty
                 inproc_dict[cur_stg] = wo.physical_wo_qty
                 onhand_dict[cur_stg] = 0

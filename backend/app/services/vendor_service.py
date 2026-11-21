@@ -174,8 +174,11 @@ class VendorService:
             ).with_for_update().first()
             if origin_wip:
                 # Returned parts land back in inproc_qty so shop floor operators can log in-house production entry.
+                origin_wip.inproc_qty = (origin_wip.inproc_qty or 0) + received_qty
+                origin_wip.available_wip = (origin_wip.available_wip or 0) + received_qty
                 # Deduct received_qty from ok_qty so that in-house operators can record completed good pieces.
                 origin_wip.ok_qty = max(origin_wip.ok_qty - received_qty, 0)
+                origin_wip.onhand_qty = max(origin_wip.onhand_qty - received_qty, 0)
                 if scrap_qty > 0:
                     origin_wip.rejected_qty += scrap_qty
             

@@ -183,7 +183,7 @@ export default function VendorTrackingPage() {
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold shadow-sm transition-all cursor-pointer"
             >
               <Building2 className="h-3.5 w-3.5" />
-              <span>New F2 Vendor Entry</span>
+              <span>New Vendor Dispatch Entry</span>
             </Link>
           </div>
         </div>
@@ -309,7 +309,7 @@ export default function VendorTrackingPage() {
               <Truck className="h-8 w-8 text-zinc-300 dark:text-zinc-700" />
               <p className="font-bold">No Work Orders found at vendor for this filter.</p>
               <p className="text-[11px] text-zinc-400">
-                To dispatch parts to an outside vendor, record production at stage F2 with mode &apos;Vendor&apos; and DC number.
+                To dispatch parts to an outside vendor, record production at any stage (F1, F2, F3, SP, FI) with mode &apos;Vendor&apos; and DC number.
               </p>
             </div>
           ) : (
@@ -575,6 +575,46 @@ export default function VendorTrackingPage() {
                       </div>
                       <p className="text-[10px] text-zinc-500 leading-tight">
                         Returns to F2 for in-house finishing & entry.
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setDestinationStage("F1")}
+                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                        destinationStage === "F1"
+                          ? "border-blue-600 bg-blue-50/80 dark:bg-blue-950/40 text-blue-900 dark:text-blue-100 ring-2 ring-blue-500/20"
+                          : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="font-extrabold text-xs">Stage F1</span>
+                        <span className="text-[9px] uppercase font-bold px-1.5 py-0.2 rounded bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300">
+                          Foundry
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-zinc-500 leading-tight">
+                        Returns to F1 foundry for secondary work.
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setDestinationStage("PACKING")}
+                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                        destinationStage === "PACKING"
+                          ? "border-teal-600 bg-teal-50/80 dark:bg-teal-950/40 text-teal-900 dark:text-teal-100 ring-2 ring-teal-500/20"
+                          : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="font-extrabold text-xs">Stage PACKING</span>
+                        <span className="text-[9px] uppercase font-bold px-1.5 py-0.2 rounded bg-teal-100 dark:bg-teal-900/60 text-teal-700 dark:text-teal-300">
+                          Packing
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-zinc-500 leading-tight">
+                        Painted/coated material direct to packing.
                       </p>
                     </button>
                   </div>

@@ -152,6 +152,15 @@ class PackingService:
         packing_rec.pending_qty -= req.packed_quantity
         packing_rec.ready_for_dispatch_qty += req.packed_quantity
 
+        # Synchronize PACKING StageWIP so packed goods are recorded on-hand for BSR movement
+        pack_wip_sync = db.query(StageWIP).filter(
+            StageWIP.work_order_id == wo.id,
+            StageWIP.stage.in_(["PACKING", "PACKING / BSR", "PACKING/BSR"])
+        ).first()
+        if pack_wip_sync:
+            pack_wip_sync.ok_qty = (pack_wip_sync.ok_qty or 0) + req.packed_quantity
+            pack_wip_sync.onhand_qty = (pack_wip_sync.onhand_qty or 0) + req.packed_quantity
+
         if packing_rec.pending_qty == 0:
             packing_rec.status = "Ready-for-Dispatch"
             wo.status = WOStatus.READY

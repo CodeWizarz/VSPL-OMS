@@ -24,7 +24,7 @@ from app.services.production_service import ProductionService
 from app.services.packing_service import PackingService
 from app.services.dispatch_service import DispatchService
 from app.services.operations_service import OperationsService
-from app.schemas.production import MovePartsRequest
+from app.schemas.production import MovePartsRequest, RecordStageProductionRequest
 from app.schemas.packing import PackingUpdateRequest
 from app.schemas.dispatch import DispatchRequest
 from app.schemas.operations import OrderIntakeCreate, WOReleaseCreate
@@ -59,6 +59,7 @@ def _release_wo_with_split_packing_bsr(db_session, wo_number, qty):
         part_number="BRZ-UAT-01",
         po_quantity=qty,
         max_batch_size=qty,
+        create_wos=True,
     ))
     wo_num = res.wos_created[0]
     OperationsService.release_work_order(db_session, WOReleaseCreate(
@@ -67,6 +68,32 @@ def _release_wo_with_split_packing_bsr(db_session, wo_number, qty):
         route_stages=["F1", "F2", "F3", "FI", "PACKING", "BSR", "DISPATCH"],
     ))
     return wo_num
+
+
+def _advance_stages(db_session, wo_num, qty):
+    from app.services.mrb_service import MRBService
+    admin_user = db_session.query(User).filter(User.role.in_(["ADMIN", "QA", "PLANNER"])).first()
+    if not admin_user:
+        admin_user = User(
+            id=uuid.uuid4(),
+            email=f"admin-{uuid.uuid4().hex[:6]}@vspl.com",
+            full_name="Admin Approver",
+            hashed_password="mock",
+            role="ADMIN",
+            is_active=True
+        )
+        db_session.add(admin_user)
+        db_session.commit()
+
+    for frm, to in [("F1", "F2"), ("F2", "F3"), ("F3", "FI"), ("FI", "PACKING")]:
+        ProductionService.record_stage_production(db_session, RecordStageProductionRequest(
+            wo_number=wo_num, stage=frm, good_qty=qty, rejected_quantity=0
+        ))
+        if frm in ("F1", "F2", "F3"):
+            MRBService.approve_stage_reviews(db_session, wo_num, frm, admin_user)
+        ProductionService.move_parts(db_session, MovePartsRequest(
+            wo_number=wo_num, from_stage=frm, to_stage=to, quantity_moved=qty
+        ))
 
 
 def test_dispatch_credits_only_terminal_stage_with_split_packing_bsr(db_session):
@@ -81,10 +108,7 @@ def test_dispatch_credits_only_terminal_stage_with_split_packing_bsr(db_session)
     wo_num = _release_wo_with_split_packing_bsr(db_session, "WO-UAT-DISP", qty)
     wo = db_session.query(WorkOrder).filter(WorkOrder.wo_number == wo_num).first()
 
-    for frm, to in [("F1", "F2"), ("F2", "F3"), ("F3", "FI"), ("FI", "PACKING")]:
-        ProductionService.move_parts(db_session, MovePartsRequest(
-            wo_number=wo_num, from_stage=frm, to_stage=to, quantity_moved=qty
-        ))
+    _advance_stages(db_session, wo_num, qty)
 
     PackingService.update_packing(db_session, PackingUpdateRequest(
         wo_number=wo_num, packed_quantity=qty
@@ -124,10 +148,7 @@ def test_dispatch_blocked_until_material_actually_clears_bsr(db_session):
     """
     qty = 50
     wo_num = _release_wo_with_split_packing_bsr(db_session, "WO-UAT-BSR-GATE", qty)
-    for frm, to in [("F1", "F2"), ("F2", "F3"), ("F3", "FI"), ("FI", "PACKING")]:
-        ProductionService.move_parts(db_session, MovePartsRequest(
-            wo_number=wo_num, from_stage=frm, to_stage=to, quantity_moved=qty
-        ))
+    _advance_stages(db_session, wo_num, qty)
     PackingService.update_packing(db_session, PackingUpdateRequest(wo_number=wo_num, packed_quantity=qty))
 
     # No PACKING -> BSR movement has happened yet: dispatch must be rejected.
@@ -152,10 +173,7 @@ def test_packing_idempotency_duplicate_client_request_id(db_session):
     """A repeated packing submission with the same client_request_id must not double-pack."""
     qty = 80
     wo_num = _release_wo_with_split_packing_bsr(db_session, "WO-UAT-PACK-IDEMP", qty)
-    for frm, to in [("F1", "F2"), ("F2", "F3"), ("F3", "FI"), ("FI", "PACKING")]:
-        ProductionService.move_parts(db_session, MovePartsRequest(
-            wo_number=wo_num, from_stage=frm, to_stage=to, quantity_moved=qty
-        ))
+    _advance_stages(db_session, wo_num, qty)
 
     token = "PACK-IDEMP-TOKEN-1"
     r1 = PackingService.update_packing(db_session, PackingUpdateRequest(
@@ -181,10 +199,7 @@ def test_dispatch_idempotency_duplicate_client_request_id(db_session):
     """A repeated dispatch submission with the same client_request_id must not double-ship."""
     qty = 60
     wo_num = _release_wo_with_split_packing_bsr(db_session, "WO-UAT-DISP-IDEMP", qty)
-    for frm, to in [("F1", "F2"), ("F2", "F3"), ("F3", "FI"), ("FI", "PACKING")]:
-        ProductionService.move_parts(db_session, MovePartsRequest(
-            wo_number=wo_num, from_stage=frm, to_stage=to, quantity_moved=qty
-        ))
+    _advance_stages(db_session, wo_num, qty)
     PackingService.update_packing(db_session, PackingUpdateRequest(wo_number=wo_num, packed_quantity=qty))
     # This route requires material to actually clear BSR (a distinct stage) before dispatch.
     ProductionService.move_parts(db_session, MovePartsRequest(

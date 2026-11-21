@@ -270,7 +270,7 @@ class OperationsService:
                     rem_qty -= take
                     wo_qty_list.append(take)
 
-            default_route = ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+            default_route = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
             allocated_wos = set()
 
             for wo_qty in wo_qty_list:
@@ -1660,7 +1660,7 @@ class OperationsService:
         db.flush()
 
         # Build route from entry stage onward through full sequence
-        all_stages = ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+        all_stages = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
         entry_idx = all_stages.index(entry_stage) if entry_stage in all_stages else 0
         conv_route = all_stages[entry_idx:]
 

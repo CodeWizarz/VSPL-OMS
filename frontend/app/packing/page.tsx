@@ -116,20 +116,27 @@ export default function PackingPage() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
-              <span className="rounded-md bg-purple-600 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
-                Stage 6 / Gate BSR
+              <span className="rounded-md bg-teal-600 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
+                Stage 6 / Gate PACKING
               </span>
               <span className="text-xs text-zinc-400">Post-Final Inspection</span>
             </div>
             <h1 className="text-2xl font-extrabold tracking-tight text-zinc-900 dark:text-zinc-50 mt-1">
-              Packing & BSR Execution
+              Packing Execution
             </h1>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-              Verify FI-approved quantities, execute protective packing, and prepare goods for validated dispatch.
+              Verify FI-approved quantities, execute protective packing, and transfer packed lots into Stage 7: BSR (Bonded Storage Room).
             </p>
           </div>
 
           <div className="flex items-center gap-2">
+            <Link
+              href="/bsr"
+              className="flex items-center gap-1.5 rounded-xl bg-purple-600 px-3.5 py-2 text-xs font-bold text-white shadow-sm hover:bg-purple-500 transition-colors"
+            >
+              <Boxes className="h-3.5 w-3.5" />
+              <span>Go to BSR Store</span>
+            </Link>
             <Link
               href="/dispatch"
               className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white shadow-sm hover:bg-emerald-500 transition-colors"

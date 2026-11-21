@@ -426,13 +426,13 @@ export function ProductionEntryContent() {
       return;
     }
 
-    if (selectedStage === "F2" && productionType === "VENDOR") {
+    if (productionType === "VENDOR") {
       if (!vendorName.trim()) {
-        setFormError("Vendor Name is mandatory when recording F2 Vendor production.");
+        setFormError("Vendor Name is mandatory when recording Vendor production.");
         return;
       }
       if (!dcNumber.trim()) {
-        setFormError("Delivery Challan (DC #) is mandatory when recording F2 Vendor production.");
+        setFormError("Delivery Challan (DC #) is mandatory when recording Vendor production.");
         return;
       }
     }
@@ -479,17 +479,17 @@ export function ProductionEntryContent() {
         stage: selectedStage,
         good_qty: goodQtyNum,
         rejected_quantity: rejQtyNum,
-        machine_id: selectedStage === "F2" && productionType === "VENDOR" ? undefined : selectedMachine,
+        machine_id: productionType === "VENDOR" ? undefined : selectedMachine,
         operator_name: selectedOperator,
         shift: shift,
         defect_code: rejQtyNum > 0 ? defectCode : undefined,
         remarks: remarks.trim() || undefined,
         heat_number: heatNumber.trim() || undefined,
         client_request_id: clientReqId,
-        production_type: selectedStage === "F2" ? productionType : "IN_HOUSE",
-        vendor_name: selectedStage === "F2" && productionType === "VENDOR" ? vendorName.trim() : undefined,
-        dc_number: selectedStage === "F2" && productionType === "VENDOR" ? dcNumber.trim() : undefined,
-        target_return_stage: selectedStage === "F2" && productionType === "VENDOR" ? targetReturnStage : undefined,
+        production_type: productionType,
+        vendor_name: productionType === "VENDOR" ? vendorName.trim() : undefined,
+        dc_number: productionType === "VENDOR" ? dcNumber.trim() : undefined,
+        target_return_stage: productionType === "VENDOR" ? targetReturnStage : undefined,
         is_f1_shortfall_closure: isShortfallF1,
         shortfall_reason: isShortfallF1 ? (shortfallReason.trim() || remarks.trim()) : undefined,
       });
@@ -505,15 +505,15 @@ export function ProductionEntryContent() {
         stage_rejection_total: res.stage_rejection_total,
         stage_onhand_available: res.stage_onhand_available,
         stage_inproc_remaining: res.stage_inproc_remaining,
-        production_type: res.production_type || (selectedStage === "F2" ? productionType : "IN_HOUSE"),
-        vendor_name: res.vendor_name || (selectedStage === "F2" && productionType === "VENDOR" ? vendorName.trim() : undefined),
-        dc_number: res.dc_number || (selectedStage === "F2" && productionType === "VENDOR" ? dcNumber.trim() : undefined),
+        production_type: res.production_type || productionType,
+        vendor_name: res.vendor_name || (productionType === "VENDOR" ? vendorName.trim() : undefined),
+        dc_number: res.dc_number || (productionType === "VENDOR" ? dcNumber.trim() : undefined),
         message: res.message
       });
 
       // Optimistically update availableWOs so the dropdown reflects vendor status immediately
-      const isVendorF2 = selectedStage === "F2" && productionType === "VENDOR";
-      if (isVendorF2) {
+      const isVendorActive = productionType === "VENDOR";
+      if (isVendorActive) {
         setAvailableWOs((prev) =>
           prev.map((w) =>
             w.wo_number === woData.wo_number
@@ -522,7 +522,7 @@ export function ProductionEntryContent() {
                   is_at_vendor: true,
                   vendor_name: vendorName.trim(),
                   vendor_dc: dcNumber.trim(),
-                  vendor_dispatch_stage: "F2",
+                  vendor_dispatch_stage: selectedStage,
                   vendor_target_return_stage: targetReturnStage,
                 }
               : w
@@ -1176,16 +1176,16 @@ export function ProductionEntryContent() {
                     </div>
                   )}
 
-                  {/* F2 Special Routing: In-House vs At Vendor Toggle */}
-                  {selectedStage === "F2" && (
+                  {/* Gate Routing: In-House vs At Vendor Toggle (Available at every gate) */}
+                  {selectedStage !== "DISPATCH" && (
                     <div className="p-4 rounded-xl border border-indigo-200 dark:border-indigo-900/60 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-3">
                       <div className="flex items-center justify-between">
                         <label className="text-xs font-bold text-indigo-950 dark:text-indigo-200 flex items-center gap-1.5">
                           <Factory className="h-4 w-4 text-indigo-600" />
-                          F2 PRODUCTION MODE / ROUTING *
+                          GATE {selectedStage} PRODUCTION MODE / ROUTING *
                         </label>
                         <span className="text-[10px] uppercase tracking-wider font-extrabold text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-900/60 px-2 py-0.5 rounded-md">
-                          Stage F2 Specific
+                          Stage {selectedStage} Execution
                         </span>
                       </div>
 
@@ -1205,7 +1205,11 @@ export function ProductionEntryContent() {
 
                         <button
                           type="button"
-                          onClick={() => setProductionType("VENDOR")}
+                          onClick={() => {
+                            setProductionType("VENDOR");
+                            if (selectedStage === "FI") setTargetReturnStage("FI");
+                            else if (!targetReturnStage) setTargetReturnStage(selectedStage);
+                          }}
                           className={`py-2.5 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
                             productionType === "VENDOR"
                               ? "border-purple-600 bg-purple-600 text-white shadow-sm ring-2 ring-purple-500/20"
@@ -1213,7 +1217,7 @@ export function ProductionEntryContent() {
                           }`}
                         >
                           <Building2 className="h-4 w-4" />
-                          <span>At Vendor (External DC)</span>
+                          <span>At Vendor (External DC / Subcontract)</span>
                         </button>
                       </div>
 
@@ -1229,7 +1233,7 @@ export function ProductionEntryContent() {
                               list="vendor-suggestions"
                               value={vendorName}
                               onChange={(e) => setVendorName(e.target.value)}
-                              placeholder="e.g. Sharada Engineering, Lakshmi CNC..."
+                              placeholder="e.g. Sharada Engineering, Lakshmi CNC, Painting Vendor..."
                               className="w-full rounded-xl border border-purple-300 dark:border-purple-800 bg-white dark:bg-zinc-900 px-3.5 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-purple-500"
                               required={productionType === "VENDOR"}
                             />
@@ -1239,6 +1243,8 @@ export function ProductionEntryContent() {
                               <option value="Super Tech Precision Works" />
                               <option value="Standard Machining Works" />
                               <option value="A-One Engineering Works" />
+                              <option value="Sri Lakshmi Surface Coatings" />
+                              <option value="Apex Heat Treaters" />
                             </datalist>
                           </div>
 
@@ -1260,9 +1266,27 @@ export function ProductionEntryContent() {
                           <div className="col-span-full pt-1">
                             <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1.5 flex items-center gap-1.5">
                               <ArrowRight className="h-3.5 w-3.5 text-purple-600" />
-                              EXPECTED RETURN DESTINATION (WHERE DOES MATERIAL GO WHEN RECEIVED?) *
+                              EXPECTED RETURN DESTINATION (WHERE DOES MATERIAL GO WHEN INWARDED?) *
                             </label>
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                              <button
+                                type="button"
+                                onClick={() => setTargetReturnStage(selectedStage)}
+                                className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                                  targetReturnStage === selectedStage
+                                    ? "border-indigo-600 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-900 dark:text-indigo-100 ring-2 ring-indigo-500/20"
+                                    : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                                }`}
+                              >
+                                <div className="flex items-center gap-1.5 mb-0.5">
+                                  <span className="w-2 h-2 rounded-full bg-indigo-500" />
+                                  <span className="font-extrabold text-xs">Return to {selectedStage} (Same Gate)</span>
+                                </div>
+                                <p className="text-[10px] text-zinc-500 leading-tight">
+                                  Returns to {selectedStage} for in-house finishing or second process.
+                                </p>
+                              </button>
+
                               <button
                                 type="button"
                                 onClick={() => setTargetReturnStage("FI")}
@@ -1274,66 +1298,72 @@ export function ProductionEntryContent() {
                               >
                                 <div className="flex items-center gap-1.5 mb-0.5">
                                   <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                                  <span className="font-extrabold text-xs">Return to FI</span>
+                                  <span className="font-extrabold text-xs">Return to FI (Final QA)</span>
                                 </div>
                                 <p className="text-[10px] text-zinc-500 leading-tight">
-                                  Final QA & CMM. Vendor completes machining.
+                                  Final inspection, CMM, or return from outside painting/coating.
                                 </p>
                               </button>
 
-                              <button
-                                type="button"
-                                onClick={() => setTargetReturnStage("F3")}
-                                className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                                  targetReturnStage === "F3"
-                                    ? "border-sky-600 bg-sky-50 dark:bg-sky-950/40 text-sky-900 dark:text-sky-100 ring-2 ring-sky-500/20"
-                                    : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
-                                }`}
-                              >
-                                <div className="flex items-center gap-1.5 mb-0.5">
-                                  <span className="w-2 h-2 rounded-full bg-sky-500" />
-                                  <span className="font-extrabold text-xs">Return to F3</span>
-                                </div>
-                                <p className="text-[10px] text-zinc-500 leading-tight">
-                                  CNC precision machining. Vendor did roughing/heat treat.
-                                </p>
-                              </button>
+                              {selectedStage !== "F3" && (
+                                <button
+                                  type="button"
+                                  onClick={() => setTargetReturnStage("F3")}
+                                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                                    targetReturnStage === "F3"
+                                      ? "border-sky-600 bg-sky-50 dark:bg-sky-950/40 text-sky-900 dark:text-sky-100 ring-2 ring-sky-500/20"
+                                      : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-1.5 mb-0.5">
+                                    <span className="w-2 h-2 rounded-full bg-sky-500" />
+                                    <span className="font-extrabold text-xs">Return to F3 (CNC)</span>
+                                  </div>
+                                  <p className="text-[10px] text-zinc-500 leading-tight">
+                                    CNC precision machining. Vendor completed roughing.
+                                  </p>
+                                </button>
+                              )}
 
-                              <button
-                                type="button"
-                                onClick={() => setTargetReturnStage("SP")}
-                                className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                                  targetReturnStage === "SP"
-                                    ? "border-amber-600 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-100 ring-2 ring-amber-500/20"
-                                    : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
-                                }`}
-                              >
-                                <div className="flex items-center gap-1.5 mb-0.5">
-                                  <span className="w-2 h-2 rounded-full bg-amber-500" />
-                                  <span className="font-extrabold text-xs">Return to SP</span>
-                                </div>
-                                <p className="text-[10px] text-zinc-500 leading-tight">
-                                  Surface treatment, shot blasting, or painting.
-                                </p>
-                              </button>
+                              {selectedStage !== "SP" && (
+                                <button
+                                  type="button"
+                                  onClick={() => setTargetReturnStage("SP")}
+                                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                                    targetReturnStage === "SP"
+                                      ? "border-amber-600 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-100 ring-2 ring-amber-500/20"
+                                      : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-1.5 mb-0.5">
+                                    <span className="w-2 h-2 rounded-full bg-amber-500" />
+                                    <span className="font-extrabold text-xs">Return to SP</span>
+                                  </div>
+                                  <p className="text-[10px] text-zinc-500 leading-tight">
+                                    Surface treatment, shot blasting, or heat treat.
+                                  </p>
+                                </button>
+                              )}
 
-                              <button
-                                type="button"
-                                onClick={() => setTargetReturnStage("F2")}
-                                className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                                  targetReturnStage === "F2"
-                                    ? "border-indigo-600 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-900 dark:text-indigo-100 ring-2 ring-indigo-500/20"
-                                    : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
-                                }`}
-                              >
-                                <div className="flex items-center gap-1.5 mb-0.5">
-                                  <span className="w-2 h-2 rounded-full bg-indigo-500" />
-                                  <span className="font-extrabold text-xs">Return to F2</span>
-                                </div>
-                                <p className="text-[10px] text-zinc-500 leading-tight">
-                                  Intermediate outside process. Returns to F2 for in-house ops.
-                                </p>
-                              </button>
+                              {selectedStage !== "PACKING" && (
+                                <button
+                                  type="button"
+                                  onClick={() => setTargetReturnStage("PACKING")}
+                                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                                    targetReturnStage === "PACKING"
+                                      ? "border-teal-600 bg-teal-50 dark:bg-teal-950/40 text-teal-900 dark:text-teal-100 ring-2 ring-teal-500/20"
+                                      : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-1.5 mb-0.5">
+                                    <span className="w-2 h-2 rounded-full bg-teal-500" />
+                                    <span className="font-extrabold text-xs">Return to PACKING</span>
+                                  </div>
+                                  <p className="text-[10px] text-zinc-500 leading-tight">
+                                    Material painted/coated ready directly for packing.
+                                  </p>
+                                </button>
+                              )}
                             </div>
                           </div>
                         </div>

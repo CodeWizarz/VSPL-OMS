@@ -641,7 +641,7 @@ class DispatchService:
 
         # 8. Create New Conversion Work Order replacing the returned quantity
         entry_stage = (req.entry_stage or "F1").strip().upper()
-        all_stages = ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+        all_stages = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
         entry_idx = all_stages.index(entry_stage) if entry_stage in all_stages else 0
         conv_route = all_stages[entry_idx:]
 

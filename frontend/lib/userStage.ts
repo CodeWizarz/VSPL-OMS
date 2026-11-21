@@ -9,7 +9,8 @@ export const STAGE_CONFIGS: {
   { id: "F3", name: "Precision CNC (F3)", shortDesc: "Precision machining & boring", badgeBg: "bg-purple-600" },
   { id: "SP", name: "Surface Prep (SP)", shortDesc: "Shot blasting & heat treat", badgeBg: "bg-amber-600" },
   { id: "FI", name: "Final QA (FI)", shortDesc: "CMM, visual inspection & QA sign-off", badgeBg: "bg-emerald-600" },
-  { id: "PACKING", name: "Packing & BSR", shortDesc: "Finished goods buffering & packing", badgeBg: "bg-teal-600" },
+  { id: "PACKING", name: "Packing", shortDesc: "Protective boxing & palletizing", badgeBg: "bg-teal-600" },
+  { id: "BSR", name: "BSR Store", shortDesc: "Bonded storage room & FG buffer", badgeBg: "bg-purple-600" },
   { id: "DISPATCH", name: "Dispatch", shortDesc: "DC generation & customer shipping", badgeBg: "bg-cyan-600" },
 ];
 
@@ -54,7 +55,7 @@ export function resolveAssignedStage(user: {
 
   // For pure single-stage operators, lock them to their designated station:
   // 1. Department match
-  for (const s of ["F1", "F2", "F3", "SP", "FI", "PACKING", "DISPATCH"]) {
+  for (const s of ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]) {
     if (dept === s || dept.startsWith(s + " ") || dept.endsWith(" " + s)) {
       return { stage: s, isLocked: true, label: s };
     }
@@ -63,6 +64,7 @@ export function resolveAssignedStage(user: {
   if (dept.includes("CNC") || dept.includes("FETTLING") || dept.includes("TURNING")) return { stage: "F2", isLocked: true, label: "F2" };
   if (dept.includes("QUALITY") || dept.includes("INSPECTION") || dept.includes("QA")) return { stage: "FI", isLocked: true, label: "FI" };
   if (dept.includes("DISPATCH")) return { stage: "DISPATCH", isLocked: true, label: "DISPATCH" };
+  if (dept.includes("BSR") || dept.includes("BONDED")) return { stage: "BSR", isLocked: true, label: "BSR" };
   if (dept.includes("PACKING") || dept.includes("STORES") || dept.includes("STORE")) return { stage: "PACKING", isLocked: true, label: "PACKING" };
 
   // 2. Email pattern match
@@ -72,11 +74,13 @@ export function resolveAssignedStage(user: {
   if (email.includes(".sp@") || email.startsWith("sp@") || email.includes("-sp@")) return { stage: "SP", isLocked: true, label: "SP" };
   if (email.includes(".fi@") || email.includes(".qa@") || email.startsWith("qa@") || email.includes("quality")) return { stage: "FI", isLocked: true, label: "FI" };
   if (email.includes("dispatch")) return { stage: "DISPATCH", isLocked: true, label: "DISPATCH" };
+  if (email.includes("bsr")) return { stage: "BSR", isLocked: true, label: "BSR" };
   if (email.includes("packing")) return { stage: "PACKING", isLocked: true, label: "PACKING" };
 
   // 3. Role match
   const primaryRole = (user.role || "").trim().toUpperCase();
   if (primaryRole === "DISPATCH") return { stage: "DISPATCH", isLocked: true, label: "DISPATCH" };
+  if (primaryRole === "BSR") return { stage: "BSR", isLocked: true, label: "BSR" };
   if (primaryRole === "PACKING") return { stage: "PACKING", isLocked: true, label: "PACKING" };
   if (primaryRole === "QA") return { stage: "FI", isLocked: true, label: "FI" };
 

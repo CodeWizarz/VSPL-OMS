@@ -757,7 +757,8 @@ function WOReleaseSearchContent() {
                 <option value="F3">F3 (Heat Treatment)</option>
                 <option value="SP">SP (Special Processing)</option>
                 <option value="FI">FI (Final Inspection)</option>
-                <option value="PACKING">PACKING / BSR</option>
+                <option value="PACKING">PACKING (Protective Packing)</option>
+                <option value="BSR">BSR (Bonded Store)</option>
                 <option value="DISPATCH">DISPATCH</option>
               </select>
 

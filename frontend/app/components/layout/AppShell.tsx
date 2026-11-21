@@ -42,7 +42,8 @@ import {
   GraduationCap,
   Eye,
   CalendarCheck,
-  TrendingUp
+  TrendingUp,
+  Warehouse
 } from "lucide-react";
 import { logout, getCurrentUserRole, getCurrentUserRoles, getCurrentUser } from "@/lib/api";
 
@@ -158,12 +159,17 @@ const NAV_GROUPS: NavGroup[] = [
     group: "PACKING & DISPATCH",
     items: [
       {
-        name: "Packing / BSR Queue",
+        name: "Stage 6: Packing Queue",
         href: "/packing",
         icon: <PackageCheck className="h-4 w-4 text-cyan-500" />,
       },
       {
-        name: "Dispatch Center",
+        name: "Stage 7: BSR (Bonded Store)",
+        href: "/bsr",
+        icon: <Warehouse className="h-4 w-4 text-purple-500" />,
+      },
+      {
+        name: "Stage 8: Dispatch Center",
         href: "/dispatch",
         icon: <Truck className="h-4 w-4 text-emerald-500" />,
       },
