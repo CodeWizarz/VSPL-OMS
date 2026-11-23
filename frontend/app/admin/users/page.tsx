@@ -6,10 +6,12 @@ import {
   createUser,
   resetUserPassword,
   setUserStatus,
+  updateUser,
   AdminUser,
   TemporaryPasswordResult,
 } from "@/lib/api";
 import { UserPlus, KeyRound, Copy, CheckCircle2, AlertTriangle, ShieldAlert } from "lucide-react";
+import { Modal } from "@/app/components/ui/Modal";
 import { DEPARTMENT_SUGGESTIONS } from "@/lib/workspaces";
 
 const ROLES = [
@@ -39,6 +41,14 @@ export default function AdminUsersPage() {
   const [tempResult, setTempResult] = useState<TemporaryPasswordResult | null>(null);
   const [copied, setCopied] = useState(false);
   const [rowBusy, setRowBusy] = useState<string | null>(null);
+
+  // Edit existing user (name / department / role)
+  const [editing, setEditing] = useState<AdminUser | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDepartment, setEditDepartment] = useState("");
+  const [editRole, setEditRole] = useState("");
+  const [editError, setEditError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   async function loadUsers() {
     setLoading(true);
@@ -98,6 +108,38 @@ export default function AdminUsersPage() {
       setListError(err?.response?.data?.detail || "Could not update status.");
     } finally {
       setRowBusy(null);
+    }
+  }
+
+  function openEdit(user: AdminUser) {
+    setEditing(user);
+    setEditName(user.full_name);
+    setEditDepartment(user.department || "");
+    setEditRole(user.role);
+    setEditError("");
+  }
+
+  async function handleSaveEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editing) return;
+    setEditError("");
+    setSaving(true);
+    try {
+      // Send only what changed; the backend audit-logs each change.
+      const payload: { full_name?: string; department?: string; role?: string } = {};
+      if (editName.trim() !== editing.full_name) payload.full_name = editName;
+      if (editDepartment.trim() !== (editing.department || "")) payload.department = editDepartment;
+      if (editRole !== editing.role) payload.role = editRole;
+      if (Object.keys(payload).length > 0) {
+        await updateUser(editing.id, payload);
+        await loadUsers();
+      }
+      setEditing(null);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setEditError(typeof detail === "string" ? detail : "Could not save changes. Check the name is not blank.");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -272,6 +314,14 @@ export default function AdminUsersPage() {
                       <button
                         type="button"
                         disabled={rowBusy === u.id}
+                        onClick={() => openEdit(u)}
+                        className="rounded-lg bg-blue-50 dark:bg-blue-950/40 px-2.5 py-1 text-[11px] font-semibold text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/50 disabled:opacity-50 transition-colors"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        disabled={rowBusy === u.id}
                         onClick={() => handleReset(u)}
                         className="rounded-lg bg-zinc-100 dark:bg-zinc-800 px-2.5 py-1 text-[11px] font-semibold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 transition-colors"
                       >
@@ -293,6 +343,83 @@ export default function AdminUsersPage() {
           )}
         </div>
       </div>
+
+      <Modal
+        isOpen={editing !== null}
+        onClose={() => setEditing(null)}
+        title="Edit User"
+        subtitle={editing ? editing.email : undefined}
+        maxWidth="md"
+      >
+        <form onSubmit={handleSaveEdit} className="space-y-4">
+          <div>
+            <label htmlFor="edit-name" className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+              Full name
+            </label>
+            <input
+              id="edit-name"
+              required
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              className="mt-1.5 w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-transparent px-3 py-2 text-xs"
+            />
+          </div>
+          <div>
+            <label htmlFor="edit-department" className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+              Department
+            </label>
+            <input
+              id="edit-department"
+              list="department-suggestions"
+              value={editDepartment}
+              onChange={(e) => setEditDepartment(e.target.value)}
+              placeholder="e.g. F1 Foundry, Packing / BSR"
+              className="mt-1.5 w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-transparent px-3 py-2 text-xs"
+            />
+            <p className="mt-1 text-[11px] text-zinc-500">Decides which screens they see and their home page.</p>
+          </div>
+          <div>
+            <label htmlFor="edit-role" className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+              Role
+            </label>
+            <select
+              id="edit-role"
+              value={editRole}
+              onChange={(e) => setEditRole(e.target.value)}
+              className="mt-1.5 w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-transparent px-3 py-2 text-xs"
+            >
+              {ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {roleLabel(r)}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-zinc-500">Decides what they are allowed to do. Takes effect immediately.</p>
+          </div>
+          {editError && (
+            <div className="flex items-start gap-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 px-2.5 py-1.5 text-[11px] font-medium text-rose-600 dark:text-rose-400">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              <span>{editError}</span>
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={() => setEditing(null)}
+              className="rounded-lg border border-zinc-200 dark:border-zinc-700 px-4 py-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-500 disabled:opacity-60"
+            >
+              {saving ? "Saving..." : "Save Changes"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </AppShell>
   );
 }

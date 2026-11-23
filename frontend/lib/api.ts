@@ -110,6 +110,14 @@ export async function resetUserPassword(userId: string): Promise<TemporaryPasswo
   return data;
 }
 
+export async function updateUser(
+  userId: string,
+  payload: { full_name?: string; department?: string; role?: string }
+): Promise<AdminUser> {
+  const { data } = await api.patch(`/api/v1/users/${encodeURIComponent(userId)}`, payload);
+  return data;
+}
+
 export async function setUserStatus(userId: string, isActive: boolean): Promise<AdminUser> {
   const { data } = await api.patch(`/api/v1/users/${encodeURIComponent(userId)}/status`, {
     is_active: isActive,

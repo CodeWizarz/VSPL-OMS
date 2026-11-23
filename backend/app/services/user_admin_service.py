@@ -5,7 +5,7 @@ from app.models.user import User, UserRole
 from app.models.audit import AuditLog
 from app.core.security import generate_temp_password, get_password_hash, verify_password, create_access_token
 from app.core.roles import USER_MANAGEMENT_ROLES
-from app.schemas.auth import AdminUserCreate, TempPasswordResult, ChangePasswordRequest, UserOut, Token
+from app.schemas.auth import AdminUserCreate, AdminUserUpdate, TempPasswordResult, ChangePasswordRequest, UserOut, Token
 
 
 def _require_admin(current_user: User, action_label: str) -> None:
@@ -78,6 +78,49 @@ class UserAdminService:
         db.commit()
         db.refresh(target)
         return TempPasswordResult(user=UserOut.model_validate(target), temporary_password=temp_password)
+
+    @staticmethod
+    def update_user(db: Session, user_id: str, req: AdminUserUpdate, current_user: User) -> UserOut:
+        _require_admin(current_user, "edit a user account")
+
+        target = db.query(User).filter(User.id == user_id).first()
+        if not target:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+        sent = req.model_fields_set
+        changes = []
+
+        if "role" in sent and req.role is not None and req.role != target.role:
+            # Never let user management lock itself out: an admin cannot demote their
+            # own account, and the last active admin cannot be demoted by anyone.
+            if target.role == UserRole.ADMIN:
+                if target.id == current_user.id:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="You cannot change your own Admin role.",
+                    )
+                active_admins = db.query(User).filter(User.role == UserRole.ADMIN, User.is_active.is_(True)).count()
+                if target.is_active and active_admins <= 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Cannot change the role of the last active Admin.",
+                    )
+            changes.append(f"role: {target.role.value} -> {req.role.value}")
+            target.role = req.role
+
+        if "full_name" in sent and req.full_name is not None and req.full_name != target.full_name:
+            changes.append(f"full_name: {target.full_name!r} -> {req.full_name!r}")
+            target.full_name = req.full_name
+
+        if "department" in sent and req.department != target.department:
+            changes.append(f"department: {target.department!r} -> {req.department!r}")
+            target.department = req.department
+
+        if changes:
+            _audit(db, current_user, "USER_UPDATED", target, details="; ".join(changes))
+            db.commit()
+            db.refresh(target)
+        return UserOut.model_validate(target)
 
     @staticmethod
     def set_active(db: Session, user_id: str, is_active: bool, current_user: User) -> UserOut:

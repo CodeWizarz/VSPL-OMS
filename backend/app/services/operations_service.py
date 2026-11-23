@@ -7,7 +7,10 @@ from sqlalchemy.orm import Session
 from app.models.order import Order, Customer, Part, OrderStatus
 from app.models.master_data import POLine, ScheduleMaster, ScheduleStatus
 from app.models.work_order import WorkOrder, WORoute, WOStatus
-from app.models.production_movement import StageWIP
+from app.models.production_movement import StageWIP, ProductionMovement
+from app.models.production import ProductionUpdate
+from app.models.packing import PackingTransaction
+from app.models.dispatch import Dispatch
 from app.models.conversion import Conversion
 from app.models.nc import NCRecord, next_nc_number
 from app.models.audit import AuditLog
@@ -26,6 +29,27 @@ from app.services.oms_integration_service import (
     DEFAULT_YIELDS
 )
 from app.services.conversion_mapping_service import ConversionMappingService
+
+
+def _production_started_reason(db: Session, wo: WorkOrder) -> Optional[str]:
+    """Why this WO counts as 'in production' (so it must not be re-released), or None.
+
+    Any recorded shop-floor fact counts: a production entry, a stage movement, an NC
+    raised against it, packing, or a dispatch -- or a terminal status."""
+    status_value = getattr(wo.status, "value", wo.status)
+    if status_value in (WOStatus.DISPATCHED.value, WOStatus.CLOSED.value):
+        return f"it is already {status_value}"
+    checks = (
+        (ProductionUpdate, "production has been recorded"),
+        (ProductionMovement, "material has been moved between stages"),
+        (NCRecord, "rejections have been recorded"),
+        (PackingTransaction, "it has been packed"),
+        (Dispatch, "it has been dispatched"),
+    )
+    for model, reason in checks:
+        if db.query(model.id).filter(model.work_order_id == wo.id).first() is not None:
+            return reason
+    return None
 
 class OperationsService:
     @staticmethod
@@ -232,6 +256,20 @@ class OperationsService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Work Order '{req.wo_number}' not found."
+            )
+
+        # Releasing rebuilds the WO's route and stage WIP from scratch (see the deletes
+        # below). Once any shop-floor activity has been recorded against this WO, doing
+        # that would silently erase production history and break the plant balance
+        # (released = WIP + dispatched + scrap), so a re-release is refused from then on.
+        started_reason = _production_started_reason(db, wo)
+        if started_reason:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Work Order '{wo.wo_number}' cannot be re-released: {started_reason}. "
+                    "Re-releasing would erase its recorded stage history."
+                ),
             )
 
         stages = [s.strip().upper() for s in req.route_stages if s.strip()]
