@@ -16,6 +16,8 @@ class UserRole(str, enum.Enum):
     PACKING = "packing"
     STORE = "store"
     SALES = "sales"
+    SUPERVISOR = "supervisor"   # shop-floor supervisor: production entry + movement only
+    ACCOUNTS = "accounts"       # records customer payments against invoices
     DATA_ANALYST = "data_analyst"
 
 class User(Base):

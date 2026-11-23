@@ -8,8 +8,21 @@ from app.schemas.work_order import (
     WorkOrderListItem, WorkOrderTrackingDetail, WorkOrderRouteResponse
 )
 from app.services.work_order_service import WorkOrderService
+from app.services.work_queue_service import WorkQueueService
 
 router = APIRouter(prefix="/api/v1/work-orders", tags=["work-orders"])
+
+@router.get("/queue")
+def get_stage_work_queue(
+    stage: str = Query(..., min_length=1, max_length=40, description="Stage, e.g. F1, F2, F3, SP, FI, PACKING / BSR"),
+    days: int = Query(2, ge=0, le=14, description="How many days ahead counts as 'next'"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Read-only shop-floor queue: WOs with material at `stage`, bucketed by that stage's
+    planned due date (overdue / today / next N days / later / no date)."""
+    return WorkQueueService.get_stage_queue(db, stage=stage, days=days)
+
 
 @router.get("", response_model=List[WorkOrderListItem])
 def list_work_orders(

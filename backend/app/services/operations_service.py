@@ -7,7 +7,10 @@ from sqlalchemy.orm import Session
 from app.models.order import Order, Customer, Part, OrderStatus
 from app.models.master_data import POLine, ScheduleMaster, ScheduleStatus
 from app.models.work_order import WorkOrder, WORoute, WOStatus
-from app.models.production_movement import StageWIP
+from app.models.production_movement import StageWIP, ProductionMovement
+from app.models.production import ProductionUpdate
+from app.models.packing import PackingTransaction
+from app.models.dispatch import Dispatch
 from app.models.conversion import Conversion
 from app.models.nc import NCRecord, next_nc_number
 from app.models.audit import AuditLog
@@ -15,6 +18,7 @@ from app.models.user import User
 from app.schemas.operations import (
     OrderIntakeCreate, OrderIntakeResponse,
     WOReleaseCreate, WOReleaseResponse,
+    WOEditRequest, WOEditResponse,
     ConversionCreate, ConversionResponse,
     NCRecordCreate, NCRecordUpdate, NCRecordOut
 )
@@ -26,6 +30,28 @@ from app.services.oms_integration_service import (
     DEFAULT_YIELDS
 )
 from app.services.conversion_mapping_service import ConversionMappingService
+from app.services.stage_plan_service import compute_stage_plan
+
+
+def _production_started_reason(db: Session, wo: WorkOrder) -> Optional[str]:
+    """Why this WO counts as 'in production' (so it must not be re-released), or None.
+
+    Any recorded shop-floor fact counts: a production entry, a stage movement, an NC
+    raised against it, packing, or a dispatch -- or a terminal status."""
+    status_value = getattr(wo.status, "value", wo.status)
+    if status_value in (WOStatus.DISPATCHED.value, WOStatus.CLOSED.value):
+        return f"it is already {status_value}"
+    checks = (
+        (ProductionUpdate, "production has been recorded"),
+        (ProductionMovement, "material has been moved between stages"),
+        (NCRecord, "rejections have been recorded"),
+        (PackingTransaction, "it has been packed"),
+        (Dispatch, "it has been dispatched"),
+    )
+    for model, reason in checks:
+        if db.query(model.id).filter(model.work_order_id == wo.id).first() is not None:
+            return reason
+    return None
 
 class OperationsService:
     @staticmethod
@@ -166,6 +192,7 @@ class OperationsService:
                 db.flush()
                 
                 targets = calculate_stage_targets(wo_qty, route=default_route)
+                plan = compute_stage_plan(default_route, delivery_date=order.delivery_date, start_date=date.today())
                 for seq, stg in enumerate(default_route, start=1):
                     r = WORoute(
                         work_order_id=wo.id,
@@ -174,7 +201,9 @@ class OperationsService:
                         stage_target_qty=targets.get(stg, wo_qty),
                         cumulative_ent_qty=wo_qty if seq == 1 else 0,
                         cumulative_inproc_qty=wo_qty if seq == 1 else 0,
-                        stage_status="In-Progress" if seq == 1 else "Pending"
+                        stage_status="In-Progress" if seq == 1 else "Pending",
+                        planned_start=plan[stg][0],
+                        planned_end=plan[stg][1],
                     )
                     db.add(r)
                 
@@ -226,12 +255,186 @@ class OperationsService:
         )
 
     @staticmethod
+    def edit_work_order(db: Session, wo_number: str, req: WOEditRequest, current_user: Optional[User] = None) -> WOEditResponse:
+        """PPC edit of a Work Order, limited by how far it has progressed so the plant
+        balance (released = WIP + dispatched + scrap) can never be broken:
+
+        - Dispatched / closed: nothing can change.
+        - No shop-floor activity yet: quantity and route may change (the WO is rebuilt
+          exactly like a release), and stage plan dates may change.
+        - Production started: quantity is locked. The route may only change AFTER the
+          furthest stage material has reached (add/remove/reorder pending stages); stage
+          plan dates may change.
+        Every edit is audit-logged with the reason."""
+        wo = db.query(WorkOrder).filter(WorkOrder.wo_number == wo_number.strip()).with_for_update().first()
+        if not wo:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Work Order '{wo_number}' not found.")
+
+        status_value = getattr(wo.status, "value", wo.status)
+        if status_value in (WOStatus.DISPATCHED.value, WOStatus.CLOSED.value):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Work Order '{wo.wo_number}' is {status_value} and can no longer be edited.",
+            )
+
+        if req.physical_wo_qty is None and req.route_stages is None and not req.stage_plan:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nothing to change.")
+
+        started_reason = _production_started_reason(db, wo)
+        changes: List[str] = []
+
+        routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
+        current_route = [r.stage for r in routes]
+        new_route = None
+        if req.route_stages is not None:
+            new_route = [s.strip().upper() for s in req.route_stages if s and s.strip()]
+            new_route = [s for s in new_route if s != "DISPATCH"] + ["DISPATCH"]
+            if len(set(new_route)) != len(new_route):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A stage cannot appear twice in the route.")
+            if new_route == [s.upper() for s in current_route]:
+                new_route = None
+
+        qty_changed = req.physical_wo_qty is not None and req.physical_wo_qty != wo.physical_wo_qty
+
+        if (qty_changed or new_route is not None) and not started_reason:
+            # Nothing has happened on the floor yet: rebuild exactly like a release.
+            before = f"Qty {wo.physical_wo_qty}, Route {' -> '.join(current_route) or '-'}"
+            OperationsService.release_work_order(
+                db,
+                WOReleaseCreate(
+                    wo_number=wo.wo_number,
+                    physical_wo_qty=req.physical_wo_qty or wo.physical_wo_qty,
+                    route_stages=new_route or current_route or ["F1", "DISPATCH"],
+                    remarks=f"WO edit: {req.reason}",
+                ),
+                current_user=current_user,
+            )
+            wo = db.query(WorkOrder).filter(WorkOrder.id == wo.id).with_for_update().first()
+            routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
+            changes.append(f"{before} -> Qty {wo.physical_wo_qty}, Route {' -> '.join(r.stage for r in routes)}")
+        else:
+            if qty_changed:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Quantity is locked: {started_reason}. Use a conversion or NC disposition to adjust quantities.",
+                )
+            if new_route is not None:
+                reached = -1
+                wip_stages = {
+                    (w.stage or "").strip().upper()
+                    for w in db.query(StageWIP).filter(StageWIP.work_order_id == wo.id).all()
+                    if (w.ent_qty or 0) > 0 or (w.available_wip or 0) > 0
+                }
+                for idx, r in enumerate(routes):
+                    if (r.cumulative_ent_qty or 0) > 0 or (r.stage or "").strip().upper() in wip_stages:
+                        reached = idx
+                locked = [r.stage.upper() for r in routes[: reached + 1]]
+                if new_route[: len(locked)] != locked:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            f"Stages already reached cannot change. The route must start with "
+                            f"{' -> '.join(locked)}; only the stages after it can be edited."
+                        ),
+                    )
+                tail = new_route[len(locked):]
+                if not tail:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The route must end with DISPATCH.")
+                for r in routes[reached + 1:]:
+                    db.delete(r)
+                db.flush()
+                targets = calculate_stage_targets(wo.physical_wo_qty, route=new_route)
+                plan = compute_stage_plan(
+                    new_route,
+                    delivery_date=wo.order.delivery_date if wo.order else None,
+                    start_date=date.today(),
+                )
+                for offset, stg in enumerate(tail, start=len(locked) + 1):
+                    db.add(WORoute(
+                        work_order_id=wo.id,
+                        stage=stg,
+                        sequence=offset,
+                        stage_target_qty=targets.get(stg, wo.physical_wo_qty),
+                        cumulative_ent_qty=0,
+                        cumulative_inproc_qty=0,
+                        stage_status="Pending",
+                        planned_start=plan[stg][0],
+                        planned_end=plan[stg][1],
+                    ))
+                db.flush()
+                changes.append(f"Route {' -> '.join(current_route)} -> {' -> '.join(new_route)}")
+                OMSIntegrationService.recompute_work_order(db, wo)
+                routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
+
+        if req.stage_plan:
+            by_stage = {r.stage.strip().upper(): r for r in routes}
+            for item in req.stage_plan:
+                row = by_stage.get(item.stage.strip().upper())
+                if row is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Stage '{item.stage}' is not on this Work Order's route.",
+                    )
+                start = item.planned_start if item.planned_start is not None else row.planned_start
+                end = item.planned_end if item.planned_end is not None else row.planned_end
+                if start and end and start > end:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Stage '{row.stage}': planned start cannot be after planned end.",
+                    )
+                if (start, end) != (row.planned_start, row.planned_end):
+                    changes.append(f"{row.stage} plan {row.planned_start}..{row.planned_end} -> {start}..{end}")
+                    row.planned_start, row.planned_end = start, end
+
+        if changes:
+            db.add(AuditLog(
+                user_id=current_user.id if current_user else None,
+                user_name=current_user.full_name if current_user else "Planner",
+                action="WO_EDITED",
+                entity="WorkOrder",
+                entity_id=wo.wo_number,
+                new_value="; ".join(changes)[:2000],
+                details=req.reason,
+            ))
+        db.commit()
+        db.refresh(wo)
+        routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
+        return WOEditResponse(
+            wo_number=wo.wo_number,
+            physical_wo_qty=wo.physical_wo_qty,
+            route_stages=[r.stage for r in routes],
+            stage_plans={
+                r.stage: {
+                    "planned_start": r.planned_start.isoformat() if r.planned_start else None,
+                    "planned_end": r.planned_end.isoformat() if r.planned_end else None,
+                }
+                for r in routes
+            },
+            changes=changes,
+            message=f"Work Order '{wo.wo_number}' updated." if changes else "No changes were needed.",
+        )
+
+    @staticmethod
     def release_work_order(db: Session, req: WOReleaseCreate, current_user: Optional[User] = None) -> WOReleaseResponse:
         wo = db.query(WorkOrder).filter(WorkOrder.wo_number == req.wo_number.strip()).with_for_update().first()
         if not wo:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Work Order '{req.wo_number}' not found."
+            )
+
+        # Releasing rebuilds the WO's route and stage WIP from scratch (see the deletes
+        # below). Once any shop-floor activity has been recorded against this WO, doing
+        # that would silently erase production history and break the plant balance
+        # (released = WIP + dispatched + scrap), so a re-release is refused from then on.
+        started_reason = _production_started_reason(db, wo)
+        if started_reason:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Work Order '{wo.wo_number}' cannot be re-released: {started_reason}. "
+                    "Re-releasing would erase its recorded stage history."
+                ),
             )
 
         stages = [s.strip().upper() for s in req.route_stages if s.strip()]
@@ -253,6 +456,7 @@ class OperationsService:
         # Clear old routes and recalculate stage targets over the released route only
         db.query(WORoute).filter(WORoute.work_order_id == wo.id).delete()
         targets = calculate_stage_targets(req.physical_wo_qty, route=stages)
+        plan = compute_stage_plan(stages, delivery_date=wo.order.delivery_date if wo.order else None, start_date=date.today())
         
         for seq, stg in enumerate(stages, start=1):
             r = WORoute(
@@ -262,7 +466,9 @@ class OperationsService:
                 stage_target_qty=targets.get(stg, req.physical_wo_qty),
                 cumulative_ent_qty=req.physical_wo_qty if seq == 1 else 0,
                 cumulative_inproc_qty=req.physical_wo_qty if seq == 1 else 0,
-                stage_status="In-Progress" if seq == 1 else "Pending"
+                stage_status="In-Progress" if seq == 1 else "Pending",
+                planned_start=plan[stg][0],
+                planned_end=plan[stg][1],
             )
             db.add(r)
 
@@ -404,6 +610,7 @@ class OperationsService:
         conv_route = all_stages[entry_idx:]
 
         conv_targets = calculate_stage_targets(req.quantity, route=conv_route)
+        plan = compute_stage_plan(conv_route, delivery_date=dest_order.delivery_date, start_date=date.today())
         for seq, stg in enumerate(conv_route, start=1):
             r = WORoute(
                 work_order_id=conv_wo.id,
@@ -412,7 +619,9 @@ class OperationsService:
                 stage_target_qty=conv_targets.get(stg, req.quantity),
                 cumulative_ent_qty=req.quantity if seq == 1 else 0,
                 cumulative_inproc_qty=req.quantity if seq == 1 else 0,
-                stage_status="In-Progress" if seq == 1 else "Pending"
+                stage_status="In-Progress" if seq == 1 else "Pending",
+                planned_start=plan[stg][0],
+                planned_end=plan[stg][1],
             )
             db.add(r)
 

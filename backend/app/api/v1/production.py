@@ -14,6 +14,7 @@ from app.services.production_service import ProductionService
 from app.services.work_order_service import WorkOrderService
 from app.services.oms_integration_service import OMSIntegrationService
 from app.core.roles import PRODUCTION_ENTRY_ROLES, MATERIAL_MOVEMENT_ROLES
+from app.core.departments import assert_user_may_post_at
 
 router = APIRouter(prefix="/api/v1/production", tags=["production"])
 
@@ -24,6 +25,7 @@ def record_stage_production(
     user: User = Depends(require_roles(*PRODUCTION_ENTRY_ROLES))
 ):
     """Record production completion (Good Qty & Rejection Qty) at a stage without immediately moving material."""
+    assert_user_may_post_at(user, payload.stage, "record production")
     return ProductionService.record_stage_production(db, payload, current_user=user)
 
 @router.post("/move", response_model=MovementResponse)
@@ -33,6 +35,7 @@ def move_parts(
     user: User = Depends(require_roles(*MATERIAL_MOVEMENT_ROLES))
 ):
     """Execute physical part movement between manufacturing stages with strict route, idempotency, and OMS WIP validation."""
+    assert_user_may_post_at(user, payload.from_stage, "move material")
     return ProductionService.move_parts(db, payload, current_user=user)
 
 @router.get("/movements", response_model=List[MovementListItem])

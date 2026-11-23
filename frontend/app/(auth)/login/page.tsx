@@ -31,7 +31,8 @@ export default function LoginPage() {
     setError("");
     try {
       await login(email, password);
-      router.push("/dashboard");
+      // "/" routes each user to their department's home screen.
+      router.push("/");
     } catch (err: any) {
       setError(err?.response?.data?.detail || "Invalid email or password. Please try again.");
     } finally {

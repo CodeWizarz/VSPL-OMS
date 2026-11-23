@@ -7,13 +7,14 @@ from app.models.user import User
 from app.schemas.operations import (
     OrderIntakeCreate, OrderIntakeResponse,
     WOReleaseCreate, WOReleaseResponse,
+    WOEditRequest, WOEditResponse,
     ConversionCreate, ConversionResponse,
     NCRecordCreate, NCRecordUpdate, NCRecordOut
 )
 from app.schemas.work_order import OARListItem
 from app.services.operations_service import OperationsService
 from app.services.work_order_service import WorkOrderService
-from app.core.roles import PLANNING_ROLES, WO_RELEASE_ROLES, CONVERSION_MODULE_ROLES, QUALITY_APPROVAL_ROLES
+from app.core.roles import PLANNING_ROLES, WO_RELEASE_ROLES, CONVERSION_MODULE_ROLES, QUALITY_APPROVAL_ROLES, ORDER_INTAKE_ROLES
 
 router = APIRouter(prefix="/api/v1/operations", tags=["operations"])
 
@@ -21,7 +22,7 @@ router = APIRouter(prefix="/api/v1/operations", tags=["operations"])
 def create_order_intake(
     payload: OrderIntakeCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*PLANNING_ROLES))
+    user: User = Depends(require_roles(*ORDER_INTAKE_ROLES))
 ):
     """Process incoming Order Intake (OAR) and create corresponding Work Orders.
     Planning-only per the OMS Roles & Responsibilities spec (Production Manager
@@ -58,6 +59,18 @@ def release_work_order(
 ):
     """Release a Work Order with physical quantity and custom stage routing."""
     return OperationsService.release_work_order(db, payload, current_user=user)
+
+@router.patch("/work-orders/{wo_number}", response_model=WOEditResponse)
+def edit_work_order(
+    wo_number: str,
+    payload: WOEditRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    """PPC edit of a Work Order: quantity/route before production starts; pending
+    route stages and stage plan dates afterwards. Audit-logged with the reason."""
+    return OperationsService.edit_work_order(db, wo_number, payload, current_user=user)
+
 
 @router.post("/conversion", response_model=ConversionResponse)
 def create_conversion(

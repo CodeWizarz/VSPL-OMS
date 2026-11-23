@@ -2,6 +2,8 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Cookies from "js-cookie";
+import { getCurrentUser } from "@/lib/api";
+import { resolveWorkspace } from "@/lib/workspaces";
 
 export default function Home() {
   const router = useRouter();
@@ -9,7 +11,11 @@ export default function Home() {
   useEffect(() => {
     const token = Cookies.get("access_token");
     if (token) {
-      router.replace("/dashboard");
+      // Land each department on its own home screen (e.g. F1 -> My Work Queue);
+      // everyone else, or any lookup failure, keeps the dashboard as before.
+      getCurrentUser()
+        .then((u) => router.replace(resolveWorkspace(u.role, u.department)?.home ?? "/dashboard"))
+        .catch(() => router.replace("/dashboard"));
     } else {
       router.replace("/login");
     }

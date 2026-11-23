@@ -1,6 +1,6 @@
 import enum
 import uuid
-from sqlalchemy import Column, String, Integer, Enum, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, String, Integer, Enum, Date, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base, GUID
@@ -67,5 +67,9 @@ class WORoute(Base):
     cumulative_inproc_qty = Column(Integer, default=0)
     cumulative_onhand_qty = Column(Integer, default=0)
     stage_status = Column(String, default="Pending")  # "Pending", "In-Progress", "Green", "Amber", "Red", "Skip", "Completed"
+    # Stage plan dates (planning only -- see services/stage_plan_service.py). Filled on
+    # release, editable by PPC; drive the shop-floor work queue.
+    planned_start = Column(Date, nullable=True)
+    planned_end = Column(Date, nullable=True)
 
     work_order = relationship("WorkOrder", back_populates="routes")

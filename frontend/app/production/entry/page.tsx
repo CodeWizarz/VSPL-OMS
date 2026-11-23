@@ -102,7 +102,9 @@ export default function ProductionEntryPage() {
       .then((data) => {
         if (Array.isArray(data) && data.length > 0) {
           setAvailableWOs(data);
-          lookupWO(data[0].wo_number);
+          // Open the WO passed as ?wo= (e.g. from My Work Queue), else the first one.
+          const requestedWO = new URLSearchParams(window.location.search).get("wo");
+          lookupWO(requestedWO || data[0].wo_number);
         }
       })
       .catch((err) => {

@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import uuid
@@ -6,6 +7,8 @@ from sqlalchemy import create_engine, String, TypeDecorator, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import sessionmaker, declarative_base
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 class GUID(TypeDecorator):
     """Platform-independent GUID type.
@@ -92,7 +95,7 @@ def auto_migrate_schema():
         "ALTER TABLE work_orders ALTER COLUMN current_stage TYPE VARCHAR;",
         "ALTER TABLE orders ALTER COLUMN status TYPE VARCHAR;",
         "ALTER TABLE wo_routes ALTER COLUMN stage TYPE VARCHAR;",
-        "ALTER TABLE stage_wip ALTER COLUMN stage TYPE VARCHAR;",
+        "ALTER TABLE stage_wips ALTER COLUMN stage TYPE VARCHAR;",
 
         # Users
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_id VARCHAR;",
@@ -139,16 +142,18 @@ def auto_migrate_schema():
         "ALTER TABLE production_updates ADD COLUMN IF NOT EXISTS operator_name VARCHAR;",
 
         # Stage WIP
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS ent_qty INTEGER DEFAULT 0;",
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS ok_qty INTEGER DEFAULT 0;",
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS inproc_qty INTEGER DEFAULT 0;",
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS onhand_qty INTEGER DEFAULT 0;",
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS rejected_qty INTEGER DEFAULT 0;",
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS received_qty INTEGER DEFAULT 0;",
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS available_wip INTEGER DEFAULT 0;",
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS moved_out_qty INTEGER DEFAULT 0;",
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
-        "ALTER TABLE stage_wip ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
+        "ALTER TABLE wo_routes ADD COLUMN IF NOT EXISTS planned_start DATE;",
+        "ALTER TABLE wo_routes ADD COLUMN IF NOT EXISTS planned_end DATE;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS ent_qty INTEGER DEFAULT 0;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS ok_qty INTEGER DEFAULT 0;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS inproc_qty INTEGER DEFAULT 0;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS onhand_qty INTEGER DEFAULT 0;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS rejected_qty INTEGER DEFAULT 0;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS received_qty INTEGER DEFAULT 0;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS available_wip INTEGER DEFAULT 0;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS moved_out_qty INTEGER DEFAULT 0;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS scrapped_qty INTEGER DEFAULT 0;",
+        "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
 
         # WO Routes
         "ALTER TABLE wo_routes ADD COLUMN IF NOT EXISTS cumulative_ent_qty INTEGER DEFAULT 0;",
@@ -269,6 +274,7 @@ def auto_migrate_schema():
 
     succeeded = 0
     failed = 0
+    failed_statements = []
     for stmt in statements:
         try:
             if is_sqlite:
@@ -284,13 +290,21 @@ def auto_migrate_schema():
             with engine.begin() as conn:
                 conn.execute(text(stmt))
             succeeded += 1
-        except Exception:
+        except Exception as exc:
             failed += 1
+            # Record WHICH statement failed (the SQL text only -- it never contains data
+            # or credentials) so a schema gap is visible instead of just a count.
+            failed_statements.append({"statement": stmt.strip(), "error": type(exc).__name__})
+            # SQLite cannot ALTER COLUMN TYPE, so those statements are expected to fail
+            # there; only a failure on a real (Postgres) database is worth a warning.
+            log = logger.info if is_sqlite else logger.warning
+            log("Schema sync statement failed (%s): %s", type(exc).__name__, stmt.strip())
 
     result = {
         "attempted": len(statements),
         "succeeded": succeeded,
         "failed": failed,
+        "failed_statements": failed_statements,
         "dialect": engine.dialect.name,
         "ran_at": datetime.now(timezone.utc).isoformat(),
     }

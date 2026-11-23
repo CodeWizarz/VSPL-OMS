@@ -1,5 +1,5 @@
-from typing import Optional
-from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
+from typing import Annotated, Optional
+from pydantic import BaseModel, EmailStr, ConfigDict, StringConstraints, field_validator
 from app.models.user import UserRole
 
 class UserLogin(BaseModel):
@@ -56,3 +56,22 @@ class ChangePasswordRequest(BaseModel):
 
 class SetActiveRequest(BaseModel):
     is_active: bool
+
+
+class AdminUserUpdate(BaseModel):
+    """Admin edit of an existing account's profile. Only the fields sent are changed;
+    email, password and active status have their own dedicated flows."""
+    # Stripped, and must not be blank (a constraint rather than a raising validator, so
+    # the 422 body stays plain JSON).
+    full_name: Optional[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]] = None
+    department: Optional[str] = None
+    role: Optional[UserRole] = None
+
+    @field_validator("department")
+    @classmethod
+    def _trim_department(cls, v):
+        # A blank department clears it (stored as NULL), same as on create.
+        if v is None:
+            return v
+        v = v.strip()
+        return v or None
