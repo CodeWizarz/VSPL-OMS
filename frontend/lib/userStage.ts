@@ -41,6 +41,17 @@ export function resolveAssignedStage(user: {
 
   // If Admin, Production Manager, Planner/PPC, CEO, Sales, Data Analyst -> not locked, full access to all shop floor gates
   const UNLOCKED_ROLES = new Set(["ADMIN", "PRODUCTION_MANAGER", "PLANNER", "CEO", "SALES", "DATA_ANALYST"]);
+
+  // Stage roles (F1_SUPERVISOR ... DISPATCH_MANAGER): the stage is part of the role and
+  // the backend enforces it, so lock the screen to that stage -- unless the user also
+  // holds an unlocked role (e.g. secondary Production Manager).
+  const stageRoleMatch = Array.from(allRoles)
+    .map((r) => /^(F1|F2|F3|SP|FI|PACKING|DISPATCH)_(SUPERVISOR|MANAGER)$/.exec(r))
+    .find((m) => m);
+  if (stageRoleMatch && !Array.from(allRoles).some((r) => UNLOCKED_ROLES.has(r))) {
+    const stage = stageRoleMatch[1];
+    return { stage, isLocked: true, label: stage };
+  }
   const isManagerOrAdmin =
     Array.from(allRoles).some((r) => UNLOCKED_ROLES.has(r)) ||
     dept.includes("PPC") ||

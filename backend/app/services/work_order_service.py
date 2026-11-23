@@ -853,7 +853,14 @@ class WorkOrderService:
             current_stage=cur_stage,
             route_stages=route_stages,
             next_stage=next_stage,
-            stage_targets=targets
+            stage_targets=targets,
+            stage_plans={
+                r.stage: {
+                    "planned_start": r.planned_start.isoformat() if r.planned_start else None,
+                    "planned_end": r.planned_end.isoformat() if r.planned_end else None,
+                }
+                for r in routes
+            } if routes else None,
         )
 
     @staticmethod

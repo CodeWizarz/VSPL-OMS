@@ -43,9 +43,12 @@ import {
   Eye,
   CalendarCheck,
   TrendingUp,
-  Warehouse
+  Warehouse,
+  ClipboardList,
+  Timer,
 } from "lucide-react";
 import { logout, getCurrentUserRole, getCurrentUserRoles, getCurrentUser } from "@/lib/api";
+import { resolveWorkspace } from "@/lib/workspaces";
 
 // STORE is a physical material-handling role: it must see only the navigation it is
 // actually authorized to use (Move Parts, and Rejection Tracking for melting-entry
@@ -113,6 +116,11 @@ const NAV_GROUPS: NavGroup[] = [
   {
     group: "PRODUCTION & WIP",
     items: [
+      {
+        name: "My Work Queue",
+        href: "/my-work",
+        icon: <ClipboardList className="h-4 w-4 text-blue-500" />,
+      },
       {
         name: "Production Entry",
         href: "/production/entry",
@@ -259,6 +267,18 @@ const NAV_GROUPS: NavGroup[] = [
         href: "/planning/wo-release-search",
         icon: <Search className="h-4 w-4 text-sky-500" />,
         badge: "Search",
+      },
+      {
+        name: "Stage Plan Dates",
+        href: "/planning/stage-plan",
+        icon: <CalendarClock className="h-4 w-4 text-blue-500" />,
+        roles: ["admin", "planner", "ceo", "f1_manager", "f2_manager", "f3_manager", "sp_manager", "fi_manager", "packing_manager", "dispatch_manager"],
+      },
+      {
+        name: "Stage Lead Times",
+        href: "/planning/lead-times",
+        icon: <Timer className="h-4 w-4 text-blue-500" />,
+        roles: ["admin", "planner", "ceo"],
       },
       {
         name: "Conversion Module",
@@ -422,13 +442,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .catch(() => setCurrentUser(null));
   }, [pathname, router]);
 
+  const workspace = resolveWorkspace(userRoles.length ? userRoles : [userRole]);
   const visibleNavGroups = NAV_GROUPS
     .map((grp) => ({
       ...grp,
       items: grp.items.filter((item) => {
         if (userRoles.includes("store") && !userRoles.some((r) => r !== "store") && !STORE_ALLOWED_HREFS.has(item.href)) return false;
         if (userRole === "data_analyst" && DATA_ANALYST_DISALLOWED_HREFS.has(item.href)) return false;
-        if (item.roles && !item.roles.some((r) => userRoles.includes(r))) return false;
+        // CEO has full Admin access, so any Admin item is a CEO item too.
+        if (item.roles && !item.roles.some((r) => userRoles.includes(r) || (r === "admin" && userRoles.includes("ceo")))) return false;
+        // New stage roles / Accounts get a focused menu; existing roles are unchanged.
+        if (workspace && !workspace.hrefs.includes(item.href)) return false;
         return true;
       }),
     }))

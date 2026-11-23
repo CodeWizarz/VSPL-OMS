@@ -31,7 +31,8 @@ export default function LoginPage() {
     setError("");
     try {
       await login(email, password);
-      router.push("/dashboard");
+      // "/" routes stage roles to their own home; everyone else to the Dashboard.
+      router.push("/");
     } catch (err: any) {
       setError(err?.response?.data?.detail || "Invalid email or password. Please try again.");
     } finally {

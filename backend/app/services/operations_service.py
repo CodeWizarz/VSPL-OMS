@@ -38,6 +38,7 @@ from app.services.oms_integration_service import (
     _normalize_wo_code
 )
 from app.services.conversion_mapping_service import ConversionMappingService
+from app.services.stage_plan_service import apply_stage_plan
 
 def validate_document_url(url: Optional[str]) -> Optional[str]:
     if not url:
@@ -51,6 +52,33 @@ def validate_document_url(url: Optional[str]) -> Optional[str]:
             detail="Document URL must be a valid secure HTTPS URL starting with 'https://'."
         )
     return cleaned
+
+
+def _production_started_reason(db: Session, wo: WorkOrder) -> Optional[str]:
+    """Why this WO counts as 'in production' (so it must not be re-released), or None.
+
+    Any recorded shop-floor fact counts: a production entry, a stage movement, an NC
+    raised against it, packing, or a dispatch -- or a terminal status. Same "has
+    production started" facts update_work_order uses, plus NC/packing/dispatch."""
+    from app.models.production import ProductionUpdate
+    from app.models.production_movement import ProductionMovement
+    from app.models.packing import PackingTransaction
+    from app.models.dispatch import Dispatch
+
+    status_value = getattr(wo.status, "value", wo.status)
+    if status_value in (WOStatus.DISPATCHED.value, WOStatus.CLOSED.value):
+        return f"it is already {status_value}"
+    checks = (
+        (ProductionUpdate, "production has been recorded"),
+        (ProductionMovement, "material has been moved between stages"),
+        (NCRecord, "rejections have been recorded"),
+        (PackingTransaction, "it has been packed"),
+        (Dispatch, "it has been dispatched"),
+    )
+    for model, reason in checks:
+        if db.query(model.id).filter(model.work_order_id == wo.id).first() is not None:
+            return reason
+    return None
 
 class OperationsService:
     @staticmethod
@@ -1439,6 +1467,20 @@ class OperationsService:
                 detail=f"Work Order '{req.wo_number}' not found."
             )
 
+        # Releasing rebuilds the WO's route and stage WIP from scratch (see the deletes
+        # below). Once any shop-floor activity has been recorded against this WO, that
+        # would silently erase production history and break the plant balance
+        # (released = WIP + dispatched + scrap), so a re-release is refused from then on.
+        started_reason = _production_started_reason(db, wo)
+        if started_reason:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Work Order '{wo.wo_number}' cannot be re-released: {started_reason}. "
+                    "Re-releasing would erase its recorded stage history."
+                ),
+            )
+
         # WO Released is the last step of the release chain (Engineering Release ->
         # Manufacturing Release -> WO Released). Backward-compatible activation for
         # ORDINARY WOs: this only applies once a WO has actually entered the new
@@ -1556,6 +1598,9 @@ class OperationsService:
         )
         db.add(audit)
 
+        # Stage plan dates for the work queue -- planning only, filled last so they
+        # can't influence the release/recompute above.
+        apply_stage_plan(db, wo)
         db.commit()
         db.refresh(wo)
 

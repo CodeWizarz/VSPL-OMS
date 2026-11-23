@@ -45,7 +45,7 @@ def _consumed_qty(db: Session, nc_id) -> int:
 
 
 def _require_role(current_user: Optional[User], allowed: tuple, action_label: str):
-    if current_user is None or current_user.role not in allowed:
+    if current_user is None or not current_user.has_any_role(*allowed):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Role '{current_user.role.value if current_user else 'anonymous'}' is not authorized to {action_label}."

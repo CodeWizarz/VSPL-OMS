@@ -1,3 +1,10 @@
+from datetime import date
+from pydantic import BaseModel, Field
+from app.core.departments import STAGE_OF_ROLE, normalize_stage
+from app.core.roles import PLANNING_ROLES, STAGE_MANAGER_ROLES
+from app.models.audit import AuditLog
+from app.models.work_order import WorkOrder, WORoute
+from app.services.work_queue_service import WorkQueueService
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -14,6 +21,79 @@ from app.schemas.work_order import (
 from app.services.work_order_service import WorkOrderService
 
 router = APIRouter(prefix="/api/v1/work-orders", tags=["work-orders"])
+
+class StagePlanItem(BaseModel):
+    stage: str = Field(..., min_length=1, max_length=40)
+    planned_start: Optional[date] = None
+    planned_end: Optional[date] = None
+
+
+class StagePlanUpdate(BaseModel):
+    stages: List[StagePlanItem] = Field(..., min_length=1, max_length=50)
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+@router.get("/queue")
+def get_stage_work_queue(
+    stage: str = Query(..., min_length=1, max_length=40, description="Stage, e.g. F1, F2, F3, SP, FI, PACKING"),
+    days: int = Query(2, ge=0, le=14, description="How many days ahead counts as 'next'"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Read-only shop-floor queue: WOs with material at `stage`, bucketed by that stage's
+    planned due date (overdue / today / next N days / later / no date)."""
+    return WorkQueueService.get_stage_queue(db, stage=stage, days=days)
+
+
+@router.patch("/{wo_identifier}/stage-plan")
+def update_stage_plan(
+    wo_identifier: str,
+    payload: StagePlanUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*(PLANNING_ROLES + STAGE_MANAGER_ROLES))),
+):
+    """Change planned start/end dates of route stages (planning only). PPC may change any
+    stage; a stage Manager only their own stage. Audit-logged with the reason."""
+    wo = db.query(WorkOrder).filter(WorkOrder.wo_number == wo_identifier.strip()).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Work Order '{wo_identifier}' not found.")
+    status_value = getattr(wo.status, "value", wo.status)
+    if status_value in ("dispatched", "closed"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Work Order '{wo.wo_number}' is {status_value}.")
+    if not user.has_any_role(*PLANNING_ROLES):
+        own = STAGE_OF_ROLE.get(user.role)
+        if any(normalize_stage(p.stage) != own for p in payload.stages):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"You can only change plan dates for your own stage ({own}).",
+            )
+    routes = {r.stage.strip().upper(): r for r in db.query(WORoute).filter(WORoute.work_order_id == wo.id).all()}
+    changes = []
+    for item in payload.stages:
+        row = routes.get(item.stage.strip().upper())
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Stage '{item.stage}' is not on this Work Order's route.")
+        start = item.planned_start if item.planned_start is not None else row.planned_start
+        end = item.planned_end if item.planned_end is not None else row.planned_end
+        if start and end and start > end:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Stage '{row.stage}': planned start cannot be after planned end.")
+        if (start, end) != (row.planned_start, row.planned_end):
+            changes.append(f"{row.stage} plan {row.planned_start}..{row.planned_end} -> {start}..{end}")
+            row.planned_start, row.planned_end = start, end
+    if changes:
+        db.add(AuditLog(user_id=user.id, user_name=user.full_name, action="WO_STAGE_PLAN_EDITED",
+                        entity="WorkOrder", entity_id=wo.wo_number, new_value="; ".join(changes)[:2000], details=payload.reason))
+        db.commit()
+    return {
+        "wo_number": wo.wo_number,
+        "changes": changes,
+        "stage_plans": {
+            r.stage: {"planned_start": r.planned_start.isoformat() if r.planned_start else None,
+                      "planned_end": r.planned_end.isoformat() if r.planned_end else None}
+            for r in sorted(routes.values(), key=lambda r: r.sequence)
+        },
+    }
+
 
 @router.get("/movable", response_model=List[MovableWorkOrderItem])
 def list_movable_work_orders(

@@ -10,6 +10,7 @@ from app.models.rejection_disposition import RejectionDisposition
 from app.models.conversion_mapping import ConversionPartMapping
 from app.models.dispatch import Dispatch
 from app.models.audit import AuditLog
+from app.models.planning import StageLeadTime
 from app.models.master_data import (
     POMaster, POLine, ScheduleMaster,
     POStatus, ScheduleStatus, OrderSourceType, OARPOStatus

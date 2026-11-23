@@ -20,6 +20,26 @@ class UserRole(str, enum.Enum):
     DATA_ANALYST = "data_analyst"
     ENGINEERING = "engineering"
     MANUFACTURING = "manufacturing"
+    ACCOUNTS = "accounts"
+
+    # Stage roles: one Supervisor and one Manager per shop-floor stage. The stage is
+    # part of the role, so the backend limits these users to posting at that stage
+    # (app/core/departments.py). Supervisor: record production + move material at own
+    # stage. Manager: the same, sees every stage, and edits own-stage plan dates.
+    F1_SUPERVISOR = "f1_supervisor"
+    F1_MANAGER = "f1_manager"
+    F2_SUPERVISOR = "f2_supervisor"
+    F2_MANAGER = "f2_manager"
+    F3_SUPERVISOR = "f3_supervisor"
+    F3_MANAGER = "f3_manager"
+    SP_SUPERVISOR = "sp_supervisor"
+    SP_MANAGER = "sp_manager"
+    FI_SUPERVISOR = "fi_supervisor"
+    FI_MANAGER = "fi_manager"
+    PACKING_SUPERVISOR = "packing_supervisor"
+    PACKING_MANAGER = "packing_manager"
+    DISPATCH_SUPERVISOR = "dispatch_supervisor"
+    DISPATCH_MANAGER = "dispatch_manager"
 
 class User(Base):
     __tablename__ = "users"
@@ -45,6 +65,9 @@ class User(Base):
             r.value.lower() if hasattr(r, "value") else str(r).lower()
             for r in allowed_roles
         }
+        # CEO has full Admin access: wherever ADMIN is allowed, CEO is too.
+        if "admin" in allowed_values:
+            allowed_values.add("ceo")
         for r in user_roles:
             if r is None:
                 continue

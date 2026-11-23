@@ -2054,3 +2054,87 @@ export function getSalesOpsCsvExportUrl(params?: {
   if (params?.sort_by) q.set('sort_by', params.sort_by);
   return `/api/v1/reports/export/sales-ops-csv?${q.toString()}`;
 }
+
+// --- Ported from main: work queue, stage plan dates, lead times, legacy roles ---
+
+export interface QueueItem {
+  wo_number: string;
+  oar_number?: string | null;
+  customer_name?: string | null;
+  part_number?: string | null;
+  part_name?: string | null;
+  qty_at_stage: number;
+  inproc_qty: number;
+  onhand_qty: number;
+  current_stage: string;
+  status: string;
+  delivery_date?: string | null;
+  planned_start?: string | null;
+  planned_end?: string | null;
+  plan_source: "planned" | "estimated" | "none";
+  days_to_due?: number | null;
+  bucket: "overdue" | "today" | "next" | "later" | "no_date";
+  delivery_risk?: string | null;
+}
+
+export interface StageQueue {
+  stage: string;
+  today: string;
+  days: number;
+  counts: Record<string, { wos: number; qty: number }>;
+  items: QueueItem[];
+}
+
+export async function getWorkQueue(stage: string, days = 2): Promise<StageQueue> {
+  const { data } = await api.get("/api/v1/work-orders/queue", { params: { stage, days } });
+  return data;
+}
+
+export async function updateStagePlan(
+  woNumber: string,
+  stages: { stage: string; planned_start?: string | null; planned_end?: string | null }[],
+  reason: string
+): Promise<{ wo_number: string; changes: string[]; stage_plans: Record<string, { planned_start: string | null; planned_end: string | null }> }> {
+  const { data } = await api.patch(`/api/v1/work-orders/${encodeURIComponent(woNumber)}/stage-plan`, { stages, reason });
+  return data;
+}
+
+export interface LeadTimeRow {
+  stage: string;
+  days: number;
+  default_days?: number | null;
+  customised: boolean;
+}
+
+export async function getLeadTimes(): Promise<{ stages: LeadTimeRow[] }> {
+  const { data } = await api.get("/api/v1/planning/lead-times");
+  return data;
+}
+
+export async function updateLeadTimes(days: Record<string, number>): Promise<{ stages: LeadTimeRow[] }> {
+  const { data } = await api.put("/api/v1/planning/lead-times", { days });
+  return data;
+}
+
+export interface LegacyRoleItem {
+  id: string;
+  full_name: string;
+  email: string;
+  department?: string | null;
+  current_role: string;
+  new_role: string | null;
+}
+
+export async function getLegacyRolePlan(): Promise<{ convertible: LegacyRoleItem[]; needs_admin: LegacyRoleItem[] }> {
+  const { data } = await api.get("/api/v1/users/legacy-roles");
+  return data;
+}
+
+export async function convertLegacyRoles(): Promise<{
+  converted: { email: string; from: string; to: string }[];
+  needs_admin: LegacyRoleItem[];
+}> {
+  const { data } = await api.post("/api/v1/users/convert-legacy-roles");
+  return data;
+}
+

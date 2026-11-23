@@ -2,6 +2,8 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Cookies from "js-cookie";
+import { getCurrentUser } from "@/lib/api";
+import { resolveWorkspace } from "@/lib/workspaces";
 
 export default function Home() {
   const router = useRouter();
@@ -9,7 +11,10 @@ export default function Home() {
   useEffect(() => {
     const token = Cookies.get("access_token");
     if (token) {
-      router.replace("/dashboard");
+      // New stage roles / Accounts land on their own home; everyone else on Dashboard.
+      getCurrentUser()
+        .then((u: any) => router.replace(resolveWorkspace([u.role, u.secondary_role, ...(u.roles || [])])?.home ?? "/dashboard"))
+        .catch(() => router.replace("/dashboard"));
     } else {
       router.replace("/login");
     }

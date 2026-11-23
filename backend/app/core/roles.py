@@ -13,6 +13,19 @@ spec grants (or withholds) that *specific* capability, not because of a broader
 """
 from app.models.user import UserRole
 
+# --- Stage roles (Supervisor + Manager per stage) ----------------------------------
+PRODUCTION_STAGE_SUPERVISORS = (
+    UserRole.F1_SUPERVISOR, UserRole.F2_SUPERVISOR, UserRole.F3_SUPERVISOR,
+    UserRole.SP_SUPERVISOR, UserRole.FI_SUPERVISOR, UserRole.PACKING_SUPERVISOR,
+)
+PRODUCTION_STAGE_MANAGERS = (
+    UserRole.F1_MANAGER, UserRole.F2_MANAGER, UserRole.F3_MANAGER,
+    UserRole.SP_MANAGER, UserRole.FI_MANAGER, UserRole.PACKING_MANAGER,
+)
+DISPATCH_STAGE_ROLES = (UserRole.DISPATCH_SUPERVISOR, UserRole.DISPATCH_MANAGER)
+STAGE_MANAGER_ROLES = PRODUCTION_STAGE_MANAGERS + (UserRole.DISPATCH_MANAGER,)
+PRODUCTION_STAGE_ROLES = PRODUCTION_STAGE_SUPERVISORS + PRODUCTION_STAGE_MANAGERS
+
 # Master-data administration and planning mutations: Customer Master, PO Master,
 # Schedule Master, Order Intake (OAR creation), WO generation, PO<->Schedule matching,
 # Conversion Part Mapping (master data), and the OMS Engine batch upload/download tools.
@@ -37,7 +50,7 @@ PRODUCTION_ENTRY_ROLES = (
     UserRole.MACHINE_OPERATOR, UserRole.OPERATOR,
     UserRole.PLANNER, UserRole.SALES, UserRole.DISPATCH,
     UserRole.CEO,
-)
+) + PRODUCTION_STAGE_ROLES
 
 # Physical material movement between stages:
 # Production staff, Store, Planner/PPC, Sales, Admin, and CEO granted rights.
@@ -47,7 +60,7 @@ MATERIAL_MOVEMENT_ROLES = (
     UserRole.MACHINE_OPERATOR, UserRole.OPERATOR,
     UserRole.PLANNER, UserRole.SALES, UserRole.DISPATCH,
     UserRole.CEO,
-)
+) + PRODUCTION_STAGE_ROLES
 
 # QA disposition APPROVAL: authorizing SCRAP / DEVIATION_ACCEPT, and closing/updating
 # an NC record's QA status. Per spec, Production Manager and CEO do NOT approve
@@ -88,12 +101,12 @@ MELTING_ENTRY_ROLES = (UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.QA,
 # Packing/BSR processing. Per spec this is Dispatch's remit ("Packing/BSR" is listed
 # under the Dispatch role); the dedicated PACKING role (an existing UserRole value
 # with no prior backend semantics) is also granted, since it exists for exactly this.
-PACKING_ROLES = (UserRole.ADMIN, UserRole.DISPATCH, UserRole.PACKING)
+PACKING_ROLES = (UserRole.ADMIN, UserRole.DISPATCH, UserRole.PACKING) + (UserRole.PACKING_SUPERVISOR, UserRole.PACKING_MANAGER) + DISPATCH_STAGE_ROLES
 
 # Final dispatch execution. Per spec, Production Manager explicitly cannot execute
 # final dispatch ("Cannot: final dispatch") -- this is intentionally narrower than the
 # former DISPATCH_ROLES, which included Production Manager.
-DISPATCH_EXECUTION_ROLES = (UserRole.ADMIN, UserRole.DISPATCH)
+DISPATCH_EXECUTION_ROLES = (UserRole.ADMIN, UserRole.DISPATCH) + DISPATCH_STAGE_ROLES
 
 # User account administration: creating accounts, generating/resetting temporary
 # passwords, activating/deactivating, role assignment. Matches the existing
@@ -107,7 +120,7 @@ HEAT_MANAGEMENT_ROLES = (UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.S
 HEAT_ALLOCATION_ROLES = (
     UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.STORE,
     UserRole.MACHINE_OPERATOR, UserRole.OPERATOR,
-)
+) + PRODUCTION_STAGE_ROLES
 
 # Engineering Release: first step of the release chain (Engineering Release ->
 # Manufacturing Release -> WO Release -> Production). Super Admin may administer
@@ -137,4 +150,5 @@ CC_MATERIAL_MASTER_ROLES = (UserRole.ADMIN, UserRole.ENGINEERING, UserRole.PLANN
 CC_QA_ROLES = (UserRole.ADMIN, UserRole.QA, UserRole.PLANNER, UserRole.CEO)
 CC_HEAT_RECONCILE_ROLES = (UserRole.ADMIN, UserRole.QA, UserRole.PLANNER, UserRole.STORE, UserRole.CEO)
 
-
+# Accounts: recording customer payments against invoices (Phase 2 E port).
+ACCOUNTS_ROLES = (UserRole.ADMIN, UserRole.ACCOUNTS, UserRole.CEO)
