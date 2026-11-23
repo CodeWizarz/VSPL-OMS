@@ -34,7 +34,10 @@ import {
   CalendarClock,
   GitMerge,
   ClipboardList,
-  Warehouse
+  Warehouse,
+  PencilLine,
+  BarChart3,
+  Wallet
 } from "lucide-react";
 import { logout, getCurrentUserRole, getCurrentUser } from "@/lib/api";
 import { resolveWorkspace, type Workspace } from "@/lib/workspaces";
@@ -169,7 +172,7 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Order Intake (OAR)",
         href: "/orders/intake",
         icon: <FilePlus className="h-4 w-4" />,
-        roles: ["admin", "planner"],
+        roles: ["admin", "planner", "sales"],
       },
       {
         name: "OAR & WO List",
@@ -186,6 +189,12 @@ const NAV_GROUPS: NavGroup[] = [
         name: "WO Release & Routing",
         href: "/planning/wo-release",
         icon: <Factory className="h-4 w-4" />,
+      },
+      {
+        name: "Edit Work Order",
+        href: "/planning/wo-edit",
+        icon: <PencilLine className="h-4 w-4 text-blue-500" />,
+        roles: ["admin", "planner"],
       },
       {
         name: "Conversion Module",
@@ -216,6 +225,23 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Manufacturing Reports",
         href: "/reports",
         icon: <FileText className="h-4 w-4" />,
+      },
+    ],
+  },
+  {
+    group: "SALES & ACCOUNTS",
+    items: [
+      {
+        name: "PO → Dispatch → Collection",
+        href: "/sales/po-cycle",
+        icon: <BarChart3 className="h-4 w-4 text-emerald-500" />,
+        roles: ["admin", "ceo", "sales", "accounts", "planner"],
+      },
+      {
+        name: "Invoices & Payments",
+        href: "/accounts/payments",
+        icon: <Wallet className="h-4 w-4 text-indigo-500" />,
+        roles: ["admin", "accounts"],
       },
     ],
   },

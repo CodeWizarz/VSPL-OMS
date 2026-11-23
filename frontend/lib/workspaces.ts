@@ -18,7 +18,8 @@ export type WorkspaceKey =
   | "FI"
   | "PACKING"
   | "QUALITY"
-  | "SALES";
+  | "SALES"
+  | "ACCOUNTS";
 
 export interface Workspace {
   key: WorkspaceKey;
@@ -63,6 +64,7 @@ export const WORKSPACES: Record<WorkspaceKey, Workspace> = {
       "/orders/list",
       "/orders/po-matching",
       "/planning/wo-release",
+      "/planning/wo-edit",
       "/production/tracking",
       "/production/wip",
       "/my-work",
@@ -93,8 +95,14 @@ export const WORKSPACES: Record<WorkspaceKey, Workspace> = {
   SALES: {
     key: "SALES",
     label: "Sales",
-    home: "/orders/list",
-    hrefs: ["/dashboard", "/orders/list", "/production/tracking", "/bsr", "/dispatch"],
+    home: "/sales/po-cycle",
+    hrefs: ["/sales/po-cycle", "/orders/intake", "/orders/list", "/production/tracking", "/bsr", "/dispatch", "/dashboard"],
+  },
+  ACCOUNTS: {
+    key: "ACCOUNTS",
+    label: "Accounts",
+    home: "/accounts/payments",
+    hrefs: ["/accounts/payments", "/sales/po-cycle", "/dispatch", "/dashboard"],
   },
 };
 
@@ -110,6 +118,7 @@ export const DEPARTMENT_SUGGESTIONS = [
   "Packing / BSR",
   "Quality",
   "Sales",
+  "Accounts",
   "Stores",
   "Dispatch",
   "Production",
@@ -130,6 +139,7 @@ function fromDepartment(department?: string | null): WorkspaceKey | null {
   if (has("PPC") || d.includes("PLANNING")) return "PPC";
   if (d.includes("QUALITY") || has("QA") || has("MRB")) return "QUALITY";
   if (d.includes("SALES")) return "SALES";
+  if (d.includes("ACCOUNT") || d.includes("FINANCE")) return "ACCOUNTS";
   return null;
 }
 
@@ -138,6 +148,7 @@ const ROLE_FALLBACK: Record<string, WorkspaceKey> = {
   qa: "QUALITY",
   packing: "PACKING",
   sales: "SALES",
+  accounts: "ACCOUNTS",
 };
 
 // Admin, CEO and data analyst always keep the full navigation, whatever their department.

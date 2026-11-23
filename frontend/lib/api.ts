@@ -238,6 +238,7 @@ export async function executeDispatch(payload: {
   vehicle_number?: string;
   transporter?: string;
   remarks?: string;
+  invoice_amount?: string;
 }) {
   const { data } = await api.post("/api/v1/dispatch/ship", payload);
   return data;
@@ -715,4 +716,161 @@ export async function downloadFile(url: string, filename: string): Promise<void>
   link.click();
   link.remove();
   window.URL.revokeObjectURL(blobUrl);
+}
+
+// --- Phase 2: work queue, WO edit, subcontracting, accounts ---
+
+export interface QueueItem {
+  wo_number: string;
+  oar_number?: string | null;
+  customer_name?: string | null;
+  part_number?: string | null;
+  part_name?: string | null;
+  qty_at_stage: number;
+  inproc_qty: number;
+  onhand_qty: number;
+  current_stage: string;
+  status: string;
+  delivery_date?: string | null;
+  planned_start?: string | null;
+  planned_end?: string | null;
+  plan_source: "planned" | "estimated" | "none";
+  days_to_due?: number | null;
+  bucket: "overdue" | "today" | "next" | "later" | "no_date";
+  delivery_risk?: string | null;
+}
+
+export interface StageQueue {
+  stage: string;
+  today: string;
+  days: number;
+  counts: Record<string, { wos: number; qty: number }>;
+  items: QueueItem[];
+}
+
+export async function getWorkQueue(stage: string, days = 2): Promise<StageQueue> {
+  const { data } = await api.get("/api/v1/work-orders/queue", { params: { stage, days } });
+  return data;
+}
+
+export interface WOEditResult {
+  wo_number: string;
+  physical_wo_qty: number;
+  route_stages: string[];
+  stage_plans: Record<string, { planned_start: string | null; planned_end: string | null }>;
+  changes: string[];
+  message: string;
+}
+
+export async function editWorkOrder(
+  woNumber: string,
+  payload: {
+    physical_wo_qty?: number;
+    route_stages?: string[];
+    stage_plan?: { stage: string; planned_start?: string | null; planned_end?: string | null }[];
+    reason: string;
+  }
+): Promise<WOEditResult> {
+  const { data } = await api.patch(`/api/v1/operations/work-orders/${encodeURIComponent(woNumber)}`, payload);
+  return data;
+}
+
+export interface SubcontractDC {
+  dc_number: string;
+  wo_number: string;
+  part_number?: string | null;
+  vendor_name?: string | null;
+  status: string;
+  quantity_sent?: number | null;
+  quantity_returned?: number | null;
+  unit?: string | null;
+  sent_at?: string | null;
+  expected_return_date?: string | null;
+  days_to_return?: number | null;
+}
+
+export interface SubcontractSummary {
+  today: string;
+  days: number;
+  ready_to_send: {
+    wo_number: string;
+    customer_name?: string | null;
+    part_number?: string | null;
+    qty_at_sp: number;
+    delivery_date?: string | null;
+    already_on_dc: boolean;
+  }[];
+  dc_available: boolean;
+  dc_message?: string | null;
+  at_vendor: SubcontractDC[];
+  due_back: { overdue: SubcontractDC[]; today: SubcontractDC[]; next: SubcontractDC[] };
+}
+
+export async function getSubcontractSummary(days = 2): Promise<SubcontractSummary> {
+  const { data } = await api.get("/api/v1/subcontract/summary", { params: { days } });
+  return data;
+}
+
+export interface InvoiceSummary {
+  invoice_number: string;
+  customer_name?: string | null;
+  customer_pos: string[];
+  wo_numbers: string[];
+  dispatched_qty: number;
+  first_dispatch_date?: string | null;
+  amount?: number | null;
+  paid: number;
+  outstanding?: number | null;
+  status: "NOT_VALUED" | "UNPAID" | "PARTIAL" | "PAID";
+  days_since_dispatch?: number | null;
+}
+
+export async function getInvoices(statusFilter?: string): Promise<InvoiceSummary[]> {
+  const { data } = await api.get("/api/v1/accounts/invoices", {
+    params: statusFilter ? { status_filter: statusFilter } : undefined,
+  });
+  return data;
+}
+
+export async function setInvoiceAmount(invoiceNumber: string, amount: string): Promise<InvoiceSummary> {
+  const { data } = await api.put(`/api/v1/accounts/invoices/${encodeURIComponent(invoiceNumber)}`, { amount });
+  return data;
+}
+
+export async function recordPayment(payload: {
+  invoice_number: string;
+  amount: string;
+  received_date: string;
+  mode?: string;
+  reference?: string;
+  remarks?: string;
+}) {
+  const { data } = await api.post("/api/v1/accounts/payments", payload);
+  return data;
+}
+
+export interface POCycleRow {
+  oar_number?: string | null;
+  customer_code?: string | null;
+  customer_name?: string | null;
+  customer_po: string;
+  part_number?: string | null;
+  po_qty: number;
+  delivery_date?: string | null;
+  wo_count: number;
+  released_qty: number;
+  in_bsr_qty: number;
+  dispatched_qty: number;
+  pending_qty: number;
+  invoices: string[];
+  invoiced_amount?: number | null;
+  paid_amount: number;
+  outstanding_amount?: number | null;
+  stage: "IN_PRODUCTION" | "READY_IN_BSR" | "PART_DISPATCHED" | "DISPATCHED";
+  collection_status: "NOT_INVOICED" | "NOT_VALUED" | "UNPAID" | "PARTIAL" | "PAID";
+}
+
+export async function getPOCycle(search?: string): Promise<POCycleRow[]> {
+  const { data } = await api.get("/api/v1/accounts/po-cycle", { params: search ? { search } : undefined });
+  return data;
 }

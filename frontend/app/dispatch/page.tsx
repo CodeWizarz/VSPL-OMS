@@ -30,6 +30,7 @@ export default function DispatchPage() {
   // Dispatch Action Modal
   const [selectedItem, setSelectedItem] = useState<any>(null);
   const [invoiceNo, setInvoiceNo] = useState("");
+  const [invoiceAmount, setInvoiceAmount] = useState("");
   const [dispatchQty, setDispatchQty] = useState<number | "">("");
   const [vehicleNo, setVehicleNo] = useState("");
   const [transporter, setTransporter] = useState("");
@@ -67,6 +68,7 @@ export default function DispatchPage() {
     setDispatchQty("");
     const invCount = history.length + 1;
     setInvoiceNo(`INV-2026-${String(invCount).padStart(4, "0")}`);
+    setInvoiceAmount("");
     setVehicleNo("KA-04-E-8821");
     setTransporter("VRL Logistics Express");
     setRemarks("");
@@ -108,6 +110,8 @@ export default function DispatchPage() {
         vehicle_number: vehicleNo,
         transporter: transporter,
         remarks: remarks,
+        // Optional line value for Accounts; blank = Accounts enters it later.
+        invoice_amount: invoiceAmount.trim() ? invoiceAmount.trim() : undefined,
       });
 
       setDispatchSuccess(res);
@@ -348,6 +352,19 @@ export default function DispatchPage() {
                   onChange={(e) => setInvoiceNo(e.target.value)}
                   placeholder="e.g. INV-2026-0082"
                   className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-50 focus:border-emerald-500 focus:outline-none"
+                />
+                <label htmlFor="invoice-amount" className="mt-3 block text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                  Invoice Value for this line (₹)
+                </label>
+                <input
+                  id="invoice-amount"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={invoiceAmount}
+                  onChange={(e) => setInvoiceAmount(e.target.value)}
+                  placeholder="Optional — Accounts can add later"
+                  className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-50 focus:border-emerald-500 focus:outline-none"
                 />
               </div>
 

@@ -16,7 +16,7 @@ import { DEPARTMENT_SUGGESTIONS } from "@/lib/workspaces";
 
 const ROLES = [
   "admin", "ceo", "production_manager", "planner", "qa",
-  "dispatch", "machine_operator", "operator", "packing", "store", "sales", "data_analyst",
+  "dispatch", "machine_operator", "operator", "supervisor", "packing", "store", "sales", "accounts", "data_analyst",
 ];
 
 function roleLabel(role: string) {
