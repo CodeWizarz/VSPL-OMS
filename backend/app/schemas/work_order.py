@@ -147,3 +147,5 @@ class WorkOrderRouteResponse(BaseModel):
     route_stages: List[str]
     next_stage: Optional[str] = None
     stage_targets: dict
+    # {stage: {"planned_start": "YYYY-MM-DD"|None, "planned_end": ...}} for routed WOs.
+    stage_plans: Optional[dict] = None

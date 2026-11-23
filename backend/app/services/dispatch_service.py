@@ -11,6 +11,7 @@ from app.models.audit import AuditLog
 from app.models.user import User
 from app.schemas.dispatch import DispatchQueueItem, DispatchRequest, DispatchResponse, DispatchHistoryItem
 from app.services.oms_integration_service import OMSIntegrationService
+from app.services.accounts_service import record_dispatch_invoice_value
 
 class DispatchService:
     @staticmethod
@@ -165,6 +166,7 @@ class DispatchService:
             created_by=current_user.id if current_user else None
         )
         db.add(dispatch_entry)
+        record_dispatch_invoice_value(db, req.invoice_number, req.invoice_amount, current_user)
 
         # Recompute OMS Authoritative State
         OMSIntegrationService.recompute_work_order(db, wo)

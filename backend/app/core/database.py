@@ -142,6 +142,8 @@ def auto_migrate_schema():
         "ALTER TABLE production_updates ADD COLUMN IF NOT EXISTS operator_name VARCHAR;",
 
         # Stage WIP
+        "ALTER TABLE wo_routes ADD COLUMN IF NOT EXISTS planned_start DATE;",
+        "ALTER TABLE wo_routes ADD COLUMN IF NOT EXISTS planned_end DATE;",
         "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS ent_qty INTEGER DEFAULT 0;",
         "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS ok_qty INTEGER DEFAULT 0;",
         "ALTER TABLE stage_wips ADD COLUMN IF NOT EXISTS inproc_qty INTEGER DEFAULT 0;",

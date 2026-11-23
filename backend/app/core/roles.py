@@ -37,9 +37,14 @@ CONVERSION_MODULE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.PRODUCTION
 
 # Physical shop-floor production entry (recording good/rejected quantity at a stage).
 # Planner is explicitly excluded per spec ("Cannot: production entry").
+#
+# Phase 2: SUPERVISOR (stage supervisors) and PACKING (production at the Packing / BSR
+# stage only) are added. Floor-level roles are additionally stage-locked by department
+# at the API layer -- see app/core/departments.py.
 PRODUCTION_ENTRY_ROLES = (
     UserRole.ADMIN, UserRole.PRODUCTION_MANAGER,
     UserRole.MACHINE_OPERATOR, UserRole.OPERATOR,
+    UserRole.SUPERVISOR, UserRole.PACKING,
 )
 
 # Physical material movement between stages: Store's core responsibility ("Physical
@@ -49,6 +54,7 @@ PRODUCTION_ENTRY_ROLES = (
 MATERIAL_MOVEMENT_ROLES = (
     UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.STORE,
     UserRole.MACHINE_OPERATOR, UserRole.OPERATOR,
+    UserRole.SUPERVISOR, UserRole.PACKING,
 )
 
 # QA disposition APPROVAL: authorizing SCRAP / DEVIATION_ACCEPT, and closing/updating
@@ -92,6 +98,19 @@ PACKING_ROLES = (UserRole.ADMIN, UserRole.DISPATCH, UserRole.PACKING)
 # final dispatch ("Cannot: final dispatch") -- this is intentionally narrower than the
 # former DISPATCH_ROLES, which included Production Manager.
 DISPATCH_EXECUTION_ROLES = (UserRole.ADMIN, UserRole.DISPATCH)
+
+# Order intake (creating an OAR + its Work Orders) and the master-data *reads* the
+# intake screen needs. Phase 2: Sales may input customer orders directly. Creating or
+# editing master data itself stays PLANNING_ROLES-only.
+ORDER_INTAKE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.SALES)
+
+# Accounts: recording customer payments and correcting invoice amounts.
+ACCOUNTS_ROLES = (UserRole.ADMIN, UserRole.ACCOUNTS)
+
+# Who may read the PO -> dispatch -> collection report and the invoice ledger.
+COMMERCIAL_REPORT_ROLES = (
+    UserRole.ADMIN, UserRole.CEO, UserRole.SALES, UserRole.ACCOUNTS, UserRole.PLANNER,
+)
 
 # User account administration: creating accounts, generating/resetting temporary
 # passwords, activating/deactivating, role assignment. Matches the existing

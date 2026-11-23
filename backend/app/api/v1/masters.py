@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.deps import require_roles
 from app.models.user import User
-from app.core.roles import PLANNING_ROLES
+from app.core.roles import PLANNING_ROLES, ORDER_INTAKE_ROLES
 from app.schemas.master_data import (
     CustomerCreate, CustomerUpdate, CustomerOut,
     POMasterCreate, POMasterOut,
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/v1/masters", tags=["masters"])
 # --- Customer Master ---
 
 @router.get("/customers", response_model=List[CustomerOut])
-def list_customers(db: Session = Depends(get_db), user: User = Depends(require_roles(*PLANNING_ROLES))):
+def list_customers(db: Session = Depends(get_db), user: User = Depends(require_roles(*ORDER_INTAKE_ROLES))):
     return CustomerMasterService.list_customers(db)
 
 
@@ -46,7 +46,7 @@ def update_customer(
 def list_pos(
     customer_code: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*PLANNING_ROLES)),
+    user: User = Depends(require_roles(*ORDER_INTAKE_ROLES)),
 ):
     return POMasterService.list_pos(db, customer_code=customer_code)
 
@@ -66,7 +66,7 @@ def create_po(
 def list_schedules(
     customer_code: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*PLANNING_ROLES)),
+    user: User = Depends(require_roles(*ORDER_INTAKE_ROLES)),
 ):
     return ScheduleMasterService.list_schedules(db, customer_code=customer_code)
 
