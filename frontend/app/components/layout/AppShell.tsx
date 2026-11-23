@@ -32,9 +32,12 @@ import {
   Users as UsersIcon,
   Building2,
   CalendarClock,
-  GitMerge
+  GitMerge,
+  ClipboardList,
+  Warehouse
 } from "lucide-react";
 import { logout, getCurrentUserRole, getCurrentUser } from "@/lib/api";
+import { resolveWorkspace, type Workspace } from "@/lib/workspaces";
 
 // STORE is a physical material-handling role: it must see only the navigation it is
 // actually authorized to use (Move Parts, and Rejection Tracking for melting-entry
@@ -83,6 +86,11 @@ const NAV_GROUPS: NavGroup[] = [
     group: "PRODUCTION & WIP",
     items: [
       {
+        name: "My Work Queue",
+        href: "/my-work",
+        icon: <ClipboardList className="h-4 w-4 text-blue-500" />,
+      },
+      {
         name: "Production Entry",
         href: "/production/entry",
         icon: <CheckSquare className="h-4 w-4 text-emerald-500" />,
@@ -118,6 +126,11 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Packing / BSR Queue",
         href: "/packing",
         icon: <PackageCheck className="h-4 w-4 text-cyan-500" />,
+      },
+      {
+        name: "BSR Stock",
+        href: "/bsr",
+        icon: <Warehouse className="h-4 w-4 text-cyan-500" />,
       },
       {
         name: "Dispatch Center",
@@ -226,6 +239,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [darkMode, setDarkMode] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<{ full_name: string; email: string } | null>(null);
+  const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [notificationCount, setNotificationCount] = useState(3);
   const [showNotifications, setShowNotifications] = useState(false);
 
@@ -234,6 +248,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     getCurrentUser()
       .then((u) => {
         setCurrentUser({ full_name: u.full_name, email: u.email });
+        setWorkspace(resolveWorkspace(u.role, u.department));
         // A password-change-pending account must set a permanent password before
         // reaching any other page -- the backend re-asserts this at every login too
         // (must_change_password is re-checked, not a one-time client flag).
@@ -250,8 +265,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       items: grp.items.filter((item) => {
         if (userRole === "store" && !STORE_ALLOWED_HREFS.has(item.href)) return false;
         if (item.roles && (!userRole || !item.roles.includes(userRole))) return false;
+        // Department workspace: show only the screens relevant to this department.
+        if (workspace && !workspace.hrefs.includes(item.href)) return false;
         return true;
-      }),
+      })
+      .map((item) => (workspace?.labels?.[item.href] ? { ...item, name: workspace.labels[item.href] } : item)),
     }))
     .filter((grp) => grp.items.length > 0);
 
@@ -419,6 +437,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="flex items-center gap-2 text-xs font-medium text-zinc-500">
               <Factory className="h-4 w-4 text-blue-600" />
               <span>Plant 1 (Foundry & CNC)</span>
+              {workspace && (
+                <>
+                  <span className="text-zinc-300 dark:text-zinc-700">•</span>
+                  <span className="rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2 py-0.5 text-[10px] font-bold">
+                    {workspace.label}
+                  </span>
+                </>
+              )}
               <span className="text-zinc-300 dark:text-zinc-700">•</span>
               <span className="rounded-full bg-emerald-500/10 text-emerald-600 px-2 py-0.5 text-[10px] font-bold">
                 OMS Engine v3.3

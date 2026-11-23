@@ -10,6 +10,7 @@ import {
   TemporaryPasswordResult,
 } from "@/lib/api";
 import { UserPlus, KeyRound, Copy, CheckCircle2, AlertTriangle, ShieldAlert } from "lucide-react";
+import { DEPARTMENT_SUGGESTIONS } from "@/lib/workspaces";
 
 const ROLES = [
   "admin", "ceo", "production_manager", "planner", "qa",
@@ -154,11 +155,17 @@ export default function AdminUsersPage() {
               className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-transparent px-3 py-2 text-xs"
             />
             <input
-              placeholder="Department"
+              placeholder="Department (sets their workspace)"
+              list="department-suggestions"
               value={department}
               onChange={(e) => setDepartment(e.target.value)}
               className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-transparent px-3 py-2 text-xs"
             />
+            <datalist id="department-suggestions">
+              {DEPARTMENT_SUGGESTIONS.map((d) => (
+                <option key={d} value={d} />
+              ))}
+            </datalist>
             <select
               value={role}
               onChange={(e) => setRole(e.target.value)}
