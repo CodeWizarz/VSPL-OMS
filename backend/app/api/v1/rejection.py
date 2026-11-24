@@ -30,7 +30,7 @@ def list_rejection_types(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
-    if include_inactive and user.role not in QUALITY_APPROVAL_ROLES:
+    if include_inactive and not user.has_any_role(*QUALITY_APPROVAL_ROLES):
         include_inactive = False
     return RejectionTypeService.list_types(db, include_inactive=include_inactive)
 

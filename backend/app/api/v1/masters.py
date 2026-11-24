@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.deps import require_roles, get_current_user
 from app.models.user import User
-from app.core.roles import PLANNING_ROLES, PO_MASTER_VIEW_ROLES, PO_MASTER_EDIT_ROLES
+from app.core.roles import PLANNING_ROLES, PO_MASTER_VIEW_ROLES, PO_MASTER_EDIT_ROLES, CUSTOMER_MASTER_VIEW_ROLES
 from app.schemas.master_data import (
     CustomerCreate, CustomerUpdate, CustomerOut,
     POMasterCreate, POMasterUpdate, POMasterOut, POMergeRequest,
@@ -38,7 +38,7 @@ router = APIRouter(prefix="/api/v1/masters", tags=["masters"])
 # --- Customer Master ---
 
 @router.get("/customers", response_model=List[CustomerOut])
-def list_customers(db: Session = Depends(get_db), user: User = Depends(require_roles(*PLANNING_ROLES))):
+def list_customers(db: Session = Depends(get_db), user: User = Depends(require_roles(*CUSTOMER_MASTER_VIEW_ROLES))):
     return CustomerMasterService.list_customers(db)
 
 

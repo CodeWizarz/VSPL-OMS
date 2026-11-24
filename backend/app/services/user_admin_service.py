@@ -21,7 +21,7 @@ from app.schemas.auth import AdminUserCreate, TempPasswordResult, ChangePassword
 
 
 def _require_admin(current_user: User, action_label: str) -> None:
-    if current_user.role not in USER_MANAGEMENT_ROLES:
+    if not current_user.has_any_role(*USER_MANAGEMENT_ROLES):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Role '{current_user.role.value}' is not authorized to {action_label}.",
@@ -102,7 +102,15 @@ class UserAdminService:
         if not target:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
-        old_details = f"role={target.role}, secondary_role={target.secondary_role}, dept={target.department}"
+        old_details = f"email={target.email}, role={target.role}, secondary_role={target.secondary_role}, dept={target.department}"
+        new_email = getattr(payload, "email", None)
+        if new_email is not None:
+            new_email = str(new_email).strip().lower()
+            if new_email != (target.email or "").lower():
+                clash = db.query(User).filter(User.email == new_email, User.id != target.id).first()
+                if clash:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Another account already uses {new_email}.")
+                target.email = new_email
         if payload.full_name is not None and payload.full_name.strip():
             target.full_name = payload.full_name.strip()
         if payload.department is not None:
@@ -112,10 +120,47 @@ class UserAdminService:
         if hasattr(payload, "secondary_role"):
             target.secondary_role = payload.secondary_role
 
-        _audit(db, current_user, "USER_UPDATED", target, details=f"old: {old_details} -> new: role={target.role}, secondary_role={target.secondary_role}, dept={target.department}")
+        _audit(db, current_user, "USER_UPDATED", target, details=f"old: {old_details} -> new: email={target.email}, role={target.role}, secondary_role={target.secondary_role}, dept={target.department}")
         db.commit()
         db.refresh(target)
         return UserOut.model_validate(target)
+
+    @staticmethod
+    def legacy_role_plan(db: Session, current_user: User) -> dict:
+        """Preview: accounts still on old generic roles and the stage role each would
+        become (based on department)."""
+        _require_admin(current_user, "review legacy roles")
+        from app.core.departments import LEGACY_ROLES, convert_legacy_role
+
+        convertible, needs_admin = [], []
+        for u in db.query(User).filter(User.role.in_(LEGACY_ROLES)).order_by(User.full_name).all():
+            new_role = convert_legacy_role(u.role, u.department)
+            item = {
+                "id": str(u.id), "full_name": u.full_name, "email": u.email,
+                "department": u.department, "current_role": u.role.value,
+                "new_role": new_role.value if new_role else None,
+            }
+            (convertible if new_role else needs_admin).append(item)
+        return {"convertible": convertible, "needs_admin": needs_admin}
+
+    @staticmethod
+    def convert_legacy_roles(db: Session, current_user: User) -> dict:
+        """Apply the preview. Accounts whose stage can't be worked out are untouched."""
+        _require_admin(current_user, "convert legacy roles")
+        from app.core.departments import LEGACY_ROLES, convert_legacy_role
+
+        converted = []
+        for u in db.query(User).filter(User.role.in_(LEGACY_ROLES)).all():
+            new_role = convert_legacy_role(u.role, u.department)
+            if not new_role:
+                continue
+            _audit(db, current_user, "USER_ROLE_CONVERTED", u,
+                   details=f"role: {u.role.value} -> {new_role.value} (department {u.department!r})")
+            converted.append({"email": u.email, "from": u.role.value, "to": new_role.value})
+            u.role = new_role
+        db.commit()
+        remaining = UserAdminService.legacy_role_plan(db, current_user)["needs_admin"]
+        return {"converted": converted, "needs_admin": remaining}
 
     @staticmethod
     def set_active(db: Session, user_id: str, is_active: bool, current_user: User) -> UserOut:

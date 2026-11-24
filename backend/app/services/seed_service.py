@@ -187,6 +187,29 @@ def seed_database_if_empty(db: Session):
                 is_active=True
             )
             db.add(u)
+
+    # Stage Supervisor / Manager demo accounts (one pair per stage) plus Accounts --
+    # development/UAT only, same gate as above. Password: stage123 (hashed once).
+    stage_demo = [
+        ("f1", "F1", "F1 Foundry"), ("f2", "F2", "F2"), ("f3", "F3", "F3"),
+        ("sp", "SP", "Subcontracting (SP)"), ("fi", "FI", "FI Final Inspection"),
+        ("packing", "Packing", "Packing / BSR"), ("dispatch", "Dispatch", "Dispatch"),
+    ]
+    extra_users = [
+        (f"{key}.{level}@vspl.com", f"{label} {level.title()}", UserRole(f"{key}_{level}"), dept, f"{key.upper()}-{level[:3].upper()}")
+        for key, label, dept in stage_demo for level in ("supervisor", "manager")
+    ] + [
+        ("accounts@vspl.com", "Accounts Desk", UserRole.ACCOUNTS, "Accounts", "ACC-001"),
+        ("sales@vspl.com", "Sales Desk", UserRole.SALES, "Sales", "SLS-001"),
+        ("engineering@vspl.com", "Engineering Desk", UserRole.ENGINEERING, "Engineering", "ENG-001"),
+    ]
+    missing = [u for u in extra_users if not db.query(User).filter(User.email == u[0]).first()]
+    stage_hash = get_password_hash("stage123") if missing else None
+    for email, name, role, dept, emp_id in missing:
+        db.add(User(
+            email=email, hashed_password=stage_hash, full_name=name,
+            role=role, employee_id=emp_id, department=dept, is_active=True,
+        ))
     db.flush()
 
     # Check if orders already seeded

@@ -1,3 +1,4 @@
+from app.core.gate_scope import deny_if_supervisor, require_own_stage, require_wo_at_gate, supervisor_gate
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -16,6 +17,7 @@ from app.services.production_service import ProductionService
 from app.services.work_order_service import WorkOrderService
 from app.services.oms_integration_service import OMSIntegrationService
 from app.core.roles import PRODUCTION_ENTRY_ROLES, MATERIAL_MOVEMENT_ROLES
+from app.core.departments import assert_user_may_post_at
 
 router = APIRouter(prefix="/api/v1/production", tags=["production"])
 
@@ -26,6 +28,7 @@ def record_stage_production(
     user: User = Depends(require_roles(*PRODUCTION_ENTRY_ROLES))
 ):
     """Record production completion (Good Qty & Rejection Qty) at a stage without immediately moving material."""
+    assert_user_may_post_at(user, payload.stage, "record production")
     return ProductionService.record_stage_production(db, payload, current_user=user)
 
 @router.post("/wo/{wo_number}/declare-shortfall", response_model=DeclareShortfallResponse)
@@ -47,6 +50,7 @@ def move_parts(
     user: User = Depends(require_roles(*MATERIAL_MOVEMENT_ROLES))
 ):
     """Execute physical part movement between manufacturing stages with strict route, idempotency, and OMS WIP validation."""
+    assert_user_may_post_at(user, payload.from_stage, "move material")
     return ProductionService.move_parts(db, payload, current_user=user)
 
 @router.get("/movements", response_model=List[MovementListItem])
@@ -59,6 +63,9 @@ def list_movements(
     user: User = Depends(get_current_user)
 ):
     """Retrieve immutable production movement ledger history."""
+    gate = supervisor_gate(user)
+    if gate:
+        stage = gate  # gate supervisors only see movements in/out of their gate
     query = db.query(ProductionMovement)
     if wo_number:
         query = query.join(ProductionMovement.work_order).filter(ProductionMovement.work_order.has(wo_number=wo_number.strip()))
@@ -128,6 +135,8 @@ def get_stage_summary(
     to Produce, and Remaining Movable Qty for a WO/stage, deterministically reused from
     the same authoritative StageWIP/WORoute rows Entry, Move, and Tracking all read
     from. Not a second quantity engine."""
+    require_own_stage(user, stage)
+    require_wo_at_gate(db, user, wo_number)
     return ProductionService.get_stage_dashboard(db, wo_number, stage)
 
 @router.get("/wip", response_model=WIPMatrixResponse)
@@ -136,6 +145,7 @@ def get_wip_matrix(
     user: User = Depends(get_current_user)
 ):
     """Retrieve live stage-wise Work In Progress (WIP) matrix across all active work orders with InProc and OnHand breakdown."""
+    deny_if_supervisor(user)
     return WorkOrderService.get_wip_matrix(db)
 
 @router.get("/reconciliation", response_model=PlantReconciliationResponse)
@@ -144,4 +154,5 @@ def get_plant_reconciliation(
     user: User = Depends(get_current_user)
 ):
     """Retrieve authoritative manufacturing reconciliation verifying Released Qty == WIP + Rejections + Dispatched."""
+    deny_if_supervisor(user)
     return OMSIntegrationService.reconcile_all_work_orders(db)

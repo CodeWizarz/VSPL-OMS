@@ -19,6 +19,7 @@ from app.schemas.work_order import OARListItem, OARGenealogyResponse, WorkOrderL
 from app.services.operations_service import OperationsService
 from app.services.work_order_service import WorkOrderService
 from app.core.roles import (
+    WO_GENERATION_ROLES,
     PLANNING_ROLES, WO_RELEASE_ROLES, CONVERSION_MODULE_ROLES, QUALITY_APPROVAL_ROLES,
     ENGINEERING_RELEASE_ROLES, MANUFACTURING_RELEASE_ROLES
 )
@@ -52,7 +53,7 @@ def create_order_intake(
 def create_work_order(
     payload: WorkOrderCreatePayload,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*PLANNING_ROLES))
+    user: User = Depends(require_roles(*WO_GENERATION_ROLES))
 ):
     """Step 2: Planner generates Work Order(s) from a created OAR with custom date,
     quantity, and process route."""
@@ -62,7 +63,7 @@ def create_work_order(
 def create_merged_work_order(
     payload: MergedWorkOrderCreatePayload,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*PLANNING_ROLES))
+    user: User = Depends(require_roles(*WO_GENERATION_ROLES))
 ):
     """Merge 2+ OARs (same Customer & same Part Number) into 1 single Work Order ID."""
     return OperationsService.create_merged_work_order(db, payload, current_user=user)

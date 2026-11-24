@@ -17,6 +17,19 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(get_current_u
     return UserAdminService.list_users(db, current_user=user)
 
 
+@router.get("/legacy-roles")
+def legacy_roles_preview(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Admin preview of accounts on old roles (Operator, Machine Operator, Packing,
+    Dispatch) and the stage role each would be converted to."""
+    return UserAdminService.legacy_role_plan(db, current_user=user)
+
+
+@router.post("/convert-legacy-roles")
+def convert_legacy_roles(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Admin: convert every old-role account whose stage is known. Audit-logged."""
+    return UserAdminService.convert_legacy_roles(db, current_user=user)
+
+
 @router.post("", response_model=TempPasswordResult)
 def create_user(
     payload: AdminUserCreate,

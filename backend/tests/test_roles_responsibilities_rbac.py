@@ -420,7 +420,7 @@ def test_scrap_disposition_allowed_for_qa(client):
 # PACKING / BSR
 # ===========================================================================
 
-@pytest.mark.parametrize("role", ["PLANNER", "STORE", "QA", "PRODUCTION_MANAGER", "CEO", "DATA_ANALYST"])
+@pytest.mark.parametrize("role", ["PLANNER", "STORE", "QA", "PRODUCTION_MANAGER", "DATA_ANALYST"])
 def test_packing_update_rejected_for_non_packing_roles(client, role):
     """Packing/BSR update was previously open to ANY authenticated user; this is a
     new restriction per spec ("Packing/BSR" is Dispatch's remit)."""
@@ -445,7 +445,7 @@ def test_packing_update_passes_rbac_gate_for_dispatch(client):
 # DISPATCH execution
 # ===========================================================================
 
-@pytest.mark.parametrize("role", ["PLANNER", "STORE", "QA", "PRODUCTION_MANAGER", "CEO", "DATA_ANALYST"])
+@pytest.mark.parametrize("role", ["PLANNER", "STORE", "QA", "PRODUCTION_MANAGER", "DATA_ANALYST"])
 def test_dispatch_execution_rejected_for_non_dispatch_roles(client, role):
     headers = _login(client, role)
     resp = client.post(
@@ -500,7 +500,7 @@ def test_dashboard_and_analytics_read_access_open_to_every_role(client, role):
 # USER ADMINISTRATION (Super Admin only)
 # ===========================================================================
 
-@pytest.mark.parametrize("role", ["PLANNER", "PRODUCTION_MANAGER", "STORE", "QA", "DISPATCH", "CEO", "DATA_ANALYST"])
+@pytest.mark.parametrize("role", ["PLANNER", "PRODUCTION_MANAGER", "STORE", "QA", "DISPATCH", "DATA_ANALYST"])
 def test_user_administration_rejected_for_non_admin_roles(client, role):
     headers = _login(client, role)
     list_resp = client.get("/api/v1/users", headers=headers)
@@ -534,3 +534,10 @@ def test_data_analyst_cannot_mutate_anything(client, endpoint, payload):
     headers = _login(client, "DATA_ANALYST")
     resp = client.post(endpoint, headers=headers, json=payload)
     assert resp.status_code == 403, f"{endpoint}: {resp.text}"
+
+
+def test_ceo_has_admin_access_to_users_packing_and_dispatch(client):
+    """CEO has full Admin access (business decision 2026-11-23): user administration,
+    packing and dispatch are no longer refused for CEO."""
+    headers = _login(client, "CEO")
+    assert client.get("/api/v1/users", headers=headers).status_code == 200
