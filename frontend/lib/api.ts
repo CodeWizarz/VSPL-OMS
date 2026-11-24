@@ -147,6 +147,7 @@ export async function updateUser(
   userId: string,
   payload: {
     full_name?: string;
+    email?: string;
     department?: string | null;
     role?: string;
     secondary_role?: string | null;
@@ -2138,3 +2139,32 @@ export async function convertLegacyRoles(): Promise<{
   return data;
 }
 
+
+// --- Activity log (who did what) ---
+export interface ActivityItem {
+  id: string;
+  at: string | null;
+  user_name: string;
+  user_email?: string | null;
+  user_role?: string | null;
+  action: string;
+  area?: string | null;
+  path: string;
+  target?: string | null;
+  details?: string | null;
+  outcome?: string | null;
+  status_code?: number | null;
+}
+
+export async function getActivityLog(params: {
+  search?: string;
+  action?: string;
+  outcome?: string;
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ total: number; items: ActivityItem[] }> {
+  const { data } = await api.get("/api/v1/activity-log", { params });
+  return data;
+}

@@ -38,7 +38,10 @@ _SUPERVISOR_FOR_STAGE = {
     "F1": UserRole.F1_SUPERVISOR, "F2": UserRole.F2_SUPERVISOR, "F3": UserRole.F3_SUPERVISOR,
     "SP": UserRole.SP_SUPERVISOR, "FI": UserRole.FI_SUPERVISOR, "PACKING": UserRole.PACKING_SUPERVISOR,
 }
-LEGACY_ROLES = (UserRole.OPERATOR, UserRole.MACHINE_OPERATOR, UserRole.PACKING, UserRole.DISPATCH)
+# Retired roles: still valid so existing accounts keep working, but no longer offered;
+# the Users screen flags them for an admin to reassign. MANUFACTURING is retired too --
+# Manufacturing Release remains available to Production Manager, Planner, Admin and CEO.
+LEGACY_ROLES = (UserRole.OPERATOR, UserRole.MACHINE_OPERATOR, UserRole.PACKING, UserRole.DISPATCH, UserRole.MANUFACTURING)
 
 
 def department_stage(department: Optional[str]) -> Optional[str]:
@@ -64,7 +67,10 @@ def department_stage(department: Optional[str]) -> Optional[str]:
 
 def convert_legacy_role(role: UserRole, department: Optional[str]) -> Optional[UserRole]:
     """Stage role an old-role account should become, or None if its stage can't be
-    worked out (it stays on its old role, flagged for an admin)."""
+    worked out (it stays on its old role, flagged for an admin).
+
+    Operator / Machine Operator -> <stage> Supervisor by department. Packing -> Packing
+    Supervisor; Dispatch -> Dispatch Supervisor (same rights the old role had)."""
     if role == UserRole.PACKING:
         return UserRole.PACKING_SUPERVISOR
     if role == UserRole.DISPATCH:

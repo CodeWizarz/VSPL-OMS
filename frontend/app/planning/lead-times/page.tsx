@@ -82,7 +82,7 @@ export default function LeadTimesPage() {
 
         <div className="flex items-start gap-2 rounded-xl border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-zinc-600 dark:text-zinc-400">
           <Info className="h-4 w-4 shrink-0 text-blue-500 mt-0.5" />
-          <p>Changes apply to work orders released or re-routed from now on. Existing plan dates are not changed — adjust those in Edit Work Order.</p>
+          <p>Changes apply to work orders released or re-routed from now on. Existing plan dates are not changed — adjust those in Stage Plan Dates.</p>
         </div>
 
         <form onSubmit={save} className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm space-y-4">

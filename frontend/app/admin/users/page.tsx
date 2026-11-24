@@ -17,17 +17,18 @@ import {
 } from "@/lib/api";
 import { UserPlus, KeyRound, Copy, CheckCircle2, AlertTriangle, ShieldAlert, Trash2, Loader2, Edit2 } from "lucide-react";
 
-const STAGE_KEYS = ["f1", "f2", "f3", "sp", "fi", "packing", "dispatch"];
+// Every stage (F1..FI, Packing, Dispatch) has a Supervisor and a Manager.
+const SUPERVISED_STAGES = ["f1", "f2", "f3", "sp", "fi", "packing", "dispatch"];
 // Roles offered for new accounts / edits. Each shop-floor stage has a Supervisor
 // (records production + moves material at that stage) and a Manager (same, sees every
 // stage, edits own-stage plan dates). Operator / Machine Operator / Packing / Dispatch are
 // old roles: they keep working for existing accounts until converted, but aren't offered.
 const ROLES = [
   "admin", "ceo", "production_manager", "planner", "qa", "quality", "store", "sales", "accounts",
-  "engineering", "manufacturing", "data_analyst",
-  ...STAGE_KEYS.flatMap((k) => [`${k}_supervisor`, `${k}_manager`]),
+  "engineering", "data_analyst",
+  ...SUPERVISED_STAGES.flatMap((k) => [`${k}_supervisor`, `${k}_manager`]),
 ];
-const LEGACY_ROLES = new Set(["operator", "machine_operator", "packing", "dispatch"]);
+const LEGACY_ROLES = new Set(["operator", "machine_operator", "packing", "dispatch", "manufacturing"]);
 
 const ALLOWED_EMAIL_DOMAINS = ["vijayspheroidals.com", "vijayspheroidals.onmicrosoft.com"];
 
@@ -69,6 +70,7 @@ export default function AdminUsersPage() {
 
   const [userToEdit, setUserToEdit] = useState<AdminUser | null>(null);
   const [editFullName, setEditFullName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
   const [editDepartment, setEditDepartment] = useState("");
   const [editRole, setEditRole] = useState("planner");
   const [editSecondaryRole, setEditSecondaryRole] = useState<string>("none");
@@ -78,6 +80,7 @@ export default function AdminUsersPage() {
   function openEditModal(u: AdminUser) {
     setUserToEdit(u);
     setEditFullName(u.full_name || "");
+    setEditEmail(u.email || "");
     setEditDepartment(u.department || "");
     setEditRole(u.role ? u.role.toLowerCase() : "planner");
     setEditSecondaryRole(u.secondary_role ? u.secondary_role.toLowerCase() : "none");
@@ -87,11 +90,17 @@ export default function AdminUsersPage() {
   async function handleSaveEdit(e: React.FormEvent) {
     e.preventDefault();
     if (!userToEdit) return;
+    const emailChanged = editEmail.trim().toLowerCase() !== (userToEdit.email || "").toLowerCase();
+    if (emailChanged && !isValidCompanyEmail(editEmail)) {
+      setEditError("Email must be a company address (" + ALLOWED_EMAIL_DOMAINS.join(" or ") + ").");
+      return;
+    }
     setSavingEdit(true);
     setEditError("");
     try {
       await updateUser(userToEdit.id, {
         full_name: editFullName.trim(),
+        ...(emailChanged ? { email: editEmail.trim() } : {}),
         department: editDepartment.trim() || null,
         role: editRole,
         secondary_role: editSecondaryRole === "none" ? null : editSecondaryRole,
@@ -383,7 +392,7 @@ export default function AdminUsersPage() {
             <div className="m-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-300">
               <span>
                 <span className="font-bold">{legacy.convertible.length + legacy.needs_admin.length} account(s) use old roles</span> (Operator,
-                Machine Operator, Packing, Dispatch). Stage roles are now F1–FI, Packing and Dispatch Supervisor / Manager.
+                Machine Operator, Packing, Dispatch, Manufacturing). Stage roles are now F1–FI, Packing and Dispatch Supervisor / Manager.
               </span>
               <button
                 type="button"
@@ -610,6 +619,21 @@ export default function AdminUsersPage() {
                   className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
                 />
               </div>
+
+                <div>
+                  <label htmlFor="edit-email" className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">
+                    Email (sign-in)
+                  </label>
+                  <input
+                    id="edit-email"
+                    type="email"
+                    value={editEmail}
+                    onChange={(e) => setEditEmail(e.target.value)}
+                    required
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  />
+                  <p className="mt-1 text-[10px] text-zinc-500">Changing it signs them out; they sign in with the new email.</p>
+                </div>
 
               <div>
                 <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">

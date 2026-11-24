@@ -102,7 +102,15 @@ class UserAdminService:
         if not target:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
-        old_details = f"role={target.role}, secondary_role={target.secondary_role}, dept={target.department}"
+        old_details = f"email={target.email}, role={target.role}, secondary_role={target.secondary_role}, dept={target.department}"
+        new_email = getattr(payload, "email", None)
+        if new_email is not None:
+            new_email = str(new_email).strip().lower()
+            if new_email != (target.email or "").lower():
+                clash = db.query(User).filter(User.email == new_email, User.id != target.id).first()
+                if clash:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Another account already uses {new_email}.")
+                target.email = new_email
         if payload.full_name is not None and payload.full_name.strip():
             target.full_name = payload.full_name.strip()
         if payload.department is not None:
@@ -112,7 +120,7 @@ class UserAdminService:
         if hasattr(payload, "secondary_role"):
             target.secondary_role = payload.secondary_role
 
-        _audit(db, current_user, "USER_UPDATED", target, details=f"old: {old_details} -> new: role={target.role}, secondary_role={target.secondary_role}, dept={target.department}")
+        _audit(db, current_user, "USER_UPDATED", target, details=f"old: {old_details} -> new: email={target.email}, role={target.role}, secondary_role={target.secondary_role}, dept={target.department}")
         db.commit()
         db.refresh(target)
         return UserOut.model_validate(target)

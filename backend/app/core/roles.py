@@ -37,7 +37,7 @@ PO_MASTER_VIEW_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.SALES, UserRo
 PO_MASTER_EDIT_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.SALES, UserRole.CEO)
 
 # WO release specifically: Admin, Planner, Production Manager, Sales, CEO
-WO_RELEASE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.PRODUCTION_MANAGER, UserRole.SALES, UserRole.CEO)
+WO_RELEASE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.PRODUCTION_MANAGER, UserRole.SALES, UserRole.CEO) + (UserRole.ENGINEERING,)
 
 # The planner-driven Conversion Module (operations.py POST /conversion)
 CONVERSION_MODULE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.PRODUCTION_MANAGER, UserRole.SALES, UserRole.CEO)
@@ -152,3 +152,8 @@ CC_HEAT_RECONCILE_ROLES = (UserRole.ADMIN, UserRole.QA, UserRole.PLANNER, UserRo
 
 # Accounts: recording customer payments against invoices (Phase 2 E port).
 ACCOUNTS_ROLES = (UserRole.ADMIN, UserRole.ACCOUNTS, UserRole.CEO)
+
+# Engineering generates Work Orders from OARs (WO Generation) and can view the Customer
+# Master for that -- without the rest of PLANNING_ROLES (masters editing, OAR intake...).
+WO_GENERATION_ROLES = PLANNING_ROLES + (UserRole.ENGINEERING,)
+CUSTOMER_MASTER_VIEW_ROLES = PLANNING_ROLES + (UserRole.ENGINEERING,)

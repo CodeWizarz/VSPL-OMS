@@ -4,19 +4,47 @@ import { useRouter } from "next/navigation";
 import { Factory, Lock, Mail, ArrowRight, ShieldCheck, CheckCircle2 } from "lucide-react";
 import { login } from "@/lib/api";
 
-const DEMO_ROLES = [
-  { role: "Production Manager", email: "pm@vspl.com", pass: "pm123" },
-  { role: "Lead Planner", email: "planner@vspl.com", pass: "planner123" },
-  { role: "Quality / QA", email: "qa@vspl.com", pass: "qa123" },
-  { role: "Dispatch Officer", email: "dispatch@vspl.com", pass: "dispatch123" },
-  { role: "CEO Executive", email: "ceo@vspl.com", pass: "ceo123" },
-  { role: "Machine Operator", email: "operator@vspl.com", pass: "op123" },
+// Demo accounts by section. Office roles use their own passwords; every stage
+// Supervisor / Manager (and Sales, Accounts, Engineering, Manufacturing, Quality) uses
+// "stage123". All of these exist only in dev/UAT seeds, never in production.
+const STAGE_PASS = "stage123";
+const SUPERVISED_STAGES = [
+  ["f1", "F1"], ["f2", "F2"], ["f3", "F3"], ["sp", "SP"], ["fi", "FI"], ["packing", "Packing"], ["dispatch", "Dispatch"],
+] as const;
+const DEMO_SECTIONS: { title: string; roles: { role: string; email: string; pass: string }[] }[] = [
+  {
+    title: "Office",
+    roles: [
+      { role: "Admin", email: "admin@vspl.com", pass: "admin123" },
+      { role: "CEO Executive", email: "ceo@vspl.com", pass: "ceo123" },
+      { role: "Production Manager", email: "pm@vspl.com", pass: "pm123" },
+      { role: "Lead Planner (PPC)", email: "planner@vspl.com", pass: "planner123" },
+      { role: "Quality", email: "qa@vspl.com", pass: "qa123" },
+      { role: "Sales", email: "sales@vspl.com", pass: STAGE_PASS },
+      { role: "Accounts", email: "accounts@vspl.com", pass: STAGE_PASS },
+      { role: "Engineering", email: "engineering@vspl.com", pass: STAGE_PASS },
+      { role: "Store", email: "store@vspl.com", pass: "store123" },
+      { role: "Data Analyst", email: "analyst@vspl.com", pass: "analyst123" },
+    ],
+  },
+  {
+    title: "Stage Supervisors & Managers",
+    roles: [
+      ...SUPERVISED_STAGES.flatMap(([key, label]) => [
+        { role: `${label} Supervisor`, email: `${key}.supervisor@vspl.com`, pass: STAGE_PASS },
+        { role: `${label} Manager`, email: `${key}.manager@vspl.com`, pass: STAGE_PASS },
+      ]),
+    ],
+  },
 ];
 
 // Demo credential quick-fill is a development/UAT convenience only. It must never render
 // in a production build, since it would expose seed account passwords to anyone who can
 // load the login page.
-const SHOW_DEMO_LOGINS = process.env.NODE_ENV !== "production";
+// A local/UAT test build can opt in with NEXT_PUBLIC_SHOW_DEMO_LOGINS=true (set at build
+// time). The production deploy never sets it, so production keeps them hidden.
+const SHOW_DEMO_LOGINS =
+  process.env.NODE_ENV !== "production" || process.env.NEXT_PUBLIC_SHOW_DEMO_LOGINS === "true";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -164,17 +192,24 @@ export default function LoginPage() {
               <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 mb-2">
                 Quick Role Test Logins:
               </p>
-              <div className="grid grid-cols-2 gap-2">
-                {DEMO_ROLES.map((r) => (
-                  <button
-                    key={r.email}
-                    type="button"
-                    onClick={() => quickFill(r.email, r.pass)}
-                    className="flex flex-col items-start rounded-lg border border-zinc-800 bg-zinc-900/60 p-2 text-left hover:border-blue-500/50 hover:bg-zinc-800/80 transition-all"
-                  >
-                    <span className="text-[11px] font-bold text-zinc-200">{r.role}</span>
-                    <span className="text-[10px] text-zinc-500">{r.email}</span>
-                  </button>
+              <div className="space-y-3 max-h-[46vh] overflow-y-auto pr-1">
+                {DEMO_SECTIONS.map((sec) => (
+                  <div key={sec.title}>
+                    <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">{sec.title}</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {sec.roles.map((r) => (
+                        <button
+                          key={r.email}
+                          type="button"
+                          onClick={() => quickFill(r.email, r.pass)}
+                          className="flex flex-col items-start rounded-lg border border-zinc-800 bg-zinc-900/60 p-2 text-left hover:border-blue-500/50 hover:bg-zinc-800/80 transition-all"
+                        >
+                          <span className="text-[11px] font-bold text-zinc-200">{r.role}</span>
+                          <span className="text-[10px] text-zinc-500">{r.email}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>

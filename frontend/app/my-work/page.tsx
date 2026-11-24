@@ -305,9 +305,13 @@ export default function MyWorkQueuePage() {
                           return (
                             <tr key={r.wo_number} className="hover:bg-zinc-50/60 dark:hover:bg-zinc-800/40">
                               <td className="px-4 py-3">
-                                <Link href={`/production/tracking?wo=${wo}`} className="font-bold text-blue-600 dark:text-blue-400 hover:underline">
-                                  {r.wo_number}
-                                </Link>
+                                {lockedStage ? (
+                                  <span className="font-bold text-zinc-900 dark:text-zinc-100">{r.wo_number}</span>
+                                ) : (
+                                  <Link href={`/production/tracking?wo=${wo}`} className="font-bold text-blue-600 dark:text-blue-400 hover:underline">
+                                    {r.wo_number}
+                                  </Link>
+                                )}
                                 <p className="text-[11px] text-zinc-400">Now at {r.current_stage}</p>
                               </td>
                               <td className="px-4 py-3">
@@ -354,14 +358,14 @@ export default function MyWorkQueuePage() {
                                   <Link href={`/production/move?wo=${wo}`} className="flex items-center gap-1 rounded-lg bg-blue-600 px-2.5 py-1.5 text-[11px] font-bold text-white hover:bg-blue-500">
                                     <ArrowRightLeft className="h-3.5 w-3.5" /> {isPacking ? "Move to BSR" : "Move"}
                                   </Link>
-                                  <Link
+{!lockedStage && (                                  <Link
                                     href={`/production/tracking?wo=${wo}`}
                                     aria-label={`Track ${r.wo_number}`}
                                     title="Track"
                                     className="flex items-center rounded-lg border border-zinc-200 dark:border-zinc-700 px-2 py-1.5 text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800"
                                   >
                                     <Route className="h-3.5 w-3.5" />
-                                  </Link>
+                                  </Link>)}
                                 </div>
                               </td>
                             </tr>

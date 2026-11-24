@@ -190,7 +190,7 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Customer Master",
         href: "/masters/customers",
         icon: <Building2 className="h-4 w-4 text-blue-500" />,
-        roles: ["admin", "planner", "sales", "ceo"],
+        roles: ["admin", "planner", "sales", "ceo", "engineering"],
       },
       {
         name: "Part Master",
@@ -244,7 +244,7 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Generate Work Orders",
         href: "/planning/wo-generation",
         icon: <Layers className="h-4 w-4 text-emerald-500" />,
-        roles: ["admin", "planner", "sales", "ceo"],
+        roles: ["admin", "planner", "sales", "ceo", "engineering"],
       },
       {
         name: "OAR & WO List",
@@ -351,6 +351,12 @@ const NAV_GROUPS: NavGroup[] = [
         roles: ["admin"],
       },
       {
+        name: "Activity Log",
+        href: "/admin/activity",
+        icon: <History className="h-4 w-4 text-zinc-500" />,
+        roles: ["admin"],
+      },
+      {
         name: "Roles & Responsibilities",
         href: "/roles",
         icon: <ShieldAlert className="h-4 w-4 text-zinc-500" />,
@@ -452,7 +458,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         // CEO has full Admin access, so any Admin item is a CEO item too.
         if (item.roles && !item.roles.some((r) => userRoles.includes(r) || (r === "admin" && userRoles.includes("ceo")))) return false;
         // New stage roles / Accounts get a focused menu; existing roles are unchanged.
-        if (workspace && !workspace.hrefs.includes(item.href)) return false;
+        if (workspace && !workspace.hrefs.includes(item.href) && !(workspace.groups || []).includes(grp.group)) return false;
         return true;
       }),
     }))

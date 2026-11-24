@@ -1,3 +1,4 @@
+from app.core.gate_scope import deny_if_supervisor, require_own_stage, require_wo_at_gate, supervisor_gate
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -62,6 +63,9 @@ def list_movements(
     user: User = Depends(get_current_user)
 ):
     """Retrieve immutable production movement ledger history."""
+    gate = supervisor_gate(user)
+    if gate:
+        stage = gate  # gate supervisors only see movements in/out of their gate
     query = db.query(ProductionMovement)
     if wo_number:
         query = query.join(ProductionMovement.work_order).filter(ProductionMovement.work_order.has(wo_number=wo_number.strip()))
@@ -131,6 +135,8 @@ def get_stage_summary(
     to Produce, and Remaining Movable Qty for a WO/stage, deterministically reused from
     the same authoritative StageWIP/WORoute rows Entry, Move, and Tracking all read
     from. Not a second quantity engine."""
+    require_own_stage(user, stage)
+    require_wo_at_gate(db, user, wo_number)
     return ProductionService.get_stage_dashboard(db, wo_number, stage)
 
 @router.get("/wip", response_model=WIPMatrixResponse)
@@ -139,6 +145,7 @@ def get_wip_matrix(
     user: User = Depends(get_current_user)
 ):
     """Retrieve live stage-wise Work In Progress (WIP) matrix across all active work orders with InProc and OnHand breakdown."""
+    deny_if_supervisor(user)
     return WorkOrderService.get_wip_matrix(db)
 
 @router.get("/reconciliation", response_model=PlantReconciliationResponse)
@@ -147,4 +154,5 @@ def get_plant_reconciliation(
     user: User = Depends(get_current_user)
 ):
     """Retrieve authoritative manufacturing reconciliation verifying Released Qty == WIP + Rejections + Dispatched."""
+    deny_if_supervisor(user)
     return OMSIntegrationService.reconcile_all_work_orders(db)

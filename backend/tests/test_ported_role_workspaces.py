@@ -205,6 +205,7 @@ def test_stage_roles_cannot_release(client):
     (UserRole.OPERATOR, "Subcontracting (SP)", UserRole.SP_SUPERVISOR),
     (UserRole.PACKING, None, UserRole.PACKING_SUPERVISOR),
     (UserRole.DISPATCH, "x", UserRole.DISPATCH_SUPERVISOR),
+    (UserRole.OPERATOR, "Packing / BSR", UserRole.PACKING_SUPERVISOR),
     (UserRole.MACHINE_OPERATOR, "Manufacturing Operations", None),
     (UserRole.PRODUCTION_MANAGER, "F1", None),
 ])
@@ -300,5 +301,7 @@ def test_compute_stage_plan_backwards():
 
 
 def test_demo_stage_accounts_seeded(client):
-    for email in ("f1.supervisor@vspl.com", "packing.manager@vspl.com", "accounts@vspl.com"):
+    for email in ("f1.supervisor@vspl.com", "fi.manager@vspl.com", "packing.supervisor@vspl.com",
+                  "packing.manager@vspl.com", "dispatch.supervisor@vspl.com", "dispatch.manager@vspl.com",
+                  "accounts@vspl.com"):
         _login_as(client, email, "stage123")

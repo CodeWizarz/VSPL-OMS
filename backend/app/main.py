@@ -9,12 +9,13 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.core.config import settings
 from app.core.database import engine, Base, SessionLocal, auto_migrate_schema, LIFESPAN_STATUS
 from app.core.rate_limit import limiter
+from app.core.activity_log import ActivityLogMiddleware
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.api.v1 import (
     auth, oms, production, work_orders, packing,
     dispatch, operations, dashboard, reports, ai, admin, analytics, rejection,
     conversion_mapping, users, migration, masters, po_matching, roles, continuous_casting,
-    mrb, vendor, bsr_stock, planning
+    mrb, vendor, bsr_stock, planning, activity_log
 )
 from app.services.seed_service import seed_database_if_empty
 
@@ -77,6 +78,8 @@ def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=422, content={"detail": _json_safe(exc.errors())})
 
 
+# Who-did-what log for every create/update/delete request (observes only; see module).
+app.add_middleware(ActivityLogMiddleware)
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -113,6 +116,7 @@ app.include_router(mrb.router)
 app.include_router(vendor.router)
 app.include_router(bsr_stock.router)
 app.include_router(planning.router)
+app.include_router(activity_log.router)
 
 @app.get("/health")
 def health():

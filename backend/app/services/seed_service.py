@@ -198,7 +198,11 @@ def seed_database_if_empty(db: Session):
     extra_users = [
         (f"{key}.{level}@vspl.com", f"{label} {level.title()}", UserRole(f"{key}_{level}"), dept, f"{key.upper()}-{level[:3].upper()}")
         for key, label, dept in stage_demo for level in ("supervisor", "manager")
-    ] + [("accounts@vspl.com", "Accounts Desk", UserRole.ACCOUNTS, "Accounts", "ACC-001")]
+    ] + [
+        ("accounts@vspl.com", "Accounts Desk", UserRole.ACCOUNTS, "Accounts", "ACC-001"),
+        ("sales@vspl.com", "Sales Desk", UserRole.SALES, "Sales", "SLS-001"),
+        ("engineering@vspl.com", "Engineering Desk", UserRole.ENGINEERING, "Engineering", "ENG-001"),
+    ]
     missing = [u for u in extra_users if not db.query(User).filter(User.email == u[0]).first()]
     stage_hash = get_password_hash("stage123") if missing else None
     for email, name, role, dept, emp_id in missing:

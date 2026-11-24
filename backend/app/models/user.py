@@ -22,7 +22,8 @@ class UserRole(str, enum.Enum):
     MANUFACTURING = "manufacturing"
     ACCOUNTS = "accounts"
 
-    # Stage roles: one Supervisor and one Manager per shop-floor stage. The stage is
+    # Stage roles: a Supervisor and a Manager for each of F1, F2, F3, SP, FI, Packing
+    # and Dispatch. The stage is
     # part of the role, so the backend limits these users to posting at that stage
     # (app/core/departments.py). Supervisor: record production + move material at own
     # stage. Manager: the same, sees every stage, and edits own-stage plan dates.

@@ -83,6 +83,9 @@ class AdminUserCreate(BaseModel):
 
 class AdminUserUpdate(BaseModel):
     full_name: Optional[str] = None
+    # Admin may correct a person's login email. It is their sign-in identity, so their
+    # current sessions end and they sign in again with the new email.
+    email: Optional[EmailStr] = None
     department: Optional[str] = None
     role: Optional[UserRole] = None
     secondary_role: Optional[UserRole] = None

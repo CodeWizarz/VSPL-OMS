@@ -1,7 +1,8 @@
+from app.core.gate_scope import deny_if_supervisor, filter_to_gate, require_own_stage, require_wo_at_gate, supervisor_gate, wo_ids_at_gate
 from datetime import date
 from pydantic import BaseModel, Field
 from app.core.departments import STAGE_OF_ROLE, normalize_stage
-from app.core.roles import PLANNING_ROLES, STAGE_MANAGER_ROLES
+from app.core.roles import PLANNING_ROLES, STAGE_MANAGER_ROLES, WO_GENERATION_ROLES
 from app.models.audit import AuditLog
 from app.models.work_order import WorkOrder, WORoute
 from app.services.work_queue_service import WorkQueueService
@@ -42,6 +43,7 @@ def get_stage_work_queue(
 ):
     """Read-only shop-floor queue: WOs with material at `stage`, bucketed by that stage's
     planned due date (overdue / today / next N days / later / no date)."""
+    require_own_stage(user, stage)
     return WorkQueueService.get_stage_queue(db, stage=stage, days=days)
 
 
@@ -104,6 +106,9 @@ def list_movable_work_orders(
 ):
     """Retrieve all work orders that have produced parts / WIP waiting at a stage
     to be moved to the next sequential stage, sorted priority-wise."""
+    gate = supervisor_gate(user)
+    if gate:
+        stage = gate  # gate supervisors only see their own gate's movable WOs
     return WorkOrderService.list_movable_work_orders(db, limit=limit, stage_filter=stage)
 
 @router.get("/planning-summary", response_model=PlanningSummaryResponse)
@@ -113,13 +118,14 @@ def get_planning_summary(
 ):
     """Retrieve live aggregate planning metrics for production planners:
     unreleased count, released count, producing today count, ready for production count, etc."""
+    deny_if_supervisor(user)
     return WorkOrderService.get_planning_summary(db)
 
 @router.post("", response_model=WorkOrderCreateResponse)
 def create_work_order(
     payload: WorkOrderCreatePayload,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*PLANNING_ROLES))
+    user: User = Depends(require_roles(*WO_GENERATION_ROLES))
 ):
     """Step 2: Planner generates Work Order(s) from a created OAR."""
     return OperationsService.create_work_order(db, payload, current_user=user)
@@ -148,6 +154,17 @@ def list_work_orders(
     user: User = Depends(get_current_user)
 ):
     """List work orders with live stage progress, available WIP, and delivery risk ratings."""
+    gate = supervisor_gate(user)
+    if gate:
+        # Gate supervisors: only WOs with material at their gate. Same query, then
+        # filtered and paged here, so nothing changes for any other caller.
+        full = WorkOrderService.list_work_orders(
+            db, search=search, stage=stage, customer_code=customer_code, status_filter=status_filter,
+            casting_process=casting_process, release_filter=release_filter, sort_by=sort_by,
+            exclude_dispatched=exclude_dispatched, from_date=from_date, to_date=to_date,
+            date_type=date_type, classification=classification, limit=500, offset=0,
+        )
+        return filter_to_gate(full, wo_ids_at_gate(db, gate))[offset:offset + limit]
     return WorkOrderService.list_work_orders(
         db,
         search=search,
@@ -173,6 +190,7 @@ def get_work_order_tracking(
     user: User = Depends(get_current_user)
 ):
     """Retrieve full interactive tracking detail with stage pipeline timeline, WIP, and RAG status."""
+    require_wo_at_gate(db, user, wo_identifier)
     detail = WorkOrderService.get_tracking_detail(db, wo_identifier)
     if not detail:
         raise HTTPException(
@@ -188,6 +206,7 @@ def get_work_order_route(
     user: User = Depends(get_current_user)
 ):
     """Retrieve the actual dynamic route, targets, and next stage for this Work Order."""
+    require_wo_at_gate(db, user, wo_identifier)
     route_data = WorkOrderService.get_work_order_route(db, wo_identifier)
     if not route_data:
         raise HTTPException(
@@ -204,6 +223,8 @@ def get_stage_state(
     user: User = Depends(get_current_user)
 ):
     """Retrieve authoritative live stage state (Target, OK, Rej, InProc, OnHand, Avail WIP, RAG)."""
+    require_own_stage(user, stage_name)
+    require_wo_at_gate(db, user, wo_identifier)
     state_data = WorkOrderService.get_stage_state(db, wo_identifier, stage_name)
     if not state_data:
         raise HTTPException(
