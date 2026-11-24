@@ -46,6 +46,9 @@ import {
   Warehouse,
   ClipboardList,
   Timer,
+  PencilLine,
+  BarChart3,
+  Wallet,
 } from "lucide-react";
 import { logout, getCurrentUserRole, getCurrentUserRoles, getCurrentUser } from "@/lib/api";
 import { resolveWorkspace } from "@/lib/workspaces";
@@ -269,6 +272,12 @@ const NAV_GROUPS: NavGroup[] = [
         badge: "Search",
       },
       {
+        name: "Edit Work Order",
+        href: "/planning/wo-edit",
+        icon: <PencilLine className="h-4 w-4 text-blue-500" />,
+        roles: ["admin", "planner"],
+      },
+      {
         name: "Stage Plan Dates",
         href: "/planning/stage-plan",
         icon: <CalendarClock className="h-4 w-4 text-blue-500" />,
@@ -294,6 +303,23 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Rejection Tracking",
         href: "/quality/nc",
         icon: <AlertTriangle className="h-4 w-4 text-rose-500" />,
+      },
+    ],
+  },
+  {
+    group: "SALES & ACCOUNTS",
+    items: [
+      {
+        name: "PO → Dispatch → Collection",
+        href: "/sales/po-cycle",
+        icon: <BarChart3 className="h-4 w-4 text-emerald-500" />,
+        roles: ["admin", "ceo", "sales", "accounts", "planner"],
+      },
+      {
+        name: "Invoices & Payments",
+        href: "/accounts/payments",
+        icon: <Wallet className="h-4 w-4 text-indigo-500" />,
+        roles: ["admin", "accounts"],
       },
     ],
   },

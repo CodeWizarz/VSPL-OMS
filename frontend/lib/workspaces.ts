@@ -121,8 +121,8 @@ export function resolveWorkspace(roles: (string | null | undefined)[]): Workspac
     return {
       key: "ACCOUNTS",
       label: "Accounts",
-      home: "/dispatch",
-      hrefs: ["/dispatch", "/reports/sales-ops", "/reports", "/dashboard"],
+      home: "/accounts/payments",
+      hrefs: ["/accounts/payments", "/sales/po-cycle", "/dispatch", "/reports/sales-ops", "/reports", "/dashboard"],
     };
   }
   return null;

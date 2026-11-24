@@ -153,6 +153,12 @@ CC_HEAT_RECONCILE_ROLES = (UserRole.ADMIN, UserRole.QA, UserRole.PLANNER, UserRo
 # Accounts: recording customer payments against invoices (Phase 2 E port).
 ACCOUNTS_ROLES = (UserRole.ADMIN, UserRole.ACCOUNTS, UserRole.CEO)
 
+# Commercial reports (PO -> dispatch -> collection cycle, invoices) are visible to the
+# commercial side: Admin, CEO, Sales, Accounts and Planner. (Ported from phase-2 main.)
+COMMERCIAL_REPORT_ROLES = (
+    UserRole.ADMIN, UserRole.CEO, UserRole.SALES, UserRole.ACCOUNTS, UserRole.PLANNER,
+)
+
 # Engineering generates Work Orders from OARs (WO Generation) and can view the Customer
 # Master for that -- without the rest of PLANNING_ROLES (masters editing, OAR intake...).
 WO_GENERATION_ROLES = PLANNING_ROLES + (UserRole.ENGINEERING,)

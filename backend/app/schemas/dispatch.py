@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Optional, List
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
@@ -26,6 +27,8 @@ class DispatchRequest(BaseModel):
     wo_number: str
     customer_po: Optional[str] = Field(None, max_length=200)
     invoice_number: str = Field(..., max_length=200, description="Invoice Number e.g. INV-2026-001")
+    # Value of this dispatch line on the invoice (optional; Accounts can set it later).
+    invoice_amount: Optional[Decimal] = Field(None, ge=0, le=Decimal("9999999999.99"), max_digits=14, decimal_places=2)
     dispatched_quantity: int = Field(..., gt=0, le=1_000_000, description="Quantity to dispatch")
     unit_price: Optional[float] = Field(None, ge=0.0, description="Product selling price per piece")
     payment_status: Optional[str] = Field("UNPAID", description="UNPAID, PAID, PARTIALLY_PAID, OVERDUE")

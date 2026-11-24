@@ -12,6 +12,7 @@ from app.models.dispatch import Dispatch
 from app.models.audit import AuditLog
 from app.models.planning import StageLeadTime
 from app.models.activity import ActivityLog
+from app.models.accounts import CustomerInvoice, InvoicePayment
 from app.models.master_data import (
     POMaster, POLine, ScheduleMaster,
     POStatus, ScheduleStatus, OrderSourceType, OARPOStatus
@@ -55,6 +56,8 @@ __all__ = [
     "ConversionPartMapping",
     "Dispatch",
     "AuditLog",
+    "CustomerInvoice",
+    "InvoicePayment",
     "POMaster",
     "POLine",
     "ScheduleMaster",
