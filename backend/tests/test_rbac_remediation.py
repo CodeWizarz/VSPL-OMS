@@ -290,7 +290,7 @@ def test_nc_disposition_rejects_production_manager(client):
     assert resp.status_code == 403
 
 
-def test_nc_disposition_rejects_ceo(client):
+def test_nc_disposition_allowed_for_ceo(client):
     """CEO previously could close/disposition an NC (former QUALITY_OVERSIGHT_ROLES);
     the spec's blanket "no operational transaction mutation unless explicitly
     authorized" withdraws this."""
@@ -303,4 +303,5 @@ def test_nc_disposition_rejects_ceo(client):
         headers=ceo_headers,
         json={"nc_number": nc_number, "status": "Closed"},
     )
-    assert resp.status_code == 403
+    # CEO has full Admin access (business decision 2026-11-23).
+    assert resp.status_code == 200, resp.text

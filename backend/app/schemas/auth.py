@@ -1,5 +1,5 @@
-from typing import Annotated, Optional
-from pydantic import BaseModel, EmailStr, ConfigDict, StringConstraints, field_validator
+from typing import Optional, List
+from pydantic import BaseModel, EmailStr, ConfigDict, field_validator, model_validator
 from app.models.user import UserRole
 
 class UserLogin(BaseModel):
@@ -11,6 +11,7 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     role: UserRole
+    secondary_role: Optional[UserRole] = None
     department: Optional[str] = None
     is_active: bool = True
 
@@ -26,6 +27,8 @@ class UserOut(BaseModel):
     full_name: str
     email: EmailStr
     role: UserRole
+    secondary_role: Optional[UserRole] = None
+    roles: List[str] = []
     department: Optional[str] = None
     is_active: bool = True
     must_change_password: bool = False
@@ -35,6 +38,40 @@ class UserOut(BaseModel):
     def _coerce_id(cls, v):
         return str(v)
 
+    @field_validator("role", mode="before")
+    @classmethod
+    def _coerce_role(cls, v):
+        if isinstance(v, str):
+            try:
+                return UserRole(v.lower())
+            except ValueError:
+                return v
+        return v
+
+    @field_validator("secondary_role", mode="before")
+    @classmethod
+    def _coerce_secondary_role(cls, v):
+        if not v:
+            return None
+        if isinstance(v, str):
+            try:
+                return UserRole(v.lower())
+            except ValueError:
+                return None
+        return v
+
+    @model_validator(mode="after")
+    def _populate_roles(self):
+        r_list = []
+        if self.role:
+            val = self.role.value if hasattr(self.role, "value") else str(self.role)
+            r_list.append(val.lower())
+        if self.secondary_role:
+            val = self.secondary_role.value if hasattr(self.secondary_role, "value") else str(self.secondary_role)
+            r_list.append(val.lower())
+        self.roles = r_list
+        return self
+
 # Admin user-management: creating an account never takes a password from the caller --
 # the server always generates one (see app.core.security.generate_temp_password).
 class AdminUserCreate(BaseModel):
@@ -42,6 +79,16 @@ class AdminUserCreate(BaseModel):
     email: EmailStr
     department: Optional[str] = None
     role: UserRole
+    secondary_role: Optional[UserRole] = None
+
+class AdminUserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    # Admin may correct a person's login email. It is their sign-in identity, so their
+    # current sessions end and they sign in again with the new email.
+    email: Optional[EmailStr] = None
+    department: Optional[str] = None
+    role: Optional[UserRole] = None
+    secondary_role: Optional[UserRole] = None
 
 class TempPasswordResult(BaseModel):
     """The ONE-TIME response shown to the admin right after create/reset. This is the
@@ -57,21 +104,9 @@ class ChangePasswordRequest(BaseModel):
 class SetActiveRequest(BaseModel):
     is_active: bool
 
+class UserDeleteResponse(BaseModel):
+    success: bool
+    message: str
+    user_id: str
+    email: EmailStr
 
-class AdminUserUpdate(BaseModel):
-    """Admin edit of an existing account's profile. Only the fields sent are changed;
-    email, password and active status have their own dedicated flows."""
-    # Stripped, and must not be blank (a constraint rather than a raising validator, so
-    # the 422 body stays plain JSON).
-    full_name: Optional[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]] = None
-    department: Optional[str] = None
-    role: Optional[UserRole] = None
-
-    @field_validator("department")
-    @classmethod
-    def _trim_department(cls, v):
-        # A blank department clears it (stored as NULL), same as on create.
-        if v is None:
-            return v
-        v = v.strip()
-        return v or None

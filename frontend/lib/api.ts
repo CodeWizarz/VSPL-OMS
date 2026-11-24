@@ -1,7 +1,7 @@
 import axios from "axios";
 import Cookies from "js-cookie";
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 export const api = axios.create({
   baseURL: API_BASE,
@@ -12,6 +12,9 @@ api.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+  // Prevent browser caching of API responses across page transitions
+  config.headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+  config.headers["Pragma"] = "no-cache";
   return config;
 });
 
@@ -59,6 +62,25 @@ export function getCurrentUserRole(): string | null {
   }
 }
 
+// Decodes all assigned roles (primary and secondary) from JWT payload
+export function getCurrentUserRoles(): string[] {
+  const token = Cookies.get("access_token");
+  if (!token) return [];
+  try {
+    const payloadB64 = token.split(".")[1];
+    const json = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
+    if (Array.isArray(json.roles) && json.roles.length > 0) {
+      return json.roles.map((r: string) => String(r).toLowerCase());
+    }
+    const roles: string[] = [];
+    if (json.role) roles.push(String(json.role).toLowerCase());
+    if (json.secondary_role) roles.push(String(json.secondary_role).toLowerCase());
+    return roles;
+  } catch {
+    return [];
+  }
+}
+
 // Server-resolved identity of the authenticated caller (never client-supplied) --
 // used to render the sidebar's real logged-in user instead of a hardcoded placeholder.
 export async function getCurrentUser(): Promise<{
@@ -66,6 +88,8 @@ export async function getCurrentUser(): Promise<{
   full_name: string;
   email: string;
   role: string;
+  secondary_role?: string | null;
+  roles?: string[];
   department?: string | null;
   is_active: boolean;
   must_change_password: boolean;
@@ -80,6 +104,8 @@ export interface AdminUser {
   full_name: string;
   email: string;
   role: string;
+  secondary_role?: string | null;
+  roles?: string[];
   department?: string | null;
   is_active: boolean;
   must_change_password: boolean;
@@ -110,18 +136,232 @@ export async function resetUserPassword(userId: string): Promise<TemporaryPasswo
   return data;
 }
 
+export async function setUserStatus(userId: string, isActive: boolean): Promise<AdminUser> {
+  const { data } = await api.patch(`/api/v1/users/${encodeURIComponent(userId)}/status`, {
+    is_active: isActive,
+  });
+  return data;
+}
+
 export async function updateUser(
   userId: string,
-  payload: { full_name?: string; department?: string; role?: string }
+  payload: {
+    full_name?: string;
+    email?: string;
+    department?: string | null;
+    role?: string;
+    secondary_role?: string | null;
+  }
 ): Promise<AdminUser> {
   const { data } = await api.patch(`/api/v1/users/${encodeURIComponent(userId)}`, payload);
   return data;
 }
 
-export async function setUserStatus(userId: string, isActive: boolean): Promise<AdminUser> {
-  const { data } = await api.patch(`/api/v1/users/${encodeURIComponent(userId)}/status`, {
-    is_active: isActive,
-  });
+export interface UserDeleteResult {
+  success: boolean;
+  message: string;
+  user_id: string;
+  email: string;
+}
+
+export async function deleteUser(userId: string): Promise<UserDeleteResult> {
+  const { data } = await api.delete(`/api/v1/users/${encodeURIComponent(userId)}`);
+  return data;
+}
+
+// Release chain: Engineering Release -> Manufacturing Release -> WO Release -> Production
+
+export interface ReleaseEvidencePayload {
+  document_name?: string;
+  document_url?: string;
+  document_revision?: string;
+  remarks?: string;
+}
+
+export async function engineeringReleaseWorkOrder(woNumber: string, payload?: ReleaseEvidencePayload) {
+  const { data } = await api.post(`/api/v1/operations/wo/${encodeURIComponent(woNumber)}/engineering-release`, payload || {});
+  return data;
+}
+
+export async function manufacturingReleaseWorkOrder(woNumber: string, payload?: ReleaseEvidencePayload) {
+  const { data } = await api.post(`/api/v1/operations/wo/${encodeURIComponent(woNumber)}/manufacturing-release`, payload || {});
+  return data;
+}
+
+// Rejection Tracking & OAR Shortfall: Replacement / Patch WO Required
+export interface ReplacementResult {
+  success: boolean;
+  nc_number?: string;
+  replacement_wo_number: string;
+  original_wo_number: string;
+  oar_number: string;
+  quantity: number;
+  remaining_qty: number;
+  message: string;
+}
+
+export async function createReplacement(payload: {
+  nc_number?: string;
+  oar_number?: string;
+  source_wo_number?: string;
+  quantity: number;
+  reason: string;
+  remarks?: string;
+}): Promise<ReplacementResult> {
+  const { data } = await api.post("/api/v1/rejection/replacement", payload);
+  return data;
+}
+
+// Unified production stage summary (Target / Produced / Rejected / Good / WIP / Yet to Produce / Remaining Movable)
+export interface StageDashboard {
+  wo_number: string;
+  stage: string;
+  target_qty: number;
+  total_produced: number;
+  total_rejected: number;
+  total_good: number;
+  wip_qty: number;
+  yet_to_produce: number;
+  remaining_movable_qty: number;
+  mrb_lock_status?: "UNLOCKED" | "LOCKED" | "PARTIAL";
+  mrb_approved_movable_qty?: number;
+  mrb_pending_qty?: number;
+  pending_mrb_tickets?: string[];
+}
+
+
+export async function getStageSummary(woNumber: string, stage: string): Promise<StageDashboard> {
+  const { data } = await api.get("/api/v1/production/stage-summary", { params: { wo_number: woNumber, stage } });
+  return data;
+}
+
+// Master Data -- Machine
+export interface MasterMachine {
+  id: string;
+  machine_code: string;
+  machine_name: string;
+  department?: string | null;
+  is_active: boolean;
+}
+
+export async function getMasterMachines(): Promise<MasterMachine[]> {
+  const { data } = await api.get("/api/v1/masters/machines");
+  return data;
+}
+
+export async function createMasterMachine(payload: { machine_code: string; machine_name: string; department?: string }): Promise<MasterMachine> {
+  const { data } = await api.post("/api/v1/masters/machines", payload);
+  return data;
+}
+
+export async function updateMasterMachine(payload: { id: string; machine_code?: string; machine_name?: string; department?: string; is_active?: boolean }): Promise<MasterMachine> {
+  const { data } = await api.put("/api/v1/masters/machines", payload);
+  return data;
+}
+
+export async function deleteMasterMachine(id: string): Promise<{ success: boolean; message: string }> {
+  const { data } = await api.delete(`/api/v1/masters/machines/${id}`);
+  return data;
+}
+
+// Master Data -- Shift
+export interface MasterShift {
+  id: string;
+  shift_code: string;
+  shift_name: string;
+  start_time?: string | null;
+  end_time?: string | null;
+  is_active: boolean;
+}
+
+export async function getShifts(): Promise<MasterShift[]> {
+  const { data } = await api.get("/api/v1/masters/shifts");
+  return data;
+}
+
+export async function createShift(payload: { shift_code: string; shift_name: string; start_time?: string; end_time?: string }): Promise<MasterShift> {
+  const { data } = await api.post("/api/v1/masters/shifts", payload);
+  return data;
+}
+
+export async function updateShift(payload: { id: string; shift_code?: string; shift_name?: string; start_time?: string; end_time?: string; is_active?: boolean }): Promise<MasterShift> {
+  const { data } = await api.put("/api/v1/masters/shifts", payload);
+  return data;
+}
+
+export async function deleteShift(id: string): Promise<{ success: boolean; message: string }> {
+  const { data } = await api.delete(`/api/v1/masters/shifts/${id}`);
+  return data;
+}
+
+// Master Data -- Operator
+export interface MasterOperator {
+  id: string;
+  user_id?: string | null;
+  employee_code?: string | null;
+  display_name: string;
+  is_active: boolean;
+}
+
+export async function getOperators(): Promise<MasterOperator[]> {
+  const { data } = await api.get("/api/v1/masters/operators");
+  return data;
+}
+
+export async function createOperator(payload: { user_id?: string; employee_code?: string; display_name: string }): Promise<MasterOperator> {
+  const { data } = await api.post("/api/v1/masters/operators", payload);
+  return data;
+}
+
+export async function updateOperator(payload: { id: string; employee_code?: string; display_name?: string; is_active?: boolean }): Promise<MasterOperator> {
+  const { data } = await api.put("/api/v1/masters/operators", payload);
+  return data;
+}
+
+export async function deleteOperator(id: string): Promise<{ success: boolean; message: string }> {
+  const { data } = await api.delete(`/api/v1/masters/operators/${id}`);
+  return data;
+}
+
+// Rejection Type master
+export interface MasterRejectionType {
+  id: string;
+  code: string;
+  name: string;
+  description?: string | null;
+  is_active: boolean;
+  created_by?: string | null;
+  updated_by?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+export async function getRejectionTypes(includeInactive = false): Promise<MasterRejectionType[]> {
+  const { data } = await api.get("/api/v1/rejection/types", { params: { include_inactive: includeInactive } });
+  return data;
+}
+
+export async function createRejectionType(payload: { code: string; name: string; description?: string }): Promise<MasterRejectionType> {
+  const { data } = await api.post("/api/v1/rejection/types", payload);
+  return data;
+}
+
+export async function updateRejectionType(payload: { id: string; name?: string; description?: string; is_active?: boolean }): Promise<MasterRejectionType> {
+  const { data } = await api.put("/api/v1/rejection/types", payload);
+  return data;
+}
+
+// Roles & Responsibilities (read-only reference)
+export interface RoleInfo {
+  role: string;
+  display_name: string;
+  department: string;
+  permissions: string[];
+  allowed_modules: string[];
+}
+
+export async function getRoles(): Promise<RoleInfo[]> {
+  const { data } = await api.get("/api/v1/roles");
   return data;
 }
 
@@ -132,13 +372,94 @@ export async function getDashboardStats() {
 }
 
 // Work Orders & Tracking
+export interface WorkOrderListItem {
+  id: string;
+  wo_number: string;
+  oar_number?: string | null;
+  customer_code: string;
+  customer_name: string;
+  customer_po?: string | null;
+  source_type?: string;
+  po_coverage_status?: "SCHEDULED_AWAITING_PO" | "COMMERCIAL_PO_PENDING" | "PO_MATCHED" | "UNCONFIRMED" | string;
+  part_number: string;
+  customer_part_number?: string | null;
+  part_name?: string | null;
+  grade?: string | null;
+  order_qty: number;
+  physical_wo_qty: number;
+  casting_process?: string | null;
+  match_size?: number | null;
+  current_stage: string;
+  next_allowed_stage?: string | null;
+  available_wip_at_current_stage: number;
+  status: string;
+  delivery_risk: string;
+  shortfall: string;
+  delivery_date?: string | null;
+  commitment_date?: string | null;
+  revised_commitment_date?: string | null;
+  effective_commitment_date?: string | null;
+  commitment_date_revision_count?: number;
+  created_at: string;
+  po_date?: string | null;
+  oar_date?: string | null;
+  wo_date?: string | null;
+  release_date?: string | null;
+  release_status?: string | null;
+  is_released?: boolean;
+  ready_for_production?: boolean;
+  excess_qty?: number;
+  shortfall_qty?: number;
+  shortfall_reason?: string | null;
+  heat_number?: string | null;
+  classification?: string | null;
+  route_stages?: string[] | null;
+  is_at_vendor?: boolean;
+  vendor_name?: string | null;
+  vendor_dc?: string | null;
+  vendor_qty?: number;
+  vendor_dispatch_stage?: string | null;
+  vendor_target_return_stage?: string | null;
+  is_merged?: boolean;
+  merged_oars?: {
+    oar_number: string;
+    order_id: string;
+    customer_po?: string | null;
+    allocated_qty: number;
+  }[];
+}
+
+export interface PlanningSummary {
+  unreleased_count: number;
+  released_count: number;
+  producing_today_count: number;
+  ready_for_production_count: number;
+  active_in_production_count: number;
+  total_active_wos: number;
+  total_dispatched_wos: number;
+}
+
+export async function getPlanningSummary(): Promise<PlanningSummary> {
+  const { data } = await api.get("/api/v1/work-orders/planning-summary");
+  return data;
+}
+
 export async function getWorkOrders(params?: {
   search?: string;
   stage?: string;
   customer_code?: string;
   status_filter?: string;
+  casting_process?: string;
+  release_filter?: string;
+  sort_by?: string;
+  exclude_dispatched?: boolean;
+  from_date?: string;
+  to_date?: string;
+  date_type?: string;
+  classification?: string;
   limit?: number;
-}) {
+  offset?: number;
+}): Promise<WorkOrderListItem[]> {
   const { data } = await api.get("/api/v1/work-orders", { params });
   return data;
 }
@@ -168,10 +489,28 @@ export async function recordStageProduction(payload: {
   operator_name?: string;
   shift?: string;
   defect_code?: string;
+  heat_number?: string;
   remarks?: string;
   client_request_id?: string;
+  production_type?: "IN_HOUSE" | "VENDOR";
+  vendor_name?: string;
+  dc_number?: string;
+  target_return_stage?: string;
+  is_f1_shortfall_closure?: boolean;
+  shortfall_reason?: string;
 }) {
   const { data } = await api.post("/api/v1/production/entry", payload);
+  return data;
+}
+
+export async function declareWOShortfall(woNumber: string, payload: {
+  shortfall_qty: number;
+  reason: string;
+  create_patch_wo?: boolean;
+  heat_number?: string;
+  remarks?: string;
+}) {
+  const { data } = await api.post(`/api/v1/production/wo/${encodeURIComponent(woNumber)}/declare-shortfall`, payload);
   return data;
 }
 
@@ -185,8 +524,12 @@ export async function moveParts(payload: {
   operator_name?: string;
   shift?: string;
   defect_code?: string;
+  heat_number?: string;
   remarks?: string;
   client_request_id?: string;
+  production_type?: "IN_HOUSE" | "VENDOR";
+  vendor_name?: string;
+  dc_number?: string;
 }) {
   const { data } = await api.post("/api/v1/production/move", payload);
   return data;
@@ -208,7 +551,29 @@ export async function getPlantReconciliation() {
 }
 
 // Packing / BSR
-export async function getPackingQueue() {
+export interface PackingQueueItem {
+  id: string;
+  work_order_id: string;
+  wo_number: string;
+  oar_number?: string | null;
+  customer_name: string;
+  part_number: string;
+  customer_part_number?: string | null;
+  part_name?: string | null;
+  grade?: string | null;
+  order_qty: number;
+  fi_approved_qty: number;
+  available_for_packing: number;
+  received_qty: number;
+  packed_qty: number;
+  pending_qty: number;
+  ready_for_dispatch_qty: number;
+  dispatched_qty: number;
+  status: string;
+  updated_at: string;
+}
+
+export async function getPackingQueue(): Promise<PackingQueueItem[]> {
   const { data } = await api.get("/api/v1/packing/queue");
   return data;
 }
@@ -225,6 +590,50 @@ export async function updatePacking(payload: {
 }
 
 // Dispatch
+export interface DispatchItem {
+  id: string;
+  work_order_id: string;
+  wo_number: string;
+  customer_code?: string;
+  customer_name: string;
+  customer_po: string;
+  part_number: string;
+  customer_part_number?: string | null;
+  invoice_number: string;
+  dispatched_qty: number;
+  dispatch_date: string;
+  dispatcher_name?: string | null;
+  unit_price?: number;
+  total_invoice_value?: number;
+  payment_status?: "UNPAID" | "PAID" | "PARTIALLY_PAID" | "OVERDUE" | string;
+  paid_amount?: number;
+  payment_date?: string | null;
+  payment_reference?: string | null;
+  payment_remarks?: string | null;
+}
+
+export interface CustomerReturnItem {
+  id: string;
+  return_number: string;
+  customer_code: string;
+  customer_name: string;
+  customer_po?: string | null;
+  invoice_number?: string | null;
+  original_wo_number?: string | null;
+  part_number: string;
+  returned_qty: number;
+  unit_price: number;
+  total_return_value: number;
+  complaint_reason: string;
+  complaint_date: string;
+  status: string;
+  conversion_wo_number: string;
+  entry_stage: string;
+  destination_oar_number?: string | null;
+  created_by_name?: string | null;
+  created_at: string;
+}
+
 export async function getDispatchQueue() {
   const { data } = await api.get("/api/v1/dispatch/queue");
   return data;
@@ -234,18 +643,69 @@ export async function executeDispatch(payload: {
   wo_number: string;
   invoice_number: string;
   dispatched_quantity: number;
+  unit_price?: number;
+  payment_status?: string;
+  paid_amount?: number;
+  payment_reference?: string;
   customer_po?: string;
   vehicle_number?: string;
   transporter?: string;
   remarks?: string;
+  client_request_id?: string;
   invoice_amount?: string;
 }) {
   const { data } = await api.post("/api/v1/dispatch/ship", payload);
   return data;
 }
 
-export async function getDispatchHistory() {
+export async function getDispatchHistory(): Promise<DispatchItem[]> {
   const { data } = await api.get("/api/v1/dispatch/history");
+  return data;
+}
+
+export async function updateInvoicePayment(dispatchId: string, payload: {
+  payment_status: string;
+  paid_amount?: number;
+  payment_date?: string;
+  payment_reference?: string;
+  payment_remarks?: string;
+}): Promise<DispatchItem> {
+  const { data } = await api.patch(`/api/v1/dispatch/${encodeURIComponent(dispatchId)}/payment`, payload);
+  return data;
+}
+
+export async function lookupProductPricing(params: {
+  customer_code?: string;
+  part_number?: string;
+  wo_number?: string;
+}): Promise<{ unit_price: number; source: string }> {
+  const { data } = await api.get("/api/v1/dispatch/pricing-lookup", { params });
+  return data;
+}
+
+export async function createCustomerReturn(payload: {
+  customer_code: string;
+  customer_name?: string;
+  customer_po?: string;
+  invoice_number?: string;
+  original_wo_number?: string;
+  part_number: string;
+  returned_qty: number;
+  unit_price?: number;
+  complaint_reason: string;
+  conversion_wo_number?: string;
+  entry_stage?: string;
+  destination_oar_number?: string;
+}) {
+  const { data } = await api.post("/api/v1/dispatch/returns", payload);
+  return data;
+}
+
+export async function getCustomerReturns(params?: {
+  customer_code?: string;
+  search?: string;
+}): Promise<CustomerReturnItem[]> {
+  const { data } = await api.get("/api/v1/dispatch/returns", { params });
   return data;
 }
 
@@ -255,20 +715,162 @@ export async function createOrderIntake(payload: {
   customer_name: string;
   customer_po: string;
   part_number: string;
+  customer_part_number?: string;
   grade?: string;
   part_description?: string;
   po_quantity: number;
-  max_batch_size: number;
+  max_batch_size?: number;
   delivery_date?: string;
+  commitment_date?: string;
   order_type?: string;
   wo_quantities?: number[];
   source_type?: string;
   po_line_id?: string;
   schedule_id?: string;
+  oar_number?: string;
+  create_wos?: boolean;
 }) {
   const { data } = await api.post("/api/v1/operations/intake", payload);
   return data;
 }
+
+export interface NextSequences {
+  next_oar_number: string;
+  next_wo_number: string;
+}
+
+export async function getNextSequences(): Promise<NextSequences> {
+  const { data } = await api.get("/api/v1/operations/next-sequences");
+  return data;
+}
+
+export interface WorkOrderCreatePayload {
+  oar_number: string;
+  wo_number?: string;
+  physical_wo_qty: number;
+  wo_quantities?: number[];
+  allow_overrun?: boolean;
+  wo_date?: string;
+  target_date?: string;
+  casting_process?: "CENTRIFUGAL" | "CONTINUOUS" | string;
+  heat_number?: string;
+  route_stages?: string[];
+  remarks?: string;
+}
+
+export interface WorkOrderCreateResult {
+  success: boolean;
+  wo_number: string;
+  wos_created: string[];
+  wo_quantities: number[];
+  order_id: string;
+  oar_number: string;
+  customer_code: string;
+  part_number: string;
+  physical_wo_qty: number;
+  current_stage: string;
+  status: string;
+  release_status: string;
+  created_at: string;
+  message: string;
+  merged_oars?: { oar_number: string; customer_po?: string | null; qty: number }[];
+}
+
+export interface MergedWorkOrderCreatePayload {
+  oar_allocations: { oar_number: string; qty: number }[];
+  wo_number?: string;
+  allow_overrun?: boolean;
+  classification?: string;
+  wo_date?: string;
+  target_date?: string;
+  casting_process?: "CENTRIFUGAL" | "CONTINUOUS" | string;
+  heat_number?: string;
+  route_stages?: string[];
+  remarks?: string;
+}
+
+export async function createWorkOrder(payload: WorkOrderCreatePayload): Promise<WorkOrderCreateResult> {
+  const { data } = await api.post("/api/v1/operations/work-orders", payload);
+  return data;
+}
+
+export async function createMergedWorkOrder(payload: MergedWorkOrderCreatePayload): Promise<WorkOrderCreateResult> {
+  const { data } = await api.post("/api/v1/operations/work-orders/merge", payload);
+  return data;
+}
+
+export interface WorkOrderUpdatePayload {
+  wo_number?: string;
+  physical_wo_qty?: number;
+  wo_date?: string | null;
+  target_date?: string | null;
+  casting_process?: string | null;
+  heat_number?: string | null;
+  route_stages?: string[] | null;
+  remarks?: string | null;
+  allow_overrun?: boolean;
+}
+
+export async function updateWorkOrder(
+  woIdentifier: string,
+  payload: WorkOrderUpdatePayload
+): Promise<WorkOrderListItem> {
+  const { data } = await api.put(`/api/v1/operations/work-orders/${encodeURIComponent(woIdentifier)}`, payload);
+  return data;
+}
+
+export interface MovableWorkOrderItem {
+  wo_id: string;
+  wo_number: string;
+  oar_number?: string | null;
+  customer_code: string;
+  customer_name: string;
+  part_number: string;
+  part_name?: string | null;
+  from_stage: string;
+  to_stage?: string | null;
+  movable_wip: number;
+  current_stage: string;
+  heat_number?: string | null;
+  delivery_date?: string | null;
+  created_at?: string | null;
+  priority_rank: number;
+  mrb_status?: "APPROVED" | "PENDING_MRB" | "PARTIAL";
+  pending_mrb_count?: number;
+  mrb_pending_qty?: number;
+}
+
+export async function getMovableWorkOrders(limit?: number, stage?: string): Promise<MovableWorkOrderItem[]> {
+  const { data } = await api.get("/api/v1/work-orders/movable", {
+    params: {
+      ...(limit ? { limit } : {}),
+      ...(stage && stage !== "ALL" ? { stage } : {})
+    },
+  });
+  return data;
+}
+
+export async function bulkApproveMRBReviews(
+  stage?: string,
+  notes?: string
+): Promise<{ success: boolean; approved_count: number; message: string }> {
+  const { data } = await api.post("/api/v1/mrb/bulk-approve", null, {
+    params: { stage: stage && stage !== "ALL" ? stage : undefined, notes },
+  });
+  return data;
+}
+
+export async function batchApproveStageMRB(
+  woNumber: string,
+  stage: string,
+  notes?: string
+): Promise<{ success: boolean; approved_count: number; message: string }> {
+  const { data } = await api.post("/api/v1/mrb/stage-approve", null, {
+    params: { wo_number: woNumber, stage, notes },
+  });
+  return data;
+}
+
 
 // --- Masters: Customer / PO / Schedule ---
 
@@ -316,13 +918,32 @@ export async function updateMasterCustomer(payload: {
   return data;
 }
 
+export interface POLineWorkOrderSummary {
+  wo_id: string;
+  wo_number: string;
+  wo_status: string;
+  release_status: "AWAITING_ENG_RELEASE" | "AWAITING_MFG_RELEASE" | "AWAITING_WO_RELEASE" | "RELEASED";
+}
+
+export interface POLineOrderSummary {
+  oar_id: string;
+  oar_number?: string | null;
+  order_status: string;
+  po_coverage_status: "PO_MATCHED" | "SCHEDULED_AWAITING_PO" | "COMMERCIAL_PO_PENDING" | "UNCONFIRMED";
+  work_orders: POLineWorkOrderSummary[];
+}
+
 export interface POLineOut {
   id: string;
   part_number: string;
+  customer_part_number?: string | null;
   po_qty: number;
+  unit_price?: number;
+  line_total?: number;
   allocated_qty: number;
   available_qty: number;
   required_date?: string | null;
+  orders: POLineOrderSummary[];
 }
 
 export interface POMasterOut {
@@ -333,6 +954,8 @@ export interface POMasterOut {
   po_date?: string | null;
   validity_date?: string | null;
   status: string;
+  total_value?: number;
+  total_qty?: number;
   lines: POLineOut[];
 }
 
@@ -343,14 +966,54 @@ export async function getPOMasters(customerCode?: string): Promise<POMasterOut[]
   return data;
 }
 
+export interface POLineCreatePayload {
+  part_number?: string;
+  customer_part_number?: string;
+  po_qty: number;
+  unit_price?: number;
+  line_total?: number;
+  required_date?: string;
+}
+
 export async function createPOMaster(payload: {
   po_number: string;
   customer_code: string;
   po_date?: string;
   validity_date?: string;
-  lines: { part_number: string; po_qty: number; required_date?: string }[];
+  total_value?: number;
+  lines: POLineCreatePayload[];
 }): Promise<POMasterOut> {
   const { data } = await api.post("/api/v1/masters/pos", payload);
+  return data;
+}
+
+export interface POLineUpdatePayload {
+  id?: string;
+  part_number?: string;
+  customer_part_number?: string;
+  po_qty: number;
+  unit_price?: number;
+  line_total?: number;
+  required_date?: string;
+}
+
+export interface POMasterUpdatePayload {
+  po_number?: string;
+  customer_code?: string;
+  po_date?: string;
+  validity_date?: string;
+  status?: string;
+  total_value?: number;
+  lines?: POLineUpdatePayload[];
+}
+
+export async function updatePOMaster(poId: string, payload: POMasterUpdatePayload): Promise<POMasterOut> {
+  const { data } = await api.put(`/api/v1/masters/pos/${encodeURIComponent(poId)}`, payload);
+  return data;
+}
+
+export async function deletePOMaster(poId: string): Promise<{ message: string }> {
+  const { data } = await api.delete(`/api/v1/masters/pos/${encodeURIComponent(poId)}`);
   return data;
 }
 
@@ -360,11 +1023,18 @@ export interface ScheduleOut {
   customer_code: string;
   customer_name: string;
   part_number: string;
+  customer_part_number?: string | null;
+  part_description?: string | null;
   scheduled_qty: number;
+  allocated_qty?: number;
+  available_qty?: number;
+  unit_price?: number;
+  total_value?: number;
   required_date?: string | null;
   customer_schedule_ref?: string | null;
   po_status: string;
   linked_oar_number?: string | null;
+  linked_oar_numbers?: string[];
 }
 
 export async function getSchedules(customerCode?: string): Promise<ScheduleOut[]> {
@@ -376,12 +1046,37 @@ export async function getSchedules(customerCode?: string): Promise<ScheduleOut[]
 
 export async function createSchedule(payload: {
   customer_code: string;
-  part_number: string;
+  part_number?: string;
+  customer_part_number?: string;
   scheduled_qty: number;
+  unit_price?: number;
   required_date?: string;
   customer_schedule_ref?: string;
 }): Promise<ScheduleOut> {
   const { data } = await api.post("/api/v1/masters/schedules", payload);
+  return data;
+}
+
+export async function updateSchedule(
+  scheduleId: string,
+  payload: {
+    customer_code?: string;
+    part_number?: string;
+    customer_part_number?: string;
+    scheduled_qty?: number;
+    unit_price?: number;
+    total_value?: number;
+    required_date?: string;
+    customer_schedule_ref?: string;
+    po_status?: string;
+  }
+): Promise<ScheduleOut> {
+  const { data } = await api.put(`/api/v1/masters/schedules/${scheduleId}`, payload);
+  return data;
+}
+
+export async function deleteSchedule(scheduleId: string): Promise<{ message: string }> {
+  const { data } = await api.delete(`/api/v1/masters/schedules/${scheduleId}`);
   return data;
 }
 
@@ -434,14 +1129,135 @@ export async function confirmMatch(payload: {
   return data;
 }
 
+export interface OARWorkOrderSummary {
+  wo_id: string;
+  wo_number: string;
+  wo_type: "ORIGINAL" | "PATCH";
+  is_replacement: boolean;
+  source_wo_id?: string | null;
+  source_wo_number?: string | null;
+  replacement_qty: number;
+  allocated_qty: number;
+  production_qty: number;
+  good_qty: number;
+  rejected_qty: number;
+  final_good_contribution: number;
+  release_status: string;
+  current_stage: string;
+  wo_status: string;
+  ok_completed: number;
+  rejected: number;
+  movable_wip: number;
+  dispatched_qty: number;
+  wo_date?: string | null;
+  created_at?: string | null;
+  release_date?: string | null;
+  is_released?: boolean;
+  ready_for_production?: boolean;
+  classification?: string | null;
+  heat_number?: string | null;
+  commitment_date?: string | null;
+  revised_commitment_date?: string | null;
+  effective_commitment_date?: string | null;
+  commitment_date_revision_count?: number;
+}
+
+export interface OARListItem {
+  oar_number: string;
+  order_id: string;
+  part_id?: string;
+  fulfilled_from_stock_qty?: number;
+  customer_code: string;
+  customer_name: string;
+  customer_po: string;
+  source_type?: string;
+  oar_po_status?: string | null;
+  po_matched?: boolean;
+  po_coverage_status?: "SCHEDULED_AWAITING_PO" | "COMMERCIAL_PO_PENDING" | "PO_MATCHED" | "UNCONFIRMED" | string;
+  part_number: string;
+  customer_part_number?: string | null;
+  part_name?: string | null;
+  oar_qty: number;
+  allocated_qty: number;
+  remaining_qty: number;
+  num_wos: number;
+  num_original_wos: number;
+  num_patch_wos: number;
+  total_produced: number;
+  total_good: number;
+  total_rejected: number;
+  oar_fulfilled: number;
+  oar_shortfall: number;
+  status: string;
+  delivery_date?: string | null;
+  commitment_date?: string | null;
+  revised_commitment_date?: string | null;
+  effective_commitment_date?: string | null;
+  commitment_date_revision_count?: number;
+  commitment_date_last_revised_at?: string | null;
+  commitment_date_revision_reason?: string | null;
+  created_at: string;
+  po_date?: string | null;
+  oar_date?: string | null;
+  classification?: string | null;
+  work_orders: OARWorkOrderSummary[];
+}
+
+export interface OARGenealogyResponse extends OARListItem {}
+
 export async function getOarList(params?: {
   search?: string;
   status_filter?: string;
   customer_code?: string;
+  classification?: string;
   limit?: number;
   offset?: number;
-}) {
+}): Promise<OARListItem[]> {
   const { data } = await api.get("/api/v1/operations/oars", { params });
+  return data;
+}
+
+export async function exportOarsExcel(classification?: string): Promise<void> {
+  const query = classification ? `?classification=${encodeURIComponent(classification)}` : "";
+  const dateStr = new Date().toISOString().slice(0, 10);
+  await downloadFile(`/api/v1/operations/oars/export/excel${query}`, `VSPL_Open_OAR_and_WO_Dump_${dateStr}.xlsx`);
+}
+
+export async function getOarGenealogy(oarNumber: string): Promise<OARGenealogyResponse> {
+  const { data } = await api.get(`/api/v1/operations/oars/${encodeURIComponent(oarNumber)}/genealogy`);
+  return data;
+}
+
+export async function updateOAR(
+  oarNumber: string,
+  payload: {
+    oar_qty?: number;
+    commitment_date?: string | null;
+    revised_commitment_date?: string | null;
+    revision_reason?: string | null;
+    delivery_date?: string | null;
+    customer_part_number?: string | null;
+    status?: string;
+    remarks?: string;
+    order_type?: string;
+  }
+): Promise<OARListItem> {
+  const { data } = await api.patch(`/api/v1/operations/oars/${encodeURIComponent(oarNumber)}`, payload);
+  return data;
+}
+
+export async function deleteOAR(oarNumber: string): Promise<{ success: boolean; message: string }> {
+  const { data } = await api.delete(`/api/v1/operations/oars/${encodeURIComponent(oarNumber)}`);
+  return data;
+}
+
+export async function deleteWorkOrder(
+  woIdentifier: string,
+  forceUnstartedRelease: boolean = true
+): Promise<{ success: boolean; wo_number: string; oar_number?: string | null; freed_qty: number; message: string }> {
+  const { data } = await api.delete(`/api/v1/work-orders/${encodeURIComponent(woIdentifier)}`, {
+    params: forceUnstartedRelease ? { force_unstarted_release: true } : {},
+  });
   return data;
 }
 
@@ -449,11 +1265,14 @@ export async function releaseWorkOrder(payload: {
   wo_number: string;
   physical_wo_qty: number;
   route_stages: string[];
+  casting_process?: string;
+  heat_number?: string;
   remarks?: string;
 }) {
   const { data } = await api.post("/api/v1/operations/wo-release", payload);
   return data;
 }
+
 
 export async function createConversion(payload: {
   conversion_wo_number: string;
@@ -673,10 +1492,15 @@ export interface AdminPart {
   part_number: string;
   grade?: string | null;
   description?: string | null;
+  customer_part_number?: string | null;
+  customer_name?: string | null;
+  customer_code?: string | null;
 }
 
-export async function getParts(): Promise<AdminPart[]> {
-  const { data } = await api.get("/api/v1/admin/parts");
+export async function getParts(customerCode?: string): Promise<AdminPart[]> {
+  const { data } = await api.get("/api/v1/admin/parts", {
+    params: customerCode ? { customer_code: customerCode } : undefined,
+  });
   return data;
 }
 
@@ -718,6 +1542,522 @@ export async function downloadFile(url: string, filename: string): Promise<void>
   window.URL.revokeObjectURL(blobUrl);
 }
 
+// --- Customer Part Cross-Reference Master & Lookup ---
+
+export interface PartLookupResponse {
+  customer_code: string;
+  customer_name?: string | null;
+  customer_part_no: string;
+  part_id?: string | null;
+  part_number?: string | null;
+  grade?: string | null;
+  description?: string | null;
+  is_matched: boolean;
+  match_type: "cross_reference" | "direct_internal" | "ambiguous" | "none";
+  candidate_parts: string[];
+  message?: string | null;
+}
+
+export interface CustomerPartCrossReferenceOut {
+  id: string;
+  customer_id: string;
+  customer_code: string;
+  customer_name: string;
+  customer_part_no: string;
+  part_id: string;
+  internal_part_code: string;
+  part_description?: string | null;
+  part_grade?: string | null;
+  source?: string | null;
+  is_active: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+  created_by_name?: string | null;
+}
+
+export interface CustomerPartCrossReferenceCreate {
+  customer_id?: string;
+  customer_code?: string;
+  customer_part_no: string;
+  part_id?: string;
+  internal_part_code?: string;
+  source?: string;
+  is_active?: boolean;
+}
+
+export interface CustomerPartCrossReferenceUpdate {
+  part_id?: string;
+  internal_part_code?: string;
+  source?: string;
+  is_active?: boolean;
+}
+
+export interface CustomerPartCrossReferenceListResponse {
+  items: CustomerPartCrossReferenceOut[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export async function lookupCustomerPart(
+  customerCode: string,
+  customerPartNo: string
+): Promise<PartLookupResponse> {
+  const { data } = await api.get("/api/v1/masters/part-cross-references/lookup", {
+    params: { customer_code: customerCode, customer_part_no: customerPartNo },
+  });
+  return data;
+}
+
+export async function getPartCrossReferences(params?: {
+  customer_code?: string;
+  part_number?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<CustomerPartCrossReferenceListResponse> {
+  const { data } = await api.get("/api/v1/masters/part-cross-references", {
+    params,
+  });
+  if (Array.isArray(data)) {
+    return {
+      items: data,
+      total: data.length,
+      limit: params?.limit || data.length,
+      offset: params?.offset || 0,
+    };
+  }
+  return data;
+}
+
+export async function createPartCrossReference(
+  payload: CustomerPartCrossReferenceCreate
+): Promise<CustomerPartCrossReferenceOut> {
+  const { data } = await api.post("/api/v1/masters/part-cross-references", payload);
+  return data;
+}
+
+export async function updatePartCrossReference(
+  id: string,
+  payload: CustomerPartCrossReferenceUpdate
+): Promise<CustomerPartCrossReferenceOut> {
+  const { data } = await api.put(`/api/v1/masters/part-cross-references/${id}`, payload);
+  return data;
+}
+
+// --- Authoritative Internal Part Master ---
+
+export interface MasterPart {
+  id: string;
+  part_number: string;
+  customer_id: string;
+  customer_code: string;
+  customer_name: string;
+  customer_part_number: string;
+  status: string;
+  description?: string | null;
+  created_at?: string | null;
+}
+
+export interface MasterPartKPIs {
+  total_parts: number;
+  active_parts: number;
+  total_customers: number;
+  new_parts_this_month: number;
+}
+
+export interface MasterPartListResponse {
+  items: MasterPart[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export async function getMasterParts(params?: {
+  customer_code?: string;
+  status?: string;
+  search?: string;
+  page?: number;
+  limit?: number;
+}): Promise<MasterPartListResponse> {
+  const { data } = await api.get("/api/v1/masters/parts", { params });
+  return data;
+}
+
+export async function getMasterPartKPIs(): Promise<MasterPartKPIs> {
+  const { data } = await api.get("/api/v1/masters/parts/kpis");
+  return data;
+}
+
+export async function getMasterPart(partId: string): Promise<MasterPart> {
+  const { data } = await api.get(`/api/v1/masters/parts/${encodeURIComponent(partId)}`);
+  return data;
+}
+
+export async function createMasterPart(payload: {
+  customer_code: string;
+  customer_part_number: string;
+  status?: string;
+  description?: string;
+}): Promise<MasterPart> {
+  const { data } = await api.post("/api/v1/masters/parts", payload);
+  return data;
+}
+
+export async function updateMasterPart(
+  partId: string,
+  payload: {
+    part_number?: string;
+    customer_part_number?: string;
+    status?: string;
+    description?: string;
+  }
+): Promise<MasterPart> {
+  const { data } = await api.put(`/api/v1/masters/parts/${encodeURIComponent(partId)}`, payload);
+  return data;
+}
+
+// ==========================================
+// Material Review Board (MRB)
+// ==========================================
+
+export interface MRBReviewItem {
+  id: string;
+  mrb_number: string;
+  production_update_id?: string | null;
+  movement_id?: string | null;
+  work_order_id: string;
+  wo_number: string;
+  part_number?: string | null;
+  part_name?: string | null;
+  customer_name?: string | null;
+  stage: string;
+  machine_id?: string | null;
+  operator_name?: string | null;
+  shift?: string | null;
+  heat_number?: string | null;
+
+  reported_ok_qty: number;
+  reported_reject_qty: number;
+  reported_defect_code?: string | null;
+  floor_remarks?: string | null;
+
+  verified_ok_qty?: number | null;
+  verified_reject_qty?: number | null;
+  verified_defect_code?: string | null;
+
+  status: "PENDING" | "APPROVED" | "ADJUSTED" | "REJECTED";
+  disposition?: string | null;
+
+  reviewed_by_id?: string | null;
+  reviewed_by_name?: string | null;
+  reviewed_at?: string | null;
+  review_notes?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+export interface MRBListResponse {
+  total_count: number;
+  pending_count: number;
+  approved_count: number;
+  adjusted_count: number;
+  rejected_count: number;
+  items: MRBReviewItem[];
+}
+
+export interface MRBReviewDecisionRequest {
+  action: "APPROVE" | "ADJUST" | "REJECT";
+  verified_ok_qty?: number;
+  verified_reject_qty?: number;
+  verified_defect_code?: string;
+  disposition?: string;
+  review_notes?: string;
+}
+
+export interface MRBDecisionResponse {
+  success: boolean;
+  message: string;
+  item: MRBReviewItem;
+}
+
+export async function getMRBReviews(params?: {
+  status?: string;
+  stage?: string;
+  wo_number?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<MRBListResponse> {
+  const { data } = await api.get("/api/v1/mrb/reviews", { params });
+  return data;
+}
+
+export async function getMRBReview(reviewId: string): Promise<MRBReviewItem> {
+  const { data } = await api.get(`/api/v1/mrb/reviews/${encodeURIComponent(reviewId)}`);
+  return data;
+}
+
+export async function submitMRBDecision(
+  reviewId: string,
+  payload: MRBReviewDecisionRequest
+): Promise<MRBDecisionResponse> {
+  const { data } = await api.post(`/api/v1/mrb/reviews/${encodeURIComponent(reviewId)}/decision`, payload);
+  return data;
+}
+
+export async function approveMRBReview(
+  reviewId: string,
+  payload?: { disposition?: string; review_notes?: string }
+): Promise<MRBDecisionResponse> {
+  const { data } = await api.post(`/api/v1/mrb/reviews/${encodeURIComponent(reviewId)}/approve`, {
+    action: "APPROVE",
+    ...payload,
+  });
+  return data;
+}
+
+export async function adjustMRBReview(
+  reviewId: string,
+  payload: {
+    verified_ok_qty: number;
+    verified_reject_qty: number;
+    verified_defect_code?: string;
+    disposition?: string;
+    review_notes?: string;
+  }
+): Promise<MRBDecisionResponse> {
+  const { data } = await api.post(`/api/v1/mrb/reviews/${encodeURIComponent(reviewId)}/adjust`, {
+    action: "ADJUST",
+    ...payload,
+  });
+  return data;
+}
+
+// ============================================================================
+// Vendor / Subcontractor Tracking & Inward Reception
+// ============================================================================
+
+export interface VendorDispatchItem {
+  id: string;
+  work_order_id?: string;
+  wo_number: string;
+  oar_number: string;
+  customer_name: string;
+  part_number: string;
+  part_name: string;
+  dispatch_stage: string;
+  vendor_name: string;
+  dc_number: string;
+  dispatched_qty: number;
+  received_qty: number;
+  scrap_qty: number;
+  pending_qty: number;
+  status: "AT_VENDOR" | "PARTIALLY_RECEIVED" | "RECEIVED";
+  target_return_stage?: string;
+  received_stage?: string | null;
+  dispatched_at: string;
+  received_at?: string;
+  inward_dc_number?: string;
+  remarks?: string;
+  days_at_vendor: number;
+}
+
+export interface VendorSummary {
+  active_dispatches_count: number;
+  completed_dispatches_count: number;
+  total_pieces_at_vendor: number;
+  total_pieces_received: number;
+  active_vendor_count: number;
+}
+
+export async function getVendorDispatches(params?: {
+  status?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<VendorDispatchItem[]> {
+  const { data } = await api.get("/api/v1/vendor/dispatches", { params });
+  return data;
+}
+
+export async function getVendorSummary(): Promise<VendorSummary> {
+  const { data } = await api.get("/api/v1/vendor/summary");
+  return data;
+}
+
+export async function receiveVendorDispatch(payload: {
+  dispatch_id: string;
+  received_qty: number;
+  scrap_qty?: number;
+  destination_stage?: string;
+  inward_dc?: string;
+  remarks?: string;
+}): Promise<{
+  success: boolean;
+  message: string;
+  dispatch_id: string;
+  wo_number: string;
+  received_qty: number;
+  scrap_qty: number;
+  status: string;
+  current_stage: string;
+}> {
+  const { data } = await api.post("/api/v1/vendor/receive", payload);
+  return data;
+}
+
+// ============================================================================
+// BSR Finished Goods Buffer Stock
+// ============================================================================
+
+export interface BSRStockLot {
+  id: string;
+  source_wo_number: string;
+  heat_number?: string;
+  available_qty: number;
+  allocated_qty: number;
+  created_at: string;
+}
+
+export interface BSRStockSummary {
+  part_id: string;
+  part_number: string;
+  part_description?: string;
+  total_available: number;
+  total_allocated: number;
+  lots: BSRStockLot[];
+}
+
+export async function getBSRStockForPart(partId: string): Promise<BSRStockSummary> {
+  const { data } = await api.get(`/api/v1/bsr-stock/part/${encodeURIComponent(partId)}`);
+  return data;
+}
+
+export async function listBSRStock(): Promise<BSRStockSummary[]> {
+  const { data } = await api.get('/api/v1/bsr-stock');
+  return data;
+}
+
+export async function allocateBSRStock(payload: {
+  oar_id: string;
+  quantity: number;
+}): Promise<{
+  success: boolean;
+  oar_number: string;
+  allocated_from_stock: number;
+  total_fulfilled_from_stock: number;
+  remaining_to_plan: number;
+  message: string;
+}> {
+  const { data } = await api.post('/api/v1/bsr-stock/allocate', payload);
+  return data;
+}
+
+// ============================================================================
+// Sales-Ops Daily Meeting Report (Plan vs Actual)
+// ============================================================================
+
+export interface SalesOpsDailyItem {
+  wo_id: string;
+  wo_number: string;
+  customer_name: string;
+  customer_code: string;
+  customer_po: string;
+  part_id: string;
+  part_number: string; // Internal Part ID (e.g. PMC225)
+  customer_part_number?: string | null;
+  part_name?: string | null;
+  grade?: string | null;
+  oar_number?: string | null;
+  commitment_date?: string | null;
+  revised_commitment_date?: string | null;
+  effective_commitment_date?: string | null;
+  commitment_date_revision_count: number;
+  delivery_date?: string | null;
+  date_status: "OVERDUE" | "TODAY" | "TOMORROW" | "THIS_WEEK" | "FUTURE" | "UNDATED";
+  planned_qty: number;
+  bsr_actual_qty: number;
+  dispatched_qty: number;
+  total_fulfilled_qty: number;
+  gap_qty: number;
+  part_bsr_stock: number;
+  current_stage: string;
+  is_at_vendor: boolean;
+  vendor_name?: string | null;
+  vendor_dc?: string | null;
+  vendor_qty?: number | null;
+  vendor_stage?: string | null;
+  stage_wip: Record<string, number>;
+  unit_price: number;
+  price_source: string;
+  planned_value: number;
+  fulfilled_value: number;
+  gap_value: number;
+  fulfillment_status: "READY_IN_BSR" | "DISPATCHED" | "WIP_IN_HOUSE" | "AT_VENDOR" | "OVERDUE_DEFICIT";
+  wo_status: string;
+  heat_number?: string | null;
+}
+
+export interface SalesOpsSummary {
+  total_orders: number;
+  total_planned_qty: number;
+  total_bsr_actual_qty: number;
+  total_dispatched_qty: number;
+  total_fulfilled_qty: number;
+  total_gap_qty: number;
+  fulfillment_rate: number;
+  total_planned_value: number;
+  total_fulfilled_value: number;
+  total_gap_value: number;
+  overdue_orders_count: number;
+  overdue_gap_value: number;
+  today_orders_count: number;
+  today_gap_value: number;
+  at_vendor_count: number;
+}
+
+export interface SalesOpsDailyReportResponse {
+  target_date?: string | null;
+  filter_preset: string;
+  summary: SalesOpsSummary;
+  items: SalesOpsDailyItem[];
+}
+
+export async function getSalesOpsDailyReport(params?: {
+  target_date?: string;
+  from_date?: string;
+  to_date?: string;
+  preset?: string;
+  status_filter?: string;
+  search?: string;
+  sort_by?: string;
+}): Promise<SalesOpsDailyReportResponse> {
+  const { data } = await api.get('/api/v1/reports/sales-ops-daily', { params });
+  return data;
+}
+
+export function getSalesOpsCsvExportUrl(params?: {
+  target_date?: string;
+  from_date?: string;
+  to_date?: string;
+  preset?: string;
+  status_filter?: string;
+  search?: string;
+  sort_by?: string;
+}): string {
+  const q = new URLSearchParams();
+  if (params?.target_date) q.set('target_date', params.target_date);
+  if (params?.from_date) q.set('from_date', params.from_date);
+  if (params?.to_date) q.set('to_date', params.to_date);
+  if (params?.preset) q.set('preset', params.preset);
+  if (params?.status_filter) q.set('status_filter', params.status_filter);
+  if (params?.search) q.set('search', params.search);
+  if (params?.sort_by) q.set('sort_by', params.sort_by);
+  return `/api/v1/reports/export/sales-ops-csv?${q.toString()}`;
+}
+
+// --- Ported from main: work queue, stage plan dates, lead times, legacy roles ---
 // --- Phase 2: work queue, WO edit, subcontracting, accounts ---
 
 export interface QueueItem {
@@ -750,6 +2090,84 @@ export interface StageQueue {
 
 export async function getWorkQueue(stage: string, days = 2): Promise<StageQueue> {
   const { data } = await api.get("/api/v1/work-orders/queue", { params: { stage, days } });
+  return data;
+}
+
+export async function updateStagePlan(
+  woNumber: string,
+  stages: { stage: string; planned_start?: string | null; planned_end?: string | null }[],
+  reason: string
+): Promise<{ wo_number: string; changes: string[]; stage_plans: Record<string, { planned_start: string | null; planned_end: string | null }> }> {
+  const { data } = await api.patch(`/api/v1/work-orders/${encodeURIComponent(woNumber)}/stage-plan`, { stages, reason });
+  return data;
+}
+
+export interface LeadTimeRow {
+  stage: string;
+  days: number;
+  default_days?: number | null;
+  customised: boolean;
+}
+
+export async function getLeadTimes(): Promise<{ stages: LeadTimeRow[] }> {
+  const { data } = await api.get("/api/v1/planning/lead-times");
+  return data;
+}
+
+export async function updateLeadTimes(days: Record<string, number>): Promise<{ stages: LeadTimeRow[] }> {
+  const { data } = await api.put("/api/v1/planning/lead-times", { days });
+  return data;
+}
+
+export interface LegacyRoleItem {
+  id: string;
+  full_name: string;
+  email: string;
+  department?: string | null;
+  current_role: string;
+  new_role: string | null;
+}
+
+export async function getLegacyRolePlan(): Promise<{ convertible: LegacyRoleItem[]; needs_admin: LegacyRoleItem[] }> {
+  const { data } = await api.get("/api/v1/users/legacy-roles");
+  return data;
+}
+
+export async function convertLegacyRoles(): Promise<{
+  converted: { email: string; from: string; to: string }[];
+  needs_admin: LegacyRoleItem[];
+}> {
+  const { data } = await api.post("/api/v1/users/convert-legacy-roles");
+  return data;
+}
+
+
+// --- Activity log (who did what) ---
+export interface ActivityItem {
+  id: string;
+  at: string | null;
+  user_name: string;
+  user_email?: string | null;
+  user_role?: string | null;
+  action: string;
+  area?: string | null;
+  path: string;
+  target?: string | null;
+  details?: string | null;
+  outcome?: string | null;
+  status_code?: number | null;
+}
+
+export async function getActivityLog(params: {
+  search?: string;
+  action?: string;
+  outcome?: string;
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ total: number; items: ActivityItem[] }> {
+  const { data } = await api.get("/api/v1/activity-log", { params });
   return data;
 }
 

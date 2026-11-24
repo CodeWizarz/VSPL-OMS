@@ -1,12 +1,14 @@
 import enum
+import re
 import uuid
 from sqlalchemy import Column, String, Integer, Date, Enum, DateTime, ForeignKey, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import Session, relationship
 from sqlalchemy.sql import func
 from app.core.database import Base, GUID
 
 class OrderStatus(str, enum.Enum):
     ACCEPT = "accept"
+    CONFIRMED = "confirmed"
     HOLD = "hold"
     REJECT = "reject"
 
@@ -31,19 +33,46 @@ class Part(Base):
     description = Column(String)
     orders = relationship("Order", back_populates="part")
 
+
+def next_internal_part_number(db: Session, customer_code: str) -> str:
+    """Authoritative internal Part Number generation for a genuinely new part.
+
+    Mirrors the real, pre-existing Part Master import convention (verified against
+    the actual imported data, e.g. customer code 'PMC' -> 'PMC1' .. 'PMC380'):
+    {Customer Code}{next per-customer sequential integer}, no separator. Follows
+    the same collision-resistant approach as next_nc_number() -- finds the true
+    highest existing suffix for this customer's parts rather than a plain
+    COUNT(*)+1, which drifts out of sync once gaps exist (collapsed duplicates,
+    excluded conflicts, etc. -- exactly as seen in the real imported data)."""
+    prefix = customer_code.strip().upper()
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    highest = 0
+    for (part_number,) in db.query(Part.part_number).filter(Part.part_number.like(f"{prefix}%")).all():
+        m = pattern.match(part_number or "")
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return f"{prefix}{highest + 1}"
+
 class Order(Base):
     """Represents an accepted OAR (Order Acknowledgement Record)."""
     __tablename__ = "orders"
 
     id = Column(GUID, primary_key=True, default=uuid.uuid4)
-    oar_number = Column(String, unique=True, nullable=True)
+    oar_number = Column(String, index=True, nullable=True)
     customer_id = Column(GUID, ForeignKey("customers.id"), nullable=False)
     part_id = Column(GUID, ForeignKey("parts.id"), nullable=False)
     customer_po = Column(String, nullable=False)
     po_qty = Column(Integer, nullable=False)
-    max_batch_size = Column(Integer, nullable=False)
+    max_batch_size = Column(Integer, nullable=True, default=1000)
     delivery_date = Column(Date)
-    order_type = Column(String)
+    commitment_date = Column(Date, nullable=True)
+    revised_commitment_date = Column(Date, nullable=True)
+    commitment_date_revision_count = Column(Integer, nullable=False, default=0)
+    commitment_date_last_revised_at = Column(DateTime(timezone=True), nullable=True)
+    commitment_date_revision_reason = Column(String, nullable=True)
+    order_type = Column(String(50), nullable=False, default="Production")  # 'Production' | 'NPD'
+    customer_part_number = Column(String, nullable=True)
+    fulfilled_from_stock_qty = Column(Integer, nullable=False, default=0)  # Pieces fulfilled directly from BSR Finished Stock
     status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.ACCEPT)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -61,5 +90,6 @@ class Order(Base):
     customer = relationship("Customer", back_populates="orders")
     part = relationship("Part", back_populates="orders")
     work_orders = relationship("WorkOrder", back_populates="order")
+    wo_allocations = relationship("WorkOrderOARAllocation", back_populates="order")
     po_line = relationship("POLine", back_populates="orders")
     schedule = relationship("ScheduleMaster", back_populates="orders")

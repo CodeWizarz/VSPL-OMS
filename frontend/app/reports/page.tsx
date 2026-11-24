@@ -7,7 +7,9 @@ import {
   Truck,
   History,
   AlertTriangle,
-  Loader2
+  Loader2,
+  TrendingUp,
+  ArrowRight
 } from "lucide-react";
 import { AppShell } from "@/app/components/layout/AppShell";
 import { downloadFile, getLatestMaster } from "@/lib/api";
@@ -26,6 +28,16 @@ interface ReportDef {
 }
 
 const REPORTS: ReportDef[] = [
+  {
+    id: "sales-ops-csv",
+    title: "Sales-Ops Daily Meeting Report (Plan vs Actual)",
+    desc: "Daily morning standup report comparing planned commitment quantities against finished BSR stock and dispatches, prioritized by financial order value.",
+    format: "CSV",
+    kind: "download",
+    endpoint: "/api/v1/reports/export/sales-ops-csv?preset=today",
+    filename: "vspl_sales_ops_daily_report.csv",
+    icon: <TrendingUp className="h-5 w-5 text-indigo-500" />,
+  },
   {
     id: "wip-csv",
     title: "Stage-Wise WIP Matrix Report",
@@ -122,6 +134,30 @@ export default function ReportsCenterPage() {
         </div>
 
         {/* Reports Grid */}
+        <div className="rounded-2xl border border-indigo-200 dark:border-indigo-900/50 bg-gradient-to-r from-indigo-50/80 via-white to-purple-50/80 dark:from-indigo-950/20 dark:via-zinc-900 dark:to-purple-950/20 p-5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="rounded-md bg-indigo-600 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
+                Interactive Dashboard
+              </span>
+              <span className="text-xs font-semibold text-indigo-700 dark:text-indigo-400">Sales-Ops Morning Standup</span>
+            </div>
+            <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100">
+              Live Sales-Ops Daily Meeting Dashboard (Plan vs Actual)
+            </h2>
+            <p className="text-xs text-zinc-600 dark:text-zinc-400 max-w-xl">
+              Inspect order commitments for today vs actual finished pieces ready in BSR, spot delivery gaps, track bottleneck stages & at-vendor parts, and prioritize by order value.
+            </p>
+          </div>
+          <a
+            href="/reports/sales-ops"
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition-all whitespace-nowrap self-start sm:self-auto"
+          >
+            <span>Open Sales-Ops Screen</span>
+            <ArrowRight className="h-4 w-4" />
+          </a>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {REPORTS.map((r) => (
             <div

@@ -13,49 +13,54 @@ spec grants (or withholds) that *specific* capability, not because of a broader
 """
 from app.models.user import UserRole
 
-# Master-data administration and planning-only mutations: Customer Master, PO Master,
-# Schedule Master, Order Intake (OAR creation), PO<->Schedule matching, Conversion Part
-# Mapping (master data), and the OMS Engine batch upload/download tools. Per the spec,
-# Production Manager explicitly does NOT get PO/Schedule/OAR creation or master-data
-# administration -- only Admin (Super Admin) and Planner do.
-PLANNING_ROLES = (UserRole.ADMIN, UserRole.PLANNER)
+# --- Stage roles (Supervisor + Manager per stage) ----------------------------------
+PRODUCTION_STAGE_SUPERVISORS = (
+    UserRole.F1_SUPERVISOR, UserRole.F2_SUPERVISOR, UserRole.F3_SUPERVISOR,
+    UserRole.SP_SUPERVISOR, UserRole.FI_SUPERVISOR, UserRole.PACKING_SUPERVISOR,
+)
+PRODUCTION_STAGE_MANAGERS = (
+    UserRole.F1_MANAGER, UserRole.F2_MANAGER, UserRole.F3_MANAGER,
+    UserRole.SP_MANAGER, UserRole.FI_MANAGER, UserRole.PACKING_MANAGER,
+)
+DISPATCH_STAGE_ROLES = (UserRole.DISPATCH_SUPERVISOR, UserRole.DISPATCH_MANAGER)
+STAGE_MANAGER_ROLES = PRODUCTION_STAGE_MANAGERS + (UserRole.DISPATCH_MANAGER,)
+PRODUCTION_STAGE_ROLES = PRODUCTION_STAGE_SUPERVISORS + PRODUCTION_STAGE_MANAGERS
 
-# WO release specifically: Production Manager already held this permission before the
-# Roles & Responsibilities spec was written, and the spec's own carve-out ("Cannot: WO
-# release unless existing explicit permission already grants it") preserves it rather
-# than stripping it -- this is intentionally a superset of PLANNING_ROLES, not a copy
-# of it, so a future change to PLANNING_ROLES doesn't silently also change this.
-WO_RELEASE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.PRODUCTION_MANAGER)
+# Master-data administration and planning mutations: Customer Master, PO Master,
+# Schedule Master, Order Intake (OAR creation), WO generation, PO<->Schedule matching,
+# Conversion Part Mapping (master data), and the OMS Engine batch upload/download tools.
+# Sales and Planner functions are unified, and CEO holds full administrative & operational authority.
+PLANNING_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.SALES, UserRole.CEO)
 
-# The planner-driven Conversion Module (operations.py POST /conversion) -- distinct
-# from Conversion Part Mapping (master data, gated by PLANNING_ROLES above) and from
-# the QA-triggered CONVERT_PART/SAME_PART/CWO disposition action (gated by
-# PLANNING_ROLES via rejection_service.py's own action-conditional branch). The spec
-# doesn't restrict this planner+production floor collaboration, so it's left as the
-# pre-existing three-role set rather than tightened to match PLANNING_ROLES.
-CONVERSION_MODULE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.PRODUCTION_MANAGER)
+# PO Master visibility and editing
+PO_MASTER_VIEW_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.SALES, UserRole.CEO)
+PO_MASTER_EDIT_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.SALES, UserRole.CEO)
+
+# WO release specifically: Admin, Planner, Production Manager, Sales, CEO
+WO_RELEASE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.PRODUCTION_MANAGER, UserRole.SALES, UserRole.CEO) + (UserRole.ENGINEERING,)
+
+# The planner-driven Conversion Module (operations.py POST /conversion)
+CONVERSION_MODULE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.PRODUCTION_MANAGER, UserRole.SALES, UserRole.CEO)
 
 # Physical shop-floor production entry (recording good/rejected quantity at a stage).
-# Planner is explicitly excluded per spec ("Cannot: production entry").
-#
-# Phase 2: SUPERVISOR (stage supervisors) and PACKING (production at the Packing / BSR
-# stage only) are added. Floor-level roles are additionally stage-locked by department
-# at the API layer -- see app/core/departments.py.
+# Production staff, Store, Planner/PPC, Sales, Admin, and CEO granted rights.
+# DATA_ANALYST is strictly read-only and cannot mutate production records.
 PRODUCTION_ENTRY_ROLES = (
     UserRole.ADMIN, UserRole.PRODUCTION_MANAGER,
     UserRole.MACHINE_OPERATOR, UserRole.OPERATOR,
-    UserRole.SUPERVISOR, UserRole.PACKING,
-)
+    UserRole.PLANNER, UserRole.SALES, UserRole.DISPATCH,
+    UserRole.CEO,
+) + PRODUCTION_STAGE_ROLES
 
-# Physical material movement between stages: Store's core responsibility ("Physical
-# material movement"), Production Manager's "authorized material movement", and the
-# shop-floor operator roles that already perform it as part of production entry.
-# Planner is explicitly excluded ("Cannot: arbitrary material movement").
+# Physical material movement between stages:
+# Production staff, Store, Planner/PPC, Sales, Admin, and CEO granted rights.
+# DATA_ANALYST is strictly read-only and cannot move parts.
 MATERIAL_MOVEMENT_ROLES = (
     UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.STORE,
     UserRole.MACHINE_OPERATOR, UserRole.OPERATOR,
-    UserRole.SUPERVISOR, UserRole.PACKING,
-)
+    UserRole.PLANNER, UserRole.SALES, UserRole.DISPATCH,
+    UserRole.CEO,
+) + PRODUCTION_STAGE_ROLES
 
 # QA disposition APPROVAL: authorizing SCRAP / DEVIATION_ACCEPT, and closing/updating
 # an NC record's QA status. Per spec, Production Manager and CEO do NOT approve
@@ -70,6 +75,10 @@ MATERIAL_MOVEMENT_ROLES = (
 # any_authenticated_user for the explicit, pre-existing contract this preserves).
 # Only the approval/disposition decision that follows is access-controlled.
 QUALITY_APPROVAL_ROLES = (UserRole.ADMIN, UserRole.QA)
+
+# Material Review Board (MRB): Quality, Planner, Admin, and CEO
+# Authorizes verification, approval, adjustment, and disposition of shop floor OK and rejection entries.
+MRB_ROLES = (UserRole.ADMIN, UserRole.QA, UserRole.PLANNER, UserRole.CEO)
 
 # Read/oversight visibility only (e.g. audit log listing) -- broader than approval
 # since nothing here is a mutation. Kept as its own tuple (not reused for approval)
@@ -92,27 +101,65 @@ MELTING_ENTRY_ROLES = (UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.QA,
 # Packing/BSR processing. Per spec this is Dispatch's remit ("Packing/BSR" is listed
 # under the Dispatch role); the dedicated PACKING role (an existing UserRole value
 # with no prior backend semantics) is also granted, since it exists for exactly this.
-PACKING_ROLES = (UserRole.ADMIN, UserRole.DISPATCH, UserRole.PACKING)
+PACKING_ROLES = (UserRole.ADMIN, UserRole.DISPATCH, UserRole.PACKING) + (UserRole.PACKING_SUPERVISOR, UserRole.PACKING_MANAGER) + DISPATCH_STAGE_ROLES
 
 # Final dispatch execution. Per spec, Production Manager explicitly cannot execute
 # final dispatch ("Cannot: final dispatch") -- this is intentionally narrower than the
 # former DISPATCH_ROLES, which included Production Manager.
-DISPATCH_EXECUTION_ROLES = (UserRole.ADMIN, UserRole.DISPATCH)
-
-# Order intake (creating an OAR + its Work Orders) and the master-data *reads* the
-# intake screen needs. Phase 2: Sales may input customer orders directly. Creating or
-# editing master data itself stays PLANNING_ROLES-only.
-ORDER_INTAKE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.SALES)
-
-# Accounts: recording customer payments and correcting invoice amounts.
-ACCOUNTS_ROLES = (UserRole.ADMIN, UserRole.ACCOUNTS)
-
-# Who may read the PO -> dispatch -> collection report and the invoice ledger.
-COMMERCIAL_REPORT_ROLES = (
-    UserRole.ADMIN, UserRole.CEO, UserRole.SALES, UserRole.ACCOUNTS, UserRole.PLANNER,
-)
+DISPATCH_EXECUTION_ROLES = (UserRole.ADMIN, UserRole.DISPATCH) + DISPATCH_STAGE_ROLES
 
 # User account administration: creating accounts, generating/resetting temporary
 # passwords, activating/deactivating, role assignment. Matches the existing
 # /auth/register gate (require_roles(UserRole.ADMIN)) -- Super Admin only.
 USER_MANAGEMENT_ROLES = (UserRole.ADMIN,)
+
+# Heat batch creation & master management: Metallurgy / Foundry / QA / Store / Admin
+HEAT_MANAGEMENT_ROLES = (UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.STORE, UserRole.QA, UserRole.PLANNER)
+
+# Heat allocation to Work Order at casting: Floor operators, Store, Production Manager, Admin
+HEAT_ALLOCATION_ROLES = (
+    UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.STORE,
+    UserRole.MACHINE_OPERATOR, UserRole.OPERATOR,
+) + PRODUCTION_STAGE_ROLES
+
+# Engineering Release: first step of the release chain (Engineering Release ->
+# Manufacturing Release -> WO Release -> Production). Super Admin may administer
+# every release step per existing admin policy.
+ENGINEERING_RELEASE_ROLES = (UserRole.ADMIN, UserRole.ENGINEERING, UserRole.PLANNER, UserRole.CEO)
+
+# Manufacturing Release: second step of the release chain -- the service layer also
+# enforces that Engineering Release must already be recorded before this can happen.
+MANUFACTURING_RELEASE_ROLES = (UserRole.ADMIN, UserRole.MANUFACTURING, UserRole.PRODUCTION_MANAGER, UserRole.PLANNER, UserRole.CEO)
+
+# Continuous Casting (China) raw-material module. One tuple per operation so widening
+# one never widens another; no China-specific role is introduced.
+CC_INWARD_ROLES = (UserRole.ADMIN, UserRole.STORE, UserRole.PLANNER, UserRole.CEO)
+CC_RESERVE_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.CEO)
+CC_ISSUE_ROLES = (UserRole.ADMIN, UserRole.STORE, UserRole.PLANNER, UserRole.CEO)
+CC_CUT_ROLES = (UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.PLANNER, UserRole.CEO)
+# Physical quarantine, disposal and count correction (Phase 9). Quality places a hold, Stores
+# executes a scrap; a quarantine is released by Quality/Admin only; adjustments are Admin only.
+CC_HOLD_ROLES = (UserRole.ADMIN, UserRole.STORE, UserRole.QA, UserRole.PLANNER, UserRole.CEO)
+CC_HOLD_RELEASE_ROLES = (UserRole.ADMIN, UserRole.QA, UserRole.PLANNER, UserRole.CEO)
+CC_SCRAP_ROLES = (UserRole.ADMIN, UserRole.STORE, UserRole.PLANNER, UserRole.CEO)
+CC_ADJUSTMENT_ROLES = (UserRole.ADMIN, UserRole.PLANNER, UserRole.CEO)
+# Routing creation/supersession (compatibility and allowances are Engineering's call, with Planner and CEO authorization).
+CC_ROUTING_ROLES = (UserRole.ADMIN, UserRole.ENGINEERING, UserRole.PLANNER, UserRole.CEO)
+# Material master (Phase 11A): Engineering, Planner, and CEO own the technical material / grade / dimensions.
+CC_MATERIAL_MASTER_ROLES = (UserRole.ADMIN, UserRole.ENGINEERING, UserRole.PLANNER, UserRole.CEO)
+CC_QA_ROLES = (UserRole.ADMIN, UserRole.QA, UserRole.PLANNER, UserRole.CEO)
+CC_HEAT_RECONCILE_ROLES = (UserRole.ADMIN, UserRole.QA, UserRole.PLANNER, UserRole.STORE, UserRole.CEO)
+
+# Accounts: recording customer payments against invoices (Phase 2 E port).
+ACCOUNTS_ROLES = (UserRole.ADMIN, UserRole.ACCOUNTS, UserRole.CEO)
+
+# Commercial reports (PO -> dispatch -> collection cycle, invoices) are visible to the
+# commercial side: Admin, CEO, Sales, Accounts and Planner. (Ported from phase-2 main.)
+COMMERCIAL_REPORT_ROLES = (
+    UserRole.ADMIN, UserRole.CEO, UserRole.SALES, UserRole.ACCOUNTS, UserRole.PLANNER,
+)
+
+# Engineering generates Work Orders from OARs (WO Generation) and can view the Customer
+# Master for that -- without the rest of PLANNING_ROLES (masters editing, OAR intake...).
+WO_GENERATION_ROLES = PLANNING_ROLES + (UserRole.ENGINEERING,)
+CUSTOMER_MASTER_VIEW_ROLES = PLANNING_ROLES + (UserRole.ENGINEERING,)

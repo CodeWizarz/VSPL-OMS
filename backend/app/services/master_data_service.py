@@ -1,15 +1,32 @@
-from typing import List, Optional
+from datetime import datetime
+from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
-from app.models.order import Customer, Part, Order
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, selectinload
+from app.models.order import Customer, Part, Order, OrderStatus, next_internal_part_number
 from app.models.master_data import POMaster, POLine, ScheduleMaster, POStatus, ScheduleStatus
+from app.models.customer_part_mapping import CustomerPartMapping
+from app.models.machine import Machine
+from app.models.shift import Shift
+from app.models.operator import Operator
 from app.models.audit import AuditLog
 from app.models.user import User
+from app.services.work_order_service import compute_po_coverage_status, compute_wo_release_status
 from app.schemas.master_data import (
     CustomerCreate, CustomerUpdate, CustomerOut,
-    POMasterCreate, POMasterOut, POLineOut,
-    ScheduleCreate, ScheduleOut,
+    POMasterCreate, POMasterUpdate, POMasterOut, POLineOut, POLineUpdate, POMergeRequest,
+    POLineOrderSummary, POLineWorkOrderSummary,
+    ScheduleCreate, ScheduleUpdate, ScheduleOut,
+    CustomerPartOut, ResolveCustomerPartResponse,
+    PartMasterCreate, PartMasterUpdate, PartMasterOut,
+    PartMasterKPIs, PartMasterListResponse,
+    MachineCreate, MachineUpdate, MachineOut,
+    ShiftCreate, ShiftUpdate, ShiftOut,
+    OperatorCreate, OperatorUpdate, OperatorOut,
 )
+
+_MAX_PO_CREATE_ATTEMPTS = 5
 
 
 def _audit(db: Session, actor: Optional[User], action: str, entity: str, entity_id: str, details: str = "") -> None:
@@ -47,6 +64,382 @@ def _customer_out(c: Customer) -> CustomerOut:
         address=c.address, gst=c.gst, contact_person=c.contact_person,
         email=c.email, phone=c.phone, is_active=c.is_active,
     )
+
+
+def _find_customer_part_mapping(db: Session, customer_id, customer_part_number: str) -> Optional[CustomerPartMapping]:
+    norm = customer_part_number.strip()
+    m = (
+        db.query(CustomerPartMapping)
+        .filter(
+            CustomerPartMapping.customer_id == customer_id,
+            func.upper(CustomerPartMapping.customer_part_number) == norm.upper(),
+        )
+        .first()
+    )
+    if m:
+        return m
+
+    # Also check CustomerPartCrossReference
+    try:
+        from app.models.customer_part_cross_reference import CustomerPartCrossReference
+        xref = (
+            db.query(CustomerPartCrossReference)
+            .filter(
+                CustomerPartCrossReference.customer_id == customer_id,
+                func.upper(CustomerPartCrossReference.customer_part_no) == norm.upper(),
+                CustomerPartCrossReference.is_active == True,
+            )
+            .first()
+        )
+        if xref:
+            part = db.query(Part).filter(Part.id == xref.part_id).first()
+            if part:
+                mapping = db.query(CustomerPartMapping).filter(
+                    CustomerPartMapping.customer_id == customer_id,
+                    CustomerPartMapping.part_id == part.id,
+                ).first()
+                if not mapping:
+                    mapping = CustomerPartMapping(
+                        customer_id=customer_id,
+                        part_id=part.id,
+                        customer_part_number=norm,
+                        status="Active",
+                    )
+                    db.add(mapping)
+                    db.flush()
+                return mapping
+    except Exception:
+        pass
+    return None
+
+
+def resolve_customer_part(
+    db: Session, customer: Customer, customer_part_number: str, create_if_missing: bool
+) -> Tuple[Optional[Part], bool, Optional[CustomerPartMapping]]:
+    """THE single place a Customer Part Number is ever resolved to -- or, for a
+    genuinely new part, used to generate -- the authoritative internal Part.
+    Both the live resolve-preview endpoint and PO creation call this exact
+    function, so a PO can never land on a different outcome than what was
+    already previewed to the operator.
+
+    Returns (part, is_new, mapping):
+      - an existing mapping is found        -> (existing part, False, existing mapping)
+      - matches existing Part code or desc  -> (existing part, False, created/existing mapping)
+      - no mapping, create_if_missing=False  -> (None, True, None) -- "would be new"
+      - no mapping, create_if_missing=True   -> generates the next internal Part
+        number (next_internal_part_number) and creates it plus its mapping
+    """
+    norm = (customer_part_number or "").strip()
+    if not norm:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Customer Part Number is required.")
+
+    existing = _find_customer_part_mapping(db, customer.id, norm)
+    if existing:
+        part = db.query(Part).filter(Part.id == existing.part_id).first()
+        return part, False, existing
+
+    # Check if a Part already exists whose part_number or description matches norm
+    existing_part = db.query(Part).filter(
+        or_(
+            func.upper(Part.part_number) == norm.upper(),
+            func.upper(Part.description) == norm.upper(),
+        )
+    ).first()
+    if existing_part:
+        if create_if_missing:
+            mapping = CustomerPartMapping(
+                customer_id=customer.id, part_id=existing_part.id, customer_part_number=norm, status="Active",
+            )
+            db.add(mapping)
+            db.flush()
+            return existing_part, False, mapping
+        return existing_part, False, None
+
+    if not create_if_missing:
+        return None, True, None
+
+    db.query(Customer).filter(Customer.id == customer.id).with_for_update().first()
+    next_number = next_internal_part_number(db, customer.customer_code)
+    part = Part(part_number=next_number, description=norm)
+    db.add(part)
+    db.flush()
+    mapping = CustomerPartMapping(
+        customer_id=customer.id, part_id=part.id, customer_part_number=norm, status="Active",
+    )
+    db.add(mapping)
+    try:
+        from app.models.customer_part_cross_reference import CustomerPartCrossReference
+        xref = CustomerPartCrossReference(
+            customer_id=customer.id,
+            customer_part_no=norm,
+            part_id=part.id,
+            source="PO Creation",
+            is_active=True,
+        )
+        db.add(xref)
+    except Exception:
+        pass
+    db.flush()
+    return part, True, mapping
+
+
+def validate_part_for_customer(db: Session, customer: Customer, part: Part) -> None:
+    """Strictly validates whether an internal part belongs to the specified customer.
+    Rejects any internal part number that is unassociated or belongs to a different customer.
+    """
+    # 1. Check active CustomerPartCrossReference
+    try:
+        from app.models.customer_part_cross_reference import CustomerPartCrossReference
+        xref = (
+            db.query(CustomerPartCrossReference)
+            .filter(
+                CustomerPartCrossReference.customer_id == customer.id,
+                CustomerPartCrossReference.part_id == part.id,
+                CustomerPartCrossReference.is_active == True,
+            )
+            .first()
+        )
+        if xref:
+            return
+    except Exception:
+        pass
+
+    # 2. Check CustomerPartMapping
+    mapping = (
+        db.query(CustomerPartMapping)
+        .filter(
+            CustomerPartMapping.customer_id == customer.id,
+            CustomerPartMapping.part_id == part.id,
+        )
+        .first()
+    )
+    if mapping:
+        return
+
+    # 3. Check customer code prefix (standard VSPL convention: FST13 -> FST, ASB125 -> ASB, etc.)
+    cust_code = (customer.customer_code or "").strip().upper()
+    part_code = (part.part_number or "").strip().upper()
+    if cust_code and part_code.startswith(cust_code):
+        return
+
+    # 4. Check historical PO lines or Orders under this customer
+    has_po_line = (
+        db.query(POLine)
+        .join(POMaster, POLine.po_id == POMaster.id)
+        .filter(
+            POMaster.customer_id == customer.id,
+            POLine.part_id == part.id,
+        )
+        .first()
+    )
+    if has_po_line:
+        return
+
+    has_order = (
+        db.query(Order)
+        .filter(
+            Order.customer_id == customer.id,
+            Order.part_id == part.id,
+        )
+        .first()
+    )
+    if has_order:
+        return
+
+    # If we get here, the part is NOT linked to this customer.
+    # Find which other customer it belongs to for a clear and helpful error message:
+    other_owner = None
+    try:
+        from app.models.customer_part_cross_reference import CustomerPartCrossReference
+        other_xref = (
+            db.query(CustomerPartCrossReference)
+            .join(Customer, CustomerPartCrossReference.customer_id == Customer.id)
+            .filter(
+                CustomerPartCrossReference.part_id == part.id,
+                CustomerPartCrossReference.customer_id != customer.id,
+                CustomerPartCrossReference.is_active == True,
+            )
+            .first()
+        )
+        if other_xref and other_xref.customer:
+            other_owner = f"{other_xref.customer.name} ({other_xref.customer.customer_code})"
+    except Exception:
+        pass
+
+    if not other_owner:
+        other_m = (
+            db.query(CustomerPartMapping)
+            .join(Customer, CustomerPartMapping.customer_id == Customer.id)
+            .filter(
+                CustomerPartMapping.part_id == part.id,
+                CustomerPartMapping.customer_id != customer.id,
+            )
+            .first()
+        )
+        if other_m and other_m.customer:
+            other_owner = f"{other_m.customer.name} ({other_m.customer.customer_code})"
+
+    if not other_owner:
+        all_other_custs = db.query(Customer).filter(
+            Customer.id != customer.id,
+            func.length(Customer.customer_code) >= 2,
+        ).all()
+        for oc in all_other_custs:
+            oc_code = (oc.customer_code or "").strip().upper()
+            if oc_code and part_code.startswith(oc_code):
+                other_owner = f"{oc.name} ({oc.customer_code})"
+                break
+
+    if other_owner:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Internal Part Number '{part.part_number}' does not belong to customer "
+                f"'{customer.name} ({customer.customer_code})'. It belongs to '{other_owner}'."
+            ),
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            f"Internal Part Number '{part.part_number}' is not associated with customer "
+            f"'{customer.name} ({customer.customer_code})'. Please check the internal part code."
+        ),
+    )
+
+
+def resolve_po_line_part(
+    db: Session,
+    customer: Customer,
+    customer_part_number: Optional[str],
+    part_number: Optional[str],
+) -> Tuple[Part, str]:
+    cust_pn = (customer_part_number or "").strip()
+    pn = (part_number or "").strip()
+
+    if not cust_pn and not pn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Each PO line must supply either a Customer Part Number or an Internal Part Number.",
+        )
+
+    if pn:
+        clean_pn = pn.upper()
+        part = db.query(Part).filter(func.upper(Part.part_number) == clean_pn).first()
+        if not part:
+            # Check if user entered a known customer part number into the internal part field
+            existing_mapping = _find_customer_part_mapping(db, customer.id, pn)
+            if existing_mapping:
+                part = db.query(Part).filter(Part.id == existing_mapping.part_id).first()
+                if not cust_pn:
+                    cust_pn = pn
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Internal Part Number '{pn}' does not exist in Part Master. It cannot be accepted for customer '{customer.name}'."
+                )
+
+        # Validate that the part strictly belongs to this customer!
+        validate_part_for_customer(db, customer, part)
+
+        # If customer_part_number was also entered, ensure no conflict
+        if cust_pn:
+            existing_for_cust = _find_customer_part_mapping(db, customer.id, cust_pn)
+            if existing_for_cust and existing_for_cust.part_id != part.id:
+                mapped_p = db.query(Part).filter(Part.id == existing_for_cust.part_id).first()
+                mapped_pn = mapped_p.part_number if mapped_p else "unknown"
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Customer Part Number '{cust_pn}' is already mapped to internal part '{mapped_pn}', "
+                        f"which does not match entered internal part '{part.part_number}'."
+                    ),
+                )
+            elif not existing_for_cust:
+                mapping = CustomerPartMapping(
+                    customer_id=customer.id,
+                    part_id=part.id,
+                    customer_part_number=cust_pn,
+                    status="Active",
+                )
+                db.add(mapping)
+                try:
+                    from app.models.customer_part_cross_reference import CustomerPartCrossReference
+                    xref = CustomerPartCrossReference(
+                        customer_id=customer.id,
+                        customer_part_no=cust_pn,
+                        part_id=part.id,
+                        source="PO Line Entry",
+                        is_active=True,
+                    )
+                    db.add(xref)
+                except Exception:
+                    pass
+                db.flush()
+        else:
+            m = db.query(CustomerPartMapping).filter(
+                CustomerPartMapping.customer_id == customer.id,
+                CustomerPartMapping.part_id == part.id,
+            ).first()
+            if m:
+                cust_pn = m.customer_part_number
+
+        return part, cust_pn
+
+    # ONLY Customer Part Number was entered:
+    part, _is_new, _mapping = resolve_customer_part(db, customer, cust_pn, create_if_missing=True)
+    return part, cust_pn
+
+
+def resolve_customer_part_preview(db: Session, customer_code: str, customer_part_number: str) -> ResolveCustomerPartResponse:
+    """Read-only preview for the PO UI -- never creates anything. Reuses
+    resolve_customer_part() with create_if_missing=False so the preview can
+    never diverge from what an actual PO submission would do."""
+    customer = db.query(Customer).filter(Customer.customer_code == customer_code.strip().upper()).first()
+    if not customer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Customer '{customer_code}' not found.")
+
+    part, is_new, _mapping = resolve_customer_part(db, customer, customer_part_number, create_if_missing=False)
+    if part is not None:
+        return ResolveCustomerPartResponse(
+            customer_part_number=customer_part_number.strip(),
+            resolved=True,
+            part_number=part.part_number,
+            is_new=False,
+            message=f"Matches existing part {part.part_number}",
+        )
+    return ResolveCustomerPartResponse(
+        customer_part_number=customer_part_number.strip(),
+        resolved=True,
+        part_number=None,
+        is_new=True,
+        message=f"New part -- internal code will be auto-generated on PO save (e.g. {customer.customer_code}#)",
+    )
+
+
+def list_customer_parts(db: Session, customer_code: str) -> List[CustomerPartOut]:
+    customer = db.query(Customer).filter(Customer.customer_code == customer_code.strip().upper()).first()
+    if not customer:
+        return []
+    rows = (
+        db.query(CustomerPartMapping, Part)
+        .join(Part, CustomerPartMapping.part_id == Part.id)
+        .filter(
+            CustomerPartMapping.customer_id == customer.id,
+            CustomerPartMapping.status == "Active",
+        )
+        .order_by(CustomerPartMapping.customer_part_number)
+        .all()
+    )
+    return [
+        CustomerPartOut(
+            customer_part_number=m.customer_part_number,
+            part_number=p.part_number,
+            description=p.description,
+            grade=p.grade,
+        )
+        for m, p in rows
+    ]
 
 
 class CustomerMasterService:
@@ -91,24 +484,70 @@ class CustomerMasterService:
 class POMasterService:
     @staticmethod
     def _line_out(line: POLine) -> POLineOut:
-        allocated = sum(o.po_qty for o in line.orders)
+        from app.models.work_order import WOStatus
+        from app.models.order import OrderStatus
+        active_orders = [
+            o for o in line.orders
+            if getattr(o, "status", None) and o.status.value not in ("CANCELLED", "REJECT")
+        ]
+        # OAR allocation against this PO line:
+        oar_allocated = sum((o.po_qty or 0) for o in active_orders)
+        wo_allocated = sum(
+            sum(wo.physical_wo_qty for wo in o.work_orders if getattr(wo, "status", None) != WOStatus.CLOSED)
+            for o in active_orders
+        )
+        effective_qty = max(line.po_qty or 0, oar_allocated) if (line.po_qty == 0 or active_orders) else (line.po_qty or 0)
+        available = max(effective_qty - oar_allocated, 0)
+        orders_summary = [
+            POLineOrderSummary(
+                oar_id=str(o.id), oar_number=o.oar_number, order_status=o.status.value,
+                po_coverage_status=compute_po_coverage_status(o),
+                work_orders=[
+                    POLineWorkOrderSummary(
+                        wo_id=str(wo.id), wo_number=wo.wo_number, wo_status=wo.status.value,
+                        release_status=compute_wo_release_status(wo),
+                    )
+                    for wo in o.work_orders
+                ],
+            )
+            for o in active_orders
+        ]
+        u_price = getattr(line, "unit_price", 0.0) or 0.0
+        l_total = getattr(line, "line_total", 0.0)
+        if l_total is None or l_total == 0.0:
+            l_total = round((line.po_qty or effective_qty) * u_price, 2)
         return POLineOut(
-            id=str(line.id), part_number=line.part.part_number, po_qty=line.po_qty,
-            allocated_qty=allocated, available_qty=max(line.po_qty - allocated, 0),
-            required_date=line.required_date,
+            id=str(line.id), part_number=line.part.part_number,
+            customer_part_number=line.customer_part_number if hasattr(line, "customer_part_number") else None,
+            po_qty=line.po_qty, allocated_qty=oar_allocated, available_qty=available,
+            unit_price=round(u_price, 2),
+            line_total=round(l_total, 2),
+            required_date=line.required_date, orders=orders_summary,
         )
 
     @staticmethod
     def _po_out(po: POMaster) -> POMasterOut:
+        lines_out = [POMasterService._line_out(l) for l in po.lines]
+        tot_val = getattr(po, "total_value", 0.0)
+        computed_tot_val = round(sum(l.line_total or 0.0 for l in lines_out), 2)
+        final_total_val = round(tot_val, 2) if (tot_val and tot_val > 0) else computed_tot_val
+        total_qty = sum(l.po_qty for l in lines_out)
         return POMasterOut(
             id=str(po.id), po_number=po.po_number, customer_code=po.customer.customer_code,
             customer_name=po.customer.name, po_date=po.po_date, validity_date=po.validity_date,
-            status=po.status.value, lines=[POMasterService._line_out(l) for l in po.lines],
+            status=po.status.value,
+            total_value=final_total_val,
+            total_qty=total_qty,
+            lines=lines_out,
         )
 
     @staticmethod
     def list_pos(db: Session, customer_code: Optional[str] = None) -> List[POMasterOut]:
-        query = db.query(POMaster)
+        query = db.query(POMaster).options(
+            selectinload(POMaster.customer),
+            selectinload(POMaster.lines).selectinload(POLine.part),
+            selectinload(POMaster.lines).selectinload(POLine.orders).selectinload(Order.work_orders),
+        )
         if customer_code:
             customer = db.query(Customer).filter(Customer.customer_code == customer_code.strip().upper()).first()
             if not customer:
@@ -119,74 +558,1155 @@ class POMasterService:
 
     @staticmethod
     def create_po(db: Session, req: POMasterCreate, current_user: Optional[User] = None) -> POMasterOut:
-        if db.query(POMaster).filter(POMaster.po_number == req.po_number.strip()).first():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"PO number '{req.po_number}' already exists.")
-
         customer = db.query(Customer).filter(Customer.customer_code == req.customer_code.strip().upper()).first()
         if not customer:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Customer '{req.customer_code}' not found.")
 
-        po = POMaster(
-            po_number=req.po_number.strip(), customer_id=customer.id,
-            po_date=req.po_date, validity_date=req.validity_date,
-            status=POStatus.OPEN,
-            created_by_id=current_user.id if current_user else None,
-            created_by_name=current_user.full_name if current_user else "System",
-        )
-        db.add(po)
-        db.flush()
+        # Scoped uniqueness per customer
+        if db.query(POMaster).filter(
+            POMaster.po_number == req.po_number.strip(),
+            POMaster.customer_id == customer.id
+        ).first():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"PO number '{req.po_number}' already exists for this customer.")
 
-        for line_req in req.lines:
-            part = _get_part(db, line_req.part_number)
-            db.add(POLine(po_id=po.id, part_id=part.id, po_qty=line_req.po_qty, required_date=line_req.required_date))
+        for attempt in range(_MAX_PO_CREATE_ATTEMPTS):
+            po = POMaster(
+                po_number=req.po_number.strip(), customer_id=customer.id,
+                po_date=req.po_date, validity_date=req.validity_date,
+                status=POStatus.OPEN,
+                total_value=0.0,
+                created_by_id=current_user.id if current_user else None,
+                created_by_name=current_user.full_name if current_user else "System",
+            )
+            db.add(po)
+            db.flush()
 
-        _audit(db, current_user, "PO_CREATED", "POMaster", str(po.id), details=f"po_number={req.po_number}, lines={len(req.lines)}")
-        db.commit()
+            po_total_value = 0.0
+            for line_req in req.lines:
+                part, cust_pn = resolve_po_line_part(
+                    db, customer, line_req.customer_part_number, line_req.part_number
+                )
+
+                u_price = round(float(line_req.unit_price or 0.0), 2)
+                l_total = round(float(line_req.po_qty * u_price), 2)
+                po_total_value += l_total
+
+                db.add(POLine(
+                    po_id=po.id,
+                    part_id=part.id,
+                    customer_part_number=cust_pn or None,
+                    po_qty=line_req.po_qty,
+                    unit_price=u_price,
+                    line_total=l_total,
+                    required_date=line_req.required_date,
+                ))
+
+            po.total_value = round(po_total_value, 2)
+            _audit(db, current_user, "PO_CREATED", "POMaster", str(po.id), details=f"po_number={req.po_number}, lines={len(req.lines)}, total_value={po.total_value}")
+
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                if attempt == _MAX_PO_CREATE_ATTEMPTS - 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Could not create PO due to a concurrent update -- please retry.",
+                    )
+                continue
+
+            db.refresh(po)
+            return POMasterService._po_out(po)
+
+    @staticmethod
+    def get_po(db: Session, po_id: str) -> POMasterOut:
+        po = db.query(POMaster).options(
+            selectinload(POMaster.customer),
+            selectinload(POMaster.lines).selectinload(POLine.part),
+            selectinload(POMaster.lines).selectinload(POLine.orders).selectinload(Order.work_orders),
+            selectinload(POMaster.lines).selectinload(POLine.orders).selectinload(Order.customer),
+            selectinload(POMaster.lines).selectinload(POLine.orders).selectinload(Order.po_line).selectinload(POLine.po),
+        ).filter(POMaster.id == po_id).first()
+        if not po:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PO not found.")
+        return POMasterService._po_out(po)
+
+    @staticmethod
+    def update_po(db: Session, po_id: str, req: POMasterUpdate, current_user: Optional[User] = None) -> POMasterOut:
+        po = db.query(POMaster).filter(POMaster.id == po_id).with_for_update().first()
+        if not po:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PO not found.")
+
+        # Lock all lines for this PO to prevent concurrent allocation races
+        db.query(POLine).filter(POLine.po_id == po.id).with_for_update().all()
+
+        # 1. Customer immutability check
+        if req.customer_code is not None:
+            req_cust = req.customer_code.strip().upper()
+            if req_cust != po.customer.customer_code.strip().upper():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Customer association cannot be changed once a PO is created.",
+                )
+
+        changes = []
+
+        # 2. PO number update (conditional on downstream references and scoped uniqueness)
+        if req.po_number is not None:
+            new_po_num = req.po_number.strip()
+            if not new_po_num:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PO number cannot be empty.")
+            if new_po_num != po.po_number:
+                conflict = db.query(POMaster).filter(
+                    POMaster.customer_id == po.customer_id,
+                    POMaster.po_number == new_po_num,
+                    POMaster.id != po.id,
+                ).first()
+                if conflict:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"PO number '{new_po_num}' already exists for this customer.",
+                    )
+                total_linked_orders = sum(len(line.orders) for line in po.lines)
+                if total_linked_orders > 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"PO number cannot be changed because {total_linked_orders} order(s) (OARs) are already linked to this PO.",
+                    )
+                changes.append(f"po_number: {po.po_number} -> {new_po_num}")
+                po.po_number = new_po_num
+
+        # 3. Header dates
+        if req.po_date is not None:
+            if po.po_date != req.po_date:
+                changes.append(f"po_date: {po.po_date} -> {req.po_date}")
+                po.po_date = req.po_date
+
+        if req.validity_date is not None:
+            if po.validity_date != req.validity_date:
+                changes.append(f"validity_date: {po.validity_date} -> {req.validity_date}")
+                po.validity_date = req.validity_date
+
+        # 4. Status
+        if req.status is not None:
+            new_status_str = req.status.strip().lower()
+            try:
+                new_status = POStatus(new_status_str)
+            except ValueError:
+                valid_statuses = ", ".join([s.value for s in POStatus])
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid PO status '{req.status}'. Valid statuses are: {valid_statuses}.",
+                )
+            if new_status == POStatus.CANCELLED:
+                from app.models.work_order import WorkOrder
+                from app.models.production import ProductionUpdate
+                from app.models.production_movement import ProductionMovement
+                from app.models.dispatch import Dispatch
+
+                line_ids = [l.id for l in po.lines]
+                linked_orders = db.query(Order).filter(
+                    (Order.po_line_id.in_(line_ids)) |
+                    ((Order.customer_id == po.customer_id) & (Order.customer_po == po.po_number))
+                ).all()
+
+                for ord_item in linked_orders:
+                    wos = db.query(WorkOrder).filter(WorkOrder.order_id == ord_item.id).all()
+                    for wo in wos:
+                        has_prod = db.query(ProductionUpdate).filter(ProductionUpdate.work_order_id == wo.id).first() is not None
+                        has_move = db.query(ProductionMovement).filter(ProductionMovement.work_order_id == wo.id).first() is not None
+                        has_disp = db.query(Dispatch).filter(Dispatch.work_order_id == wo.id).first() is not None
+                        if wo.released_by or has_prod or has_move or has_disp:
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=(
+                                    f"Cannot cancel PO '{po.po_number}' because Work Order '{wo.wo_number}' "
+                                    f"is already released to the shop floor or has active production/dispatch."
+                                ),
+                            )
+                for ord_item in linked_orders:
+                    ord_item.status = OrderStatus.HOLD
+            if po.status != new_status:
+                changes.append(f"status: {po.status.value} -> {new_status.value}")
+                po.status = new_status
+
+        # 5. PO Lines
+        if req.lines is not None:
+            if len(req.lines) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="PO must contain at least one line.",
+                )
+
+            existing_lines_by_id = {str(l.id): l for l in po.lines}
+            payload_line_ids = set()
+
+            for line_req in req.lines:
+                if line_req.po_qty <= 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="PO quantity must be greater than zero.",
+                    )
+
+                if line_req.id:
+                    line_id_str = str(line_req.id)
+                    if line_id_str not in existing_lines_by_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"PO line '{line_id_str}' not found on this PO.",
+                        )
+                    line = existing_lines_by_id[line_id_str]
+                    payload_line_ids.add(line_id_str)
+
+                    allocated = sum(o.po_qty for o in line.orders)
+                    if line_req.po_qty < allocated:
+                        from app.models.work_order import WorkOrder
+                        from app.models.dispatch import Dispatch
+
+                        order_ids = [o.id for o in line.orders]
+                        dispatches_count = db.query(Dispatch).filter(Dispatch.work_order_id.in_(
+                            db.query(WorkOrder.id).filter(WorkOrder.order_id.in_(order_ids))
+                        )).count() if order_ids else 0
+
+                        if dispatches_count == 0 and len(line.orders) == 1:
+                            single_order = line.orders[0]
+                            changes.append(
+                                f"line[{line.id}] auto-adjusted linked order {single_order.oar_number} po_qty: {single_order.po_qty} -> {line_req.po_qty}"
+                            )
+                            single_order.po_qty = line_req.po_qty
+                            allocated = line_req.po_qty
+                        else:
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=(
+                                    f"PO line quantity ({line_req.po_qty}) for part '{line.part.part_number}' "
+                                    f"cannot be reduced below the already allocated quantity ({allocated}). "
+                                    f"Please adjust or cancel downstream orders first."
+                                ),
+                            )
+
+                    # Part change check on existing line
+                    if line_req.customer_part_number or line_req.part_number:
+                        part, cust_pn = resolve_po_line_part(
+                            db, po.customer, line_req.customer_part_number, line_req.part_number
+                        )
+                        if part.id != line.part_id:
+                            if allocated > 0 or len(line.orders) > 0:
+                                raise HTTPException(
+                                    status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=f"Cannot change part on PO line '{line.part.part_number}' because it already has allocated orders.",
+                                )
+                            changes.append(f"line[{line.id}] part: {line.part.part_number} -> {part.part_number}")
+                            line.part_id = part.id
+                        if cust_pn:
+                            line.customer_part_number = cust_pn
+
+                    if line.po_qty != line_req.po_qty:
+                        changes.append(f"line[{line.id}] po_qty: {line.po_qty} -> {line_req.po_qty}")
+                        line.po_qty = line_req.po_qty
+
+                    if line_req.unit_price is not None:
+                        u_price = round(float(line_req.unit_price), 2)
+                        if getattr(line, "unit_price", 0.0) != u_price:
+                            changes.append(f"line[{line.id}] unit_price: {getattr(line, 'unit_price', 0.0)} -> {u_price}")
+                            line.unit_price = u_price
+
+                    line.line_total = round(float(line.po_qty * (getattr(line, "unit_price", 0.0) or 0.0)), 2)
+
+                    if line.required_date != line_req.required_date:
+                        changes.append(f"line[{line.id}] required_date: {line.required_date} -> {line_req.required_date}")
+                        line.required_date = line_req.required_date
+
+                else:
+                    # New line addition
+                    part, cust_pn = resolve_po_line_part(
+                        db, po.customer, line_req.customer_part_number, line_req.part_number
+                    )
+
+                    u_price = round(float(line_req.unit_price or 0.0), 2)
+                    l_total = round(float(line_req.po_qty * u_price), 2)
+                    new_line = POLine(
+                        po_id=po.id,
+                        part_id=part.id,
+                        customer_part_number=cust_pn or None,
+                        po_qty=line_req.po_qty,
+                        unit_price=u_price,
+                        line_total=l_total,
+                        required_date=line_req.required_date,
+                    )
+                    db.add(new_line)
+                    changes.append(f"added line: part={part.part_number}, po_qty={line_req.po_qty}, unit_price={u_price}")
+
+            # Deleted lines check (safely cleans up unstarted draft OARs, blocks if active production)
+            for line_id_str, line in existing_lines_by_id.items():
+                if line_id_str not in payload_line_ids:
+                    from app.models.work_order import WorkOrder, WORoute
+                    from app.models.production import ProductionUpdate
+                    from app.models.production_movement import ProductionMovement, StageWIP
+                    from app.models.dispatch import Dispatch
+                    from app.models.nc import NCRecord
+
+                    for order in list(line.orders):
+                        wos = db.query(WorkOrder).filter(WorkOrder.order_id == order.id).all()
+                        for wo in wos:
+                            has_prod = db.query(ProductionUpdate).filter(ProductionUpdate.work_order_id == wo.id).first() is not None
+                            has_mov = db.query(ProductionMovement).filter(ProductionMovement.work_order_id == wo.id).first() is not None
+                            has_disp = db.query(Dispatch).filter(Dispatch.work_order_id == wo.id).first() is not None
+                            has_nc = db.query(NCRecord).filter(NCRecord.work_order_id == wo.id).first() is not None
+
+                            if wo.released_by or has_prod or has_mov or has_disp or has_nc:
+                                raise HTTPException(
+                                    status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=(
+                                        f"Cannot delete PO line for part '{line.part.part_number}' because linked Work Order '{wo.wo_number}' "
+                                        f"is already released to the shop floor or has recorded activity."
+                                    ),
+                                )
+                            db.query(WORoute).filter(WORoute.work_order_id == wo.id).delete(synchronize_session=False)
+                            db.query(StageWIP).filter(StageWIP.work_order_id == wo.id).delete(synchronize_session=False)
+                            db.delete(wo)
+
+                        changes.append(f"deleted unstarted linked order: {order.oar_number}")
+                        db.delete(order)
+
+                    changes.append(f"deleted line: part={line.part.part_number}, po_qty={line.po_qty}")
+                    db.delete(line)
+
+            db.flush()
+            po.total_value = round(sum(getattr(l, "line_total", 0.0) or (l.po_qty * (getattr(l, "unit_price", 0.0) or 0.0)) for l in po.lines), 2)
+
+        elif req.total_value is not None:
+            po.total_value = round(float(req.total_value), 2)
+
+        details_str = "; ".join(changes) if changes else "No fields changed"
+        _audit(db, current_user, "PO_UPDATED", "POMaster", str(po.id), details=details_str)
+
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Could not update PO due to a database integrity or concurrency conflict.",
+            )
+
         db.refresh(po)
         return POMasterService._po_out(po)
+
+    @staticmethod
+    def merge_pos(db: Session, req: POMergeRequest, current_user: Optional[User] = None) -> POMasterOut:
+        """Move all PO lines and linked OARs from source_po_id into target_po_id and delete source_po_id."""
+        if req.source_po_id == req.target_po_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Source and target PO must be different.",
+            )
+
+        # Lock both POs in deterministic order to avoid deadlocks
+        ordered_ids = sorted([str(req.source_po_id), str(req.target_po_id)])
+        locked = {
+            str(p.id): p
+            for p in db.query(POMaster)
+            .filter(POMaster.id.in_(ordered_ids))
+            .order_by(POMaster.id)
+            .with_for_update()
+            .all()
+        }
+        source_po = locked.get(str(req.source_po_id))
+        target_po = locked.get(str(req.target_po_id))
+        if not source_po:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source PO not found.")
+        if not target_po:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target PO not found.")
+        if source_po.customer_id != target_po.customer_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot merge POs belonging to different customers.",
+            )
+        if source_po.status == POStatus.CANCELLED or target_po.status == POStatus.CANCELLED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot merge cancelled Purchase Orders.",
+            )
+
+        source_lines = db.query(POLine).filter(POLine.po_id == source_po.id).with_for_update().all()
+        db.query(POLine).filter(POLine.po_id == target_po.id).with_for_update().all()
+
+        source_line_ids = [l.id for l in source_lines]
+        for line in source_lines:
+            line.po_id = target_po.id
+
+        # Update any OARs linked to source_po so customer_po points to target_po.po_number
+        linked_orders = db.query(Order).filter(
+            (Order.po_line_id.in_(source_line_ids) if source_line_ids else False) |
+            ((Order.customer_id == source_po.customer_id) & (Order.customer_po == source_po.po_number))
+        ).all()
+        moved_oars = []
+        for ord_item in linked_orders:
+            if ord_item.customer_po != target_po.po_number:
+                ord_item.customer_po = target_po.po_number
+            moved_oars.append(ord_item.oar_number)
+
+        if req.update_validity_date and source_po.validity_date:
+            if target_po.validity_date is None or source_po.validity_date > target_po.validity_date:
+                target_po.validity_date = source_po.validity_date
+
+        db.flush()
+        db.expire(target_po, ["lines"])
+        target_po.total_value = round(
+            sum(
+                getattr(l, "line_total", 0.0) or (l.po_qty * (getattr(l, "unit_price", 0.0) or 0.0))
+                for l in target_po.lines
+            ),
+            2,
+        )
+
+        details = (
+            f"Merged source PO '{source_po.po_number}' ({source_po.id}, {len(source_lines)} lines) "
+            f"into '{target_po.po_number}' ({target_po.id}); updated OARs: {moved_oars or 'none'}"
+        )
+        _audit(db, current_user, "PO_MERGED", "POMaster", str(target_po.id), details=details)
+
+        db.delete(source_po)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Could not merge POs due to a database integrity or concurrency conflict.",
+            )
+
+        db.refresh(target_po)
+        return POMasterService._po_out(target_po)
+
+    @staticmethod
+    def delete_po(db: Session, po_id: str, current_user: Optional[User] = None) -> dict:
+        """Delete a Purchase Order and clean up linked draft orders/WOs.
+        Safely blocks if any linked Work Order has active shop floor activity or has been released."""
+        po = db.query(POMaster).filter(POMaster.id == po_id).with_for_update().first()
+        if not po:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Purchase Order not found.")
+
+        po_lines = db.query(POLine).filter(POLine.po_id == po.id).all()
+        line_ids = [l.id for l in po_lines]
+
+        from app.models.work_order import WorkOrder, WORoute
+        from app.models.production import ProductionUpdate
+        from app.models.production_movement import ProductionMovement, StageWIP
+        from app.models.dispatch import Dispatch
+        from app.models.nc import NCRecord
+        from app.models.conversion import Conversion
+
+        # Find any linked orders
+        orders = db.query(Order).filter(
+            (Order.po_line_id.in_(line_ids)) |
+            ((Order.customer_id == po.customer_id) & (Order.customer_po == po.po_number))
+        ).all()
+
+        for order in orders:
+            # Check conversion dependencies
+            conv = db.query(Conversion).filter(Conversion.destination_order_id == order.id).first()
+            if conv:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot delete PO '{po.po_number}' because linked Order '{order.oar_number}' has associated conversion records."
+                )
+
+            wos = db.query(WorkOrder).filter(WorkOrder.order_id == order.id).all()
+            for wo in wos:
+                has_production = db.query(ProductionUpdate).filter(ProductionUpdate.work_order_id == wo.id).first() is not None
+                has_movement = db.query(ProductionMovement).filter(ProductionMovement.work_order_id == wo.id).first() is not None
+                has_dispatch = db.query(Dispatch).filter(Dispatch.work_order_id == wo.id).first() is not None
+                has_nc = db.query(NCRecord).filter(NCRecord.work_order_id == wo.id).first() is not None
+
+                if wo.released_by or has_production or has_movement or has_dispatch or has_nc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Cannot delete PO '{po.po_number}' because Work Order '{wo.wo_number}' "
+                            f"is already released to the shop floor or has recorded production/dispatch activity. "
+                            f"Please cancel or close the Work Order first."
+                        ),
+                    )
+
+                # Delete routes, stage wips, and the work order
+                db.query(WORoute).filter(WORoute.work_order_id == wo.id).delete(synchronize_session=False)
+                db.query(StageWIP).filter(StageWIP.work_order_id == wo.id).delete(synchronize_session=False)
+                db.delete(wo)
+
+            if order.source_type == "schedule" and order.schedule_id:
+                order.po_line_id = None
+                order.customer_po = "AWAITING_PO"
+                order.oar_po_status = "AWAITING_PO"
+            else:
+                db.delete(order)
+
+        for line in po_lines:
+            db.delete(line)
+
+        po_number = po.po_number
+        cust_code = po.customer.customer_code if po.customer else "N/A"
+        db.delete(po)
+
+        _audit(
+            db, current_user, "DELETE", "POMaster", str(po.id),
+            f"Deleted PO '{po_number}' (Customer: {cust_code})"
+        )
+        db.commit()
+
+        return {"message": f"Purchase Order '{po_number}' deleted successfully."}
 
 
 class ScheduleMasterService:
     @staticmethod
-    def _schedule_out(s: ScheduleMaster) -> ScheduleOut:
-        linked_order = s.orders[0] if s.orders else None
+    def _schedule_out(s: ScheduleMaster, db: Optional[Session] = None, cpm_map: Optional[dict] = None) -> ScheduleOut:
+        from app.models.order import OrderStatus
+        from app.models.work_order import WOStatus
+        active_orders = [
+            o for o in s.orders
+            if getattr(o, "status", None) and o.status.value not in ("CANCELLED", "REJECT")
+        ]
+        oar_allocated = sum((o.po_qty or 0) for o in active_orders)
+        wo_allocated = sum(
+            sum(wo.physical_wo_qty for wo in o.work_orders if getattr(wo, "status", None) != WOStatus.CLOSED)
+            for o in active_orders
+        )
+        effective_sched_qty = max(s.scheduled_qty or 0, oar_allocated) if (s.scheduled_qty == 0 or active_orders) else (s.scheduled_qty or 0)
+        available = max(effective_sched_qty - oar_allocated, 0)
+        linked_oars = [o.oar_number for o in active_orders if o.oar_number]
+        first_oar = linked_oars[0] if linked_oars else None
+
+        u_price = getattr(s, "unit_price", 0.0) or 0.0
+        t_val = getattr(s, "total_value", 0.0)
+        if t_val is None or t_val == 0.0:
+            t_val = round(s.scheduled_qty * u_price, 2)
+
+        cust_pn = None
+        if cpm_map is not None:
+            cust_pn = cpm_map.get((s.customer_id, s.part_id))
+        elif db is not None:
+            m = db.query(CustomerPartMapping).filter(
+                CustomerPartMapping.customer_id == s.customer_id,
+                CustomerPartMapping.part_id == s.part_id,
+            ).first()
+            if m:
+                cust_pn = m.customer_part_number
+        if not cust_pn and s.part:
+            cust_pn = s.part.description or None
+
         return ScheduleOut(
             id=str(s.id), schedule_number=s.schedule_number, customer_code=s.customer.customer_code,
-            customer_name=s.customer.name, part_number=s.part.part_number, scheduled_qty=s.scheduled_qty,
+            customer_name=s.customer.name, part_number=s.part.part_number,
+            customer_part_number=cust_pn,
+            part_description=s.part.description if s.part else None,
+            scheduled_qty=s.scheduled_qty,
+            allocated_qty=oar_allocated,
+            available_qty=available,
+            unit_price=round(u_price, 2), total_value=round(t_val, 2),
             required_date=s.required_date, customer_schedule_ref=s.customer_schedule_ref,
-            po_status=s.po_status.value, linked_oar_number=linked_order.oar_number if linked_order else None,
+            po_status=s.po_status.value,
+            linked_oar_number=first_oar,
+            linked_oar_numbers=linked_oars,
         )
 
     @staticmethod
     def list_schedules(db: Session, customer_code: Optional[str] = None) -> List[ScheduleOut]:
-        query = db.query(ScheduleMaster)
+        query = db.query(ScheduleMaster).options(
+            selectinload(ScheduleMaster.customer),
+            selectinload(ScheduleMaster.part),
+            selectinload(ScheduleMaster.orders).selectinload(Order.work_orders),
+        )
         if customer_code:
             customer = db.query(Customer).filter(Customer.customer_code == customer_code.strip().upper()).first()
             if not customer:
                 return []
             query = query.filter(ScheduleMaster.customer_id == customer.id)
         rows = query.order_by(ScheduleMaster.created_at.desc()).all()
-        return [ScheduleMasterService._schedule_out(s) for s in rows]
+        cpms = db.query(CustomerPartMapping.customer_id, CustomerPartMapping.part_id, CustomerPartMapping.customer_part_number).all()
+        cpm_map = {(c.customer_id, c.part_id): c.customer_part_number for c in cpms}
+        return [ScheduleMasterService._schedule_out(s, db=db, cpm_map=cpm_map) for s in rows]
 
     @staticmethod
     def create_schedule(db: Session, req: ScheduleCreate, current_user: Optional[User] = None) -> ScheduleOut:
         customer = db.query(Customer).filter(Customer.customer_code == req.customer_code.strip().upper()).first()
         if not customer:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Customer '{req.customer_code}' not found.")
-        part = _get_part(db, req.part_number)
+        
+        part, _cust_pn = resolve_po_line_part(db, customer, req.customer_part_number, req.part_number)
 
-        count = db.query(ScheduleMaster).count()
-        schedule_number = f"SCH-{count + 1:05d}"
+        # Robust generation of next schedule number
+        max_num = 0
+        all_nums = db.query(ScheduleMaster.schedule_number).all()
+        for (sn,) in all_nums:
+            if sn and sn.startswith("SCH-"):
+                try:
+                    num = int(sn.split("-")[1])
+                    if num > max_num:
+                        max_num = num
+                except (ValueError, IndexError):
+                    pass
+        schedule_number = f"SCH-{max_num + 1:05d}"
+
+        u_price = round(float(req.unit_price or 0.0), 2)
+        t_val = round(float(req.scheduled_qty * u_price), 2)
 
         schedule = ScheduleMaster(
             schedule_number=schedule_number, customer_id=customer.id, part_id=part.id,
-            scheduled_qty=req.scheduled_qty, required_date=req.required_date,
+            scheduled_qty=req.scheduled_qty,
+            unit_price=u_price,
+            total_value=t_val,
+            required_date=req.required_date,
             customer_schedule_ref=req.customer_schedule_ref, po_status=ScheduleStatus.SCHEDULED,
             created_by_id=current_user.id if current_user else None,
             created_by_name=current_user.full_name if current_user else "System",
         )
         db.add(schedule)
-        _audit(db, current_user, "SCHEDULE_CREATED", "ScheduleMaster", schedule_number, details=f"qty={req.scheduled_qty}")
+        _audit(db, current_user, "SCHEDULE_CREATED", "ScheduleMaster", schedule_number, details=f"qty={req.scheduled_qty}, unit_price={u_price}, total_value={t_val}")
         db.commit()
         db.refresh(schedule)
-        return ScheduleMasterService._schedule_out(schedule)
+        return ScheduleMasterService._schedule_out(schedule, db)
+
+    @staticmethod
+    def update_schedule(db: Session, schedule_id: str, req: ScheduleUpdate, current_user: Optional[User] = None) -> ScheduleOut:
+        schedule = db.query(ScheduleMaster).filter(ScheduleMaster.id == schedule_id).with_for_update().first()
+        if not schedule:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found.")
+
+        from app.models.order import OrderStatus
+        active_orders = [o for o in schedule.orders if getattr(o, "status", None) != OrderStatus.REJECT]
+        allocated = sum(o.po_qty for o in active_orders)
+
+        changes = []
+        if req.customer_code is not None:
+            customer = db.query(Customer).filter(Customer.customer_code == req.customer_code.strip().upper()).first()
+            if not customer:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Customer '{req.customer_code}' not found.")
+            if schedule.customer_id != customer.id:
+                if active_orders:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Cannot change customer on schedule '{schedule.schedule_number}' because active OAR(s) are already linked."
+                    )
+                changes.append(f"customer: {schedule.customer.customer_code} -> {customer.customer_code}")
+                schedule.customer_id = customer.id
+
+        if req.part_number is not None or req.customer_part_number is not None:
+            part, _cust_pn = resolve_po_line_part(db, schedule.customer, req.customer_part_number, req.part_number)
+            if schedule.part_id != part.id:
+                if active_orders:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Cannot change part on schedule '{schedule.schedule_number}' because active OAR(s) are already linked."
+                    )
+                changes.append(f"part: {schedule.part.part_number} -> {part.part_number}")
+                schedule.part_id = part.id
+
+        if req.scheduled_qty is not None and req.scheduled_qty != schedule.scheduled_qty:
+            if req.scheduled_qty < allocated:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot reduce scheduled quantity ({req.scheduled_qty}) below already allocated quantity ({allocated}) across active OARs."
+                )
+            changes.append(f"qty: {schedule.scheduled_qty} -> {req.scheduled_qty}")
+            schedule.scheduled_qty = req.scheduled_qty
+
+        if req.unit_price is not None:
+            u_price = round(float(req.unit_price), 2)
+            if getattr(schedule, "unit_price", 0.0) != u_price:
+                changes.append(f"unit_price: {getattr(schedule, 'unit_price', 0.0)} -> {u_price}")
+                schedule.unit_price = u_price
+
+        # Recalculate total value
+        curr_price = getattr(schedule, "unit_price", 0.0) or 0.0
+        if req.total_value is not None:
+            schedule.total_value = round(float(req.total_value), 2)
+        else:
+            schedule.total_value = round(schedule.scheduled_qty * curr_price, 2)
+
+        if req.required_date is not None:
+            schedule.required_date = req.required_date
+
+        if req.customer_schedule_ref is not None:
+            schedule.customer_schedule_ref = req.customer_schedule_ref
+
+        if req.po_status is not None:
+            try:
+                schedule.po_status = ScheduleStatus(req.po_status)
+            except ValueError:
+                pass
+
+        _audit(db, current_user, "SCHEDULE_UPDATED", "ScheduleMaster", schedule.schedule_number, details="; ".join(changes) if changes else "Updated")
+        db.commit()
+        db.refresh(schedule)
+        return ScheduleMasterService._schedule_out(schedule, db)
+
+    @staticmethod
+    def delete_schedule(db: Session, schedule_id: str, current_user: Optional[User] = None) -> dict:
+        schedule = db.query(ScheduleMaster).filter(ScheduleMaster.id == schedule_id).with_for_update().first()
+        if not schedule:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found.")
+
+        # Prevent delete if linked to active orders
+        from app.models.order import OrderStatus
+        active_orders = [o for o in schedule.orders if getattr(o, "status", None) != OrderStatus.REJECT]
+        if active_orders:
+            from app.models.work_order import WorkOrder
+            from app.models.production import ProductionUpdate
+            for order in active_orders:
+                wos = db.query(WorkOrder).filter(WorkOrder.order_id == order.id).all()
+                for wo in wos:
+                    has_prod = db.query(ProductionUpdate).filter(ProductionUpdate.work_order_id == wo.id).first() is not None
+                    if has_prod:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Cannot delete schedule '{schedule.schedule_number}' because linked order '{order.oar_number}' has work orders with production history."
+                        )
+            linked_nums = ", ".join(o.oar_number for o in active_orders if o.oar_number)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot delete schedule '{schedule.schedule_number}' because active OAR(s) are linked: {linked_nums}. Please cancel or delete those OARs before deleting the schedule."
+            )
+
+        # Unlink any inactive/cancelled orders to satisfy foreign key constraint
+        for order in schedule.orders:
+            order.schedule_id = None
+
+        num = schedule.schedule_number
+        _audit(db, current_user, "SCHEDULE_DELETED", "ScheduleMaster", num, details=f"Deleted schedule {num}")
+        db.delete(schedule)
+        db.commit()
+        return {"message": f"Schedule '{num}' deleted successfully."}
+
+
+def _machine_out(m: Machine) -> MachineOut:
+    return MachineOut(id=str(m.id), machine_code=m.machine_code, machine_name=m.machine_name,
+                       department=m.department, is_active=m.is_active)
+
+
+class MachineMasterService:
+    @staticmethod
+    def list_machines(db: Session) -> List[MachineOut]:
+        rows = db.query(Machine).order_by(Machine.machine_code).all()
+        return [_machine_out(m) for m in rows]
+
+    @staticmethod
+    def create_machine(db: Session, req: MachineCreate, current_user: Optional[User] = None) -> MachineOut:
+        code = req.machine_code.strip().upper()
+        if db.query(Machine).filter(Machine.machine_code == code).first():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Machine code '{code}' already exists.")
+        machine = Machine(
+            machine_code=code, machine_name=req.machine_name.strip(), department=req.department,
+            created_by_id=current_user.id if current_user else None,
+            created_by_name=current_user.full_name if current_user else "System",
+        )
+        db.add(machine)
+        db.flush()
+        _audit(db, current_user, "MACHINE_CREATED", "Machine", str(machine.id), details=code)
+        db.commit()
+        db.refresh(machine)
+        return _machine_out(machine)
+
+    @staticmethod
+    def update_machine(db: Session, req: MachineUpdate, current_user: Optional[User] = None) -> MachineOut:
+        machine = db.query(Machine).filter(Machine.id == req.id).first()
+        if not machine:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Machine not found.")
+        if req.machine_code is not None:
+            code = req.machine_code.strip().upper()
+            if db.query(Machine).filter(Machine.machine_code == code, Machine.id != machine.id).first():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Machine code '{code}' already exists.")
+            machine.machine_code = code
+        if req.machine_name is not None:
+            machine.machine_name = req.machine_name.strip()
+        if req.department is not None:
+            machine.department = req.department.strip() if req.department else None
+        if req.is_active is not None:
+            machine.is_active = req.is_active
+        _audit(db, current_user, "MACHINE_UPDATED", "Machine", str(machine.id))
+        db.commit()
+        db.refresh(machine)
+        return _machine_out(machine)
+
+    @staticmethod
+    def delete_machine(db: Session, machine_id: str, current_user: Optional[User] = None) -> dict:
+        machine = db.query(Machine).filter(Machine.id == machine_id).first()
+        if not machine:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Machine not found.")
+        _audit(db, current_user, "MACHINE_DELETED", "Machine", str(machine.id), details=machine.machine_code)
+        db.delete(machine)
+        db.commit()
+        return {"success": True, "message": f"Machine '{machine.machine_code}' deleted successfully."}
+
+
+def _shift_out(s: Shift) -> ShiftOut:
+    return ShiftOut(id=str(s.id), shift_code=s.shift_code, shift_name=s.shift_name,
+                     start_time=s.start_time, end_time=s.end_time, is_active=s.is_active)
+
+
+class ShiftMasterService:
+    @staticmethod
+    def list_shifts(db: Session) -> List[ShiftOut]:
+        rows = db.query(Shift).order_by(Shift.shift_code).all()
+        return [_shift_out(s) for s in rows]
+
+    @staticmethod
+    def create_shift(db: Session, req: ShiftCreate, current_user: Optional[User] = None) -> ShiftOut:
+        code = req.shift_code.strip().upper()
+        if db.query(Shift).filter(Shift.shift_code == code).first():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Shift code '{code}' already exists.")
+        shift = Shift(
+            shift_code=code, shift_name=req.shift_name.strip(),
+            start_time=req.start_time, end_time=req.end_time,
+            created_by_id=current_user.id if current_user else None,
+            created_by_name=current_user.full_name if current_user else "System",
+        )
+        db.add(shift)
+        db.flush()
+        _audit(db, current_user, "SHIFT_CREATED", "Shift", str(shift.id), details=code)
+        db.commit()
+        db.refresh(shift)
+        return _shift_out(shift)
+
+    @staticmethod
+    def update_shift(db: Session, req: ShiftUpdate, current_user: Optional[User] = None) -> ShiftOut:
+        shift = db.query(Shift).filter(Shift.id == req.id).first()
+        if not shift:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shift not found.")
+        if req.shift_code is not None:
+            code = req.shift_code.strip()
+            if db.query(Shift).filter(Shift.shift_code == code, Shift.id != shift.id).first():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Shift code '{code}' already exists.")
+            shift.shift_code = code
+        if req.shift_name is not None:
+            shift.shift_name = req.shift_name.strip()
+        if req.start_time is not None:
+            shift.start_time = req.start_time
+        if req.end_time is not None:
+            shift.end_time = req.end_time
+        if req.is_active is not None:
+            shift.is_active = req.is_active
+        _audit(db, current_user, "SHIFT_UPDATED", "Shift", str(shift.id))
+        db.commit()
+        db.refresh(shift)
+        return _shift_out(shift)
+
+    @staticmethod
+    def delete_shift(db: Session, shift_id: str, current_user: Optional[User] = None) -> dict:
+        shift = db.query(Shift).filter(Shift.id == shift_id).first()
+        if not shift:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shift not found.")
+        _audit(db, current_user, "SHIFT_DELETED", "Shift", str(shift.id), details=shift.shift_code)
+        db.delete(shift)
+        db.commit()
+        return {"success": True, "message": f"Shift '{shift.shift_code}' deleted successfully."}
+
+
+def _operator_out(o: Operator) -> OperatorOut:
+    return OperatorOut(id=str(o.id), user_id=str(o.user_id) if o.user_id else None,
+                        employee_code=o.employee_code, display_name=o.display_name, is_active=o.is_active)
+
+
+class OperatorMasterService:
+    @staticmethod
+    def list_operators(db: Session) -> List[OperatorOut]:
+        rows = db.query(Operator).order_by(Operator.display_name).all()
+        return [_operator_out(o) for o in rows]
+
+    @staticmethod
+    def create_operator(db: Session, req: OperatorCreate, current_user: Optional[User] = None) -> OperatorOut:
+        user_ref = None
+        if req.user_id:
+            user_ref = db.query(User).filter(User.id == req.user_id).first()
+            if not user_ref:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User '{req.user_id}' not found.")
+        code = req.employee_code.strip().upper() if req.employee_code else None
+        if code and db.query(Operator).filter(Operator.employee_code == code).first():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Operator employee code '{code}' already exists.")
+
+        operator = Operator(
+            user_id=user_ref.id if user_ref else None, employee_code=code,
+            display_name=req.display_name.strip(),
+            created_by_id=current_user.id if current_user else None,
+            created_by_name=current_user.full_name if current_user else "System",
+        )
+        db.add(operator)
+        db.flush()
+        _audit(db, current_user, "OPERATOR_CREATED", "Operator", str(operator.id),
+               details=f"user_id={req.user_id or 'None'}")
+        db.commit()
+        db.refresh(operator)
+        return _operator_out(operator)
+
+    @staticmethod
+    def update_operator(db: Session, req: OperatorUpdate, current_user: Optional[User] = None) -> OperatorOut:
+        operator = db.query(Operator).filter(Operator.id == req.id).first()
+        if not operator:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Operator not found.")
+        if req.employee_code is not None:
+            code = req.employee_code.strip().upper() if req.employee_code else None
+            if code and db.query(Operator).filter(Operator.employee_code == code, Operator.id != operator.id).first():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Operator employee code '{code}' already exists.")
+            operator.employee_code = code
+        if req.display_name is not None:
+            operator.display_name = req.display_name.strip()
+        if req.is_active is not None:
+            operator.is_active = req.is_active
+        _audit(db, current_user, "OPERATOR_UPDATED", "Operator", str(operator.id))
+        db.commit()
+        db.refresh(operator)
+        return _operator_out(operator)
+
+    @staticmethod
+    def delete_operator(db: Session, operator_id: str, current_user: Optional[User] = None) -> dict:
+        operator = db.query(Operator).filter(Operator.id == operator_id).first()
+        if not operator:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Operator not found.")
+        _audit(db, current_user, "OPERATOR_DELETED", "Operator", str(operator.id), details=operator.display_name)
+        db.delete(operator)
+        db.commit()
+        return {"success": True, "message": f"Operator '{operator.display_name}' deleted successfully."}
+
+
+class PartMasterService:
+    @staticmethod
+    def _part_out(part: Part, mapping: CustomerPartMapping, customer: Customer) -> PartMasterOut:
+        return PartMasterOut(
+            id=str(part.id),
+            part_number=part.part_number,
+            customer_id=str(customer.id),
+            customer_code=customer.customer_code,
+            customer_name=customer.name,
+            customer_part_number=mapping.customer_part_number,
+            status=mapping.status,
+            description=part.description,
+            created_at=mapping.created_at,
+        )
+
+    @staticmethod
+    def list_parts(
+        db: Session,
+        customer_code: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        search: Optional[str] = None,
+        page: int = 1,
+        limit: int = 50,
+    ) -> PartMasterListResponse:
+        query = (
+            db.query(CustomerPartMapping, Part, Customer)
+            .join(Part, CustomerPartMapping.part_id == Part.id)
+            .join(Customer, CustomerPartMapping.customer_id == Customer.id)
+        )
+        if customer_code:
+            query = query.filter(Customer.customer_code == customer_code.strip().upper())
+        if status_filter and status_filter.upper() != "ALL":
+            query = query.filter(func.lower(CustomerPartMapping.status) == status_filter.strip().lower())
+        if search:
+            term = f"%{search.strip()}%"
+            query = query.filter(
+                or_(
+                    CustomerPartMapping.customer_part_number.ilike(term),
+                    Part.part_number.ilike(term),
+                    Customer.name.ilike(term),
+                    Customer.customer_code.ilike(term),
+                )
+            )
+        total = query.count()
+        page = max(page, 1)
+        limit = max(min(limit, 500), 1)
+        offset = (page - 1) * limit
+        rows = query.order_by(Customer.customer_code, Part.part_number).offset(offset).limit(limit).all()
+        items = [PartMasterService._part_out(part, mapping, cust) for mapping, part, cust in rows]
+        return PartMasterListResponse(items=items, total=total, page=page, limit=limit)
+
+    @staticmethod
+    def get_kpis(db: Session) -> PartMasterKPIs:
+        total_parts = db.query(CustomerPartMapping).count()
+        active_parts = (
+            db.query(CustomerPartMapping)
+            .filter(func.lower(CustomerPartMapping.status) == "active")
+            .count()
+        )
+        total_customers = db.query(CustomerPartMapping.customer_id).distinct().count()
+
+        now = datetime.now()
+        first_day_of_month = datetime(now.year, now.month, 1)
+        new_this_month = (
+            db.query(CustomerPartMapping)
+            .filter(CustomerPartMapping.created_at >= first_day_of_month)
+            .count()
+        )
+        return PartMasterKPIs(
+            total_parts=total_parts,
+            active_parts=active_parts,
+            total_customers=total_customers,
+            new_parts_this_month=new_this_month,
+        )
+
+    @staticmethod
+    def get_part(db: Session, part_id: str) -> PartMasterOut:
+        row = (
+            db.query(CustomerPartMapping, Part, Customer)
+            .join(Part, CustomerPartMapping.part_id == Part.id)
+            .join(Customer, CustomerPartMapping.customer_id == Customer.id)
+            .filter(Part.id == part_id)
+            .first()
+        )
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Part not found in the Part Master.")
+        mapping, part, cust = row
+        return PartMasterService._part_out(part, mapping, cust)
+
+    @staticmethod
+    def create_part(
+        db: Session, req: PartMasterCreate, current_user: Optional[User] = None
+    ) -> PartMasterOut:
+        raw_cpn = (req.customer_part_number or "").strip()
+        if not raw_cpn:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Customer Part Number is required.")
+
+        cust_code = (req.customer_code or "").strip().upper()
+        if not cust_code:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Customer code is required.")
+
+        customer = db.query(Customer).filter(Customer.customer_code == cust_code).first()
+        if not customer:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Customer '{req.customer_code}' not found. Please create the customer first before adding parts.",
+            )
+
+        for attempt in range(_MAX_PO_CREATE_ATTEMPTS):
+            db.query(Customer).filter(Customer.id == customer.id).with_for_update().first()
+
+            existing_mapping = (
+                db.query(CustomerPartMapping)
+                .filter(
+                    CustomerPartMapping.customer_id == customer.id,
+                    CustomerPartMapping.customer_part_number == raw_cpn,
+                )
+                .first()
+            )
+            if existing_mapping:
+                existing_part = db.query(Part).filter(Part.id == existing_mapping.part_id).first()
+                part_num = existing_part.part_number if existing_part else "existing part"
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Customer Part Number '{raw_cpn}' already exists for customer '{customer.customer_code}' (mapped to {part_num}).",
+                )
+
+            next_code = next_internal_part_number(db, customer.customer_code)
+
+            part = Part(
+                part_number=next_code,
+                description=req.description or raw_cpn,
+            )
+            db.add(part)
+            db.flush()
+
+            mapping = CustomerPartMapping(
+                customer_id=customer.id,
+                part_id=part.id,
+                customer_part_number=raw_cpn,
+                status=req.status if req.status else "Active",
+            )
+            db.add(mapping)
+            db.flush()
+
+            _audit(
+                db, current_user, "PART_CREATED", "Part", str(part.id),
+                details=f"part_number={part.part_number}, customer={customer.customer_code}, customer_part_number={raw_cpn}"
+            )
+
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                if attempt == _MAX_PO_CREATE_ATTEMPTS - 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Could not create part due to a concurrent update -- please retry.",
+                    )
+                continue
+
+            db.refresh(part)
+            db.refresh(mapping)
+            return PartMasterService._part_out(part, mapping, customer)
+
+    @staticmethod
+    def update_part(
+        db: Session, part_id: str, req: PartMasterUpdate, current_user: Optional[User] = None
+    ) -> PartMasterOut:
+        row = (
+            db.query(CustomerPartMapping, Part, Customer)
+            .join(Part, CustomerPartMapping.part_id == Part.id)
+            .join(Customer, CustomerPartMapping.customer_id == Customer.id)
+            .filter(Part.id == part_id)
+            .first()
+        )
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Part not found in the Part Master.")
+        mapping, part, customer = row
+
+        db.query(Customer).filter(Customer.id == customer.id).with_for_update().first()
+
+        old_part_num = part.part_number
+        if req.part_number is not None:
+            new_pn = req.part_number.strip().upper()
+            if not new_pn:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unique Internal Code cannot be blank.")
+            if new_pn != part.part_number:
+                conflict = db.query(Part).filter(Part.part_number == new_pn, Part.id != part.id).first()
+                if conflict:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Unique Internal Code '{new_pn}' is already in use by another part."
+                    )
+                part.part_number = new_pn
+                try:
+                    from app.models.customer_return import CustomerReturn
+                    db.query(CustomerReturn).filter(CustomerReturn.part_number == old_part_num).update(
+                        {CustomerReturn.part_number: new_pn}, synchronize_session=False
+                    )
+                except Exception:
+                    pass
+
+        if req.customer_part_number is not None:
+            new_cpn = req.customer_part_number.strip()
+            if not new_cpn:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Customer Part Number cannot be blank.")
+            if new_cpn != mapping.customer_part_number:
+                existing = (
+                    db.query(CustomerPartMapping)
+                    .filter(
+                        CustomerPartMapping.customer_id == customer.id,
+                        CustomerPartMapping.customer_part_number == new_cpn,
+                        CustomerPartMapping.id != mapping.id,
+                    )
+                    .first()
+                )
+                if existing:
+                    existing_part = db.query(Part).filter(Part.id == existing.part_id).first()
+                    part_num = existing_part.part_number if existing_part else "existing part"
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Customer Part Number '{new_cpn}' already exists for customer '{customer.customer_code}' (mapped to {part_num}).",
+                    )
+                mapping.customer_part_number = new_cpn
+
+        if req.status is not None:
+            clean_status = req.status.strip()
+            if clean_status:
+                mapping.status = clean_status
+
+        if req.description is not None:
+            part.description = req.description
+
+        _audit(
+            db, current_user, "PART_UPDATED", "Part", str(part.id),
+            details=f"part_number={part.part_number}, customer={customer.customer_code}"
+        )
+        db.commit()
+        db.refresh(part)
+        db.refresh(mapping)
+        return PartMasterService._part_out(part, mapping, customer)

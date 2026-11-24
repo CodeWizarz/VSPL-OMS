@@ -1,16 +1,36 @@
+from uuid import UUID
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.api.deps import require_roles
+from app.api.deps import require_roles, get_current_user
 from app.models.user import User
-from app.core.roles import PLANNING_ROLES, ORDER_INTAKE_ROLES
+from app.core.roles import PLANNING_ROLES, PO_MASTER_VIEW_ROLES, PO_MASTER_EDIT_ROLES, CUSTOMER_MASTER_VIEW_ROLES
 from app.schemas.master_data import (
     CustomerCreate, CustomerUpdate, CustomerOut,
-    POMasterCreate, POMasterOut,
-    ScheduleCreate, ScheduleOut,
+    POMasterCreate, POMasterUpdate, POMasterOut, POMergeRequest,
+    ScheduleCreate, ScheduleUpdate, ScheduleOut,
+    CustomerPartOut, ResolveCustomerPartResponse,
+    PartMasterCreate, PartMasterUpdate, PartMasterOut,
+    PartMasterKPIs, PartMasterListResponse,
+    MachineCreate, MachineUpdate, MachineOut,
+    ShiftCreate, ShiftUpdate, ShiftOut,
+    OperatorCreate, OperatorUpdate, OperatorOut,
 )
-from app.services.master_data_service import CustomerMasterService, POMasterService, ScheduleMasterService
+from app.schemas.customer_part_cross_reference import (
+    CustomerPartCrossReferenceCreate,
+    CustomerPartCrossReferenceUpdate,
+    CustomerPartCrossReferenceOut,
+    CustomerPartCrossReferenceListResponse,
+    PartLookupResponse,
+)
+from app.services.master_data_service import (
+    CustomerMasterService, POMasterService, ScheduleMasterService,
+    list_customer_parts, resolve_customer_part_preview,
+    PartMasterService,
+    MachineMasterService, ShiftMasterService, OperatorMasterService,
+)
+from app.services.customer_part_cross_reference_service import CustomerPartCrossReferenceService
 
 router = APIRouter(prefix="/api/v1/masters", tags=["masters"])
 
@@ -18,7 +38,7 @@ router = APIRouter(prefix="/api/v1/masters", tags=["masters"])
 # --- Customer Master ---
 
 @router.get("/customers", response_model=List[CustomerOut])
-def list_customers(db: Session = Depends(get_db), user: User = Depends(require_roles(*ORDER_INTAKE_ROLES))):
+def list_customers(db: Session = Depends(get_db), user: User = Depends(require_roles(*CUSTOMER_MASTER_VIEW_ROLES))):
     return CustomerMasterService.list_customers(db)
 
 
@@ -46,9 +66,18 @@ def update_customer(
 def list_pos(
     customer_code: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*ORDER_INTAKE_ROLES)),
+    user: User = Depends(require_roles(*PO_MASTER_VIEW_ROLES)),
 ):
     return POMasterService.list_pos(db, customer_code=customer_code)
+
+
+@router.get("/pos/{po_id}", response_model=POMasterOut)
+def get_po(
+    po_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PO_MASTER_VIEW_ROLES)),
+):
+    return POMasterService.get_po(db, po_id=po_id)
 
 
 @router.post("/pos", response_model=POMasterOut)
@@ -60,13 +89,63 @@ def create_po(
     return POMasterService.create_po(db, payload, current_user=user)
 
 
+@router.post("/pos/merge", response_model=POMasterOut)
+def merge_pos(
+    payload: POMergeRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PO_MASTER_EDIT_ROLES)),
+):
+    return POMasterService.merge_pos(db, payload, current_user=user)
+
+
+@router.put("/pos/{po_id}", response_model=POMasterOut)
+def update_po(
+    po_id: str,
+    payload: POMasterUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PO_MASTER_EDIT_ROLES)),
+):
+    return POMasterService.update_po(db, po_id=po_id, req=payload, current_user=user)
+
+
+@router.delete("/pos/{po_id}")
+def delete_po(
+    po_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PO_MASTER_EDIT_ROLES)),
+):
+    """Delete a Purchase Order (allowed for Sales, Planner, Admin, CEO)."""
+    return POMasterService.delete_po(db, po_id=po_id, current_user=user)
+
+
+# --- Customer Part Mapping (read-only lookups for the PO UI) ---
+
+@router.get("/customer-parts", response_model=List[CustomerPartOut])
+def get_customer_parts(
+    customer_code: str = Query(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return list_customer_parts(db, customer_code)
+
+
+@router.get("/resolve-customer-part", response_model=ResolveCustomerPartResponse)
+def resolve_customer_part_endpoint(
+    customer_code: str = Query(...),
+    customer_part_number: str = Query(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return resolve_customer_part_preview(db, customer_code, customer_part_number)
+
+
 # --- Schedule Master ---
 
 @router.get("/schedules", response_model=List[ScheduleOut])
 def list_schedules(
     customer_code: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*ORDER_INTAKE_ROLES)),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
 ):
     return ScheduleMasterService.list_schedules(db, customer_code=customer_code)
 
@@ -78,3 +157,238 @@ def create_schedule(
     user: User = Depends(require_roles(*PLANNING_ROLES)),
 ):
     return ScheduleMasterService.create_schedule(db, payload, current_user=user)
+
+
+@router.put("/schedules/{schedule_id}", response_model=ScheduleOut)
+def update_schedule(
+    schedule_id: str,
+    payload: ScheduleUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PO_MASTER_EDIT_ROLES)),
+):
+    return ScheduleMasterService.update_schedule(db, schedule_id=schedule_id, req=payload, current_user=user)
+
+
+@router.delete("/schedules/{schedule_id}")
+def delete_schedule(
+    schedule_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PO_MASTER_EDIT_ROLES)),
+):
+    """Delete a Customer Schedule (allowed for Sales, Planner, Admin, CEO)."""
+    return ScheduleMasterService.delete_schedule(db, schedule_id=schedule_id, current_user=user)
+
+
+# --- Part Master ---
+
+@router.get("/parts/kpis", response_model=PartMasterKPIs)
+def get_part_kpis(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return PartMasterService.get_kpis(db)
+
+
+@router.get("/parts", response_model=PartMasterListResponse)
+def list_parts(
+    customer_code: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return PartMasterService.list_parts(
+        db,
+        customer_code=customer_code,
+        status_filter=status,
+        search=search,
+        page=page,
+        limit=limit,
+    )
+
+
+@router.get("/parts/{part_id}", response_model=PartMasterOut)
+def get_part(
+    part_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return PartMasterService.get_part(db, part_id=part_id)
+
+
+@router.post("/parts", response_model=PartMasterOut)
+def create_part(
+    payload: PartMasterCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return PartMasterService.create_part(db, payload, current_user=user)
+
+
+@router.put("/parts/{part_id}", response_model=PartMasterOut)
+def update_part(
+    part_id: str,
+    payload: PartMasterUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return PartMasterService.update_part(db, part_id=part_id, req=payload, current_user=user)
+
+
+# --- Machine Master ---
+
+@router.get("/machines", response_model=List[MachineOut])
+def list_machines(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return MachineMasterService.list_machines(db)
+
+
+@router.post("/machines", response_model=MachineOut)
+def create_machine(
+    payload: MachineCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return MachineMasterService.create_machine(db, payload, current_user=user)
+
+
+@router.put("/machines", response_model=MachineOut)
+def update_machine(
+    payload: MachineUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return MachineMasterService.update_machine(db, payload, current_user=user)
+
+
+@router.delete("/machines/{machine_id}")
+def delete_machine(
+    machine_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return MachineMasterService.delete_machine(db, machine_id, current_user=user)
+
+
+# --- Shift Master ---
+
+@router.get("/shifts", response_model=List[ShiftOut])
+def list_shifts(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return ShiftMasterService.list_shifts(db)
+
+
+@router.post("/shifts", response_model=ShiftOut)
+def create_shift(
+    payload: ShiftCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return ShiftMasterService.create_shift(db, payload, current_user=user)
+
+
+@router.put("/shifts", response_model=ShiftOut)
+def update_shift(
+    payload: ShiftUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return ShiftMasterService.update_shift(db, payload, current_user=user)
+
+
+@router.delete("/shifts/{shift_id}")
+def delete_shift(
+    shift_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return ShiftMasterService.delete_shift(db, shift_id, current_user=user)
+
+
+# --- Operator Master ---
+
+@router.get("/operators", response_model=List[OperatorOut])
+def list_operators(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return OperatorMasterService.list_operators(db)
+
+
+@router.post("/operators", response_model=OperatorOut)
+def create_operator(
+    payload: OperatorCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return OperatorMasterService.create_operator(db, payload, current_user=user)
+
+
+@router.put("/operators", response_model=OperatorOut)
+def update_operator(
+    payload: OperatorUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return OperatorMasterService.update_operator(db, payload, current_user=user)
+
+
+@router.delete("/operators/{operator_id}")
+def delete_operator(
+    operator_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return OperatorMasterService.delete_operator(db, operator_id, current_user=user)
+
+
+# --- Customer Part Cross-Reference Master ---
+
+@router.get("/part-cross-references", response_model=CustomerPartCrossReferenceListResponse)
+def list_part_cross_references(
+    customer_code: Optional[str] = Query(None, description="Filter by customer code"),
+    part_number: Optional[str] = Query(None, description="Filter by internal part number"),
+    search: Optional[str] = Query(None, description="Search by customer part no, code, or internal part"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return CustomerPartCrossReferenceService.list_cross_references(
+        db,
+        customer_code=customer_code,
+        part_number=part_number,
+        search=search,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/part-cross-references/lookup", response_model=PartLookupResponse)
+def lookup_customer_part(
+    customer_code: str = Query(..., description="Customer code (e.g. SMN, HQP, CUST-VALVE)"),
+    customer_part_no: str = Query(..., description="Customer part number to resolve"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return CustomerPartCrossReferenceService.lookup_part(
+        db,
+        customer_code=customer_code,
+        customer_part_no=customer_part_no,
+    )
+
+
+@router.post("/part-cross-references", response_model=CustomerPartCrossReferenceOut)
+def create_part_cross_reference(
+    payload: CustomerPartCrossReferenceCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return CustomerPartCrossReferenceService.create_cross_reference(db, payload, current_user=user)
+
+
+@router.put("/part-cross-references/{ref_id}", response_model=CustomerPartCrossReferenceOut)
+def update_part_cross_reference(
+    ref_id: UUID,
+    payload: CustomerPartCrossReferenceUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    return CustomerPartCrossReferenceService.update_cross_reference(db, ref_id, payload, current_user=user)

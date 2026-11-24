@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.core.security import hash_password, verify_password, create_access_token
+from app.core.security import hash_password, verify_password, create_access_token, validate_company_email
 from app.core.rate_limit import limiter
 from app.api.deps import require_roles, get_current_user
 from app.models.user import User, UserRole
@@ -23,14 +23,15 @@ def register(
     db: Session = Depends(get_db),
     admin: User = Depends(require_roles(UserRole.ADMIN)),
 ):
-    if db.query(User).filter(User.email == payload.email).first():
-        raise HTTPException(status_code=400, detail="Email already registered")
+    normalized_email = validate_company_email(payload.email)
+    if db.query(User).filter(User.email == normalized_email).first():
+        raise HTTPException(status_code=400, detail=f"A user with email '{normalized_email}' already exists. Not modified.")
     user = User(
-        full_name=payload.full_name,
-        email=payload.email,
+        full_name=payload.full_name.strip(),
+        email=normalized_email,
         hashed_password=hash_password(payload.password),
         role=payload.role,
-        department=payload.department,
+        department=payload.department.strip() if payload.department else None,
         is_active=payload.is_active,
     )
     db.add(user)
@@ -38,13 +39,24 @@ def register(
     db.refresh(user)
     return user
 
+
 @router.post("/login", response_model=Token)
 @limiter.limit("10/minute")
 def login(request: Request, payload: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
-    token = create_access_token({"sub": user.email, "role": user.role.value})
+    roles_list = []
+    if user.role:
+        roles_list.append(user.role.value if hasattr(user.role, "value") else str(user.role).lower())
+    if user.secondary_role:
+        roles_list.append(user.secondary_role.value if hasattr(user.secondary_role, "value") else str(user.secondary_role).lower())
+    token = create_access_token({
+        "sub": user.email,
+        "role": roles_list[0] if roles_list else "operator",
+        "secondary_role": roles_list[1] if len(roles_list) > 1 else None,
+        "roles": roles_list,
+    })
     return Token(access_token=token, must_change_password=user.must_change_password)
 
 @router.post("/change-password", response_model=Token)

@@ -15,6 +15,13 @@ class WORouteItem(BaseModel):
     cumulative_onhand_qty: int
     stage_status: str
 
+class MergedOARAllocationOut(BaseModel):
+    oar_number: str
+    order_id: str
+    customer_po: Optional[str] = None
+    allocated_qty: int
+
+
 class WorkOrderListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -23,11 +30,16 @@ class WorkOrderListItem(BaseModel):
     oar_number: Optional[str] = None
     customer_code: str
     customer_name: str
+    customer_po: Optional[str] = None
+    source_type: Optional[str] = "po"
+    po_coverage_status: Optional[str] = None
     part_number: str
+    customer_part_number: Optional[str] = None
     part_name: Optional[str] = None
     grade: Optional[str] = None
     order_qty: int
     physical_wo_qty: int
+    casting_process: Optional[str] = None
     match_size: Optional[int] = None
     current_stage: str
     next_allowed_stage: Optional[str] = None
@@ -37,6 +49,31 @@ class WorkOrderListItem(BaseModel):
     shortfall: str
     delivery_date: Optional[date] = None
     created_at: datetime
+    po_date: Optional[date] = None
+    oar_date: Optional[datetime] = None
+    wo_date: Optional[datetime] = None
+    release_date: Optional[datetime] = None
+    release_status: Optional[str] = None
+    is_released: bool = False
+    ready_for_production: bool = False
+    excess_qty: Optional[int] = 0
+    shortfall_qty: Optional[int] = 0
+    shortfall_reason: Optional[str] = None
+    heat_number: Optional[str] = None
+    classification: Optional[str] = "Production"
+    commitment_date: Optional[date] = None
+    revised_commitment_date: Optional[date] = None
+    effective_commitment_date: Optional[date] = None
+    commitment_date_revision_count: int = 0
+    route_stages: Optional[List[str]] = None
+    is_at_vendor: bool = False
+    vendor_name: Optional[str] = None
+    vendor_dc: Optional[str] = None
+    vendor_qty: Optional[int] = 0
+    vendor_dispatch_stage: Optional[str] = None
+    vendor_target_return_stage: Optional[str] = None
+    is_merged: bool = False
+    merged_oars: List[MergedOARAllocationOut] = []
 
 class StageTimelineStep(BaseModel):
     stage: str
@@ -70,6 +107,7 @@ class TransactionHistoryItem(BaseModel):
     operator_name: Optional[str] = None
     shift: Optional[str] = None
     remarks: Optional[str] = None
+    heat_number: Optional[str] = None
     client_request_id: Optional[str] = None
 
 class WorkOrderTrackingDetail(BaseModel):
@@ -79,11 +117,15 @@ class WorkOrderTrackingDetail(BaseModel):
     customer_code: str
     customer_name: str
     customer_po: str
+    source_type: Optional[str] = "po"
+    po_coverage_status: Optional[str] = None
     part_number: str
+    customer_part_number: Optional[str] = None
     part_name: Optional[str] = None
     grade: Optional[str] = None
     order_qty: int
     physical_wo_qty: int
+    casting_process: Optional[str] = None
     match_size: Optional[int] = None
     current_stage: str
     next_allowed_stage: Optional[str] = None
@@ -109,19 +151,57 @@ class WorkOrderTrackingDetail(BaseModel):
     transactions: List[TransactionHistoryItem] = []
     total_wip_on_hand: int
     total_rejected: int
+    excess_qty: Optional[int] = 0
+    shortfall_qty: Optional[int] = 0
+    shortfall_reason: Optional[str] = None
     yield_pct: float
     created_at: datetime
+    heat_number: Optional[str] = None
+    classification: Optional[str] = "Production"
+    is_at_vendor: Optional[bool] = False
+    active_vendor_name: Optional[str] = None
+    active_vendor_dc: Optional[str] = None
+    active_vendor_qty: Optional[int] = 0
+    active_vendor_stage: Optional[str] = None
 
 class OARWorkOrderSummary(BaseModel):
+    wo_id: str
     wo_number: str
+    wo_type: str = "ORIGINAL"  # "ORIGINAL" | "PATCH"
+    is_replacement: bool = False
+    source_wo_id: Optional[str] = None
+    source_wo_number: Optional[str] = None
+    replacement_qty: int = 0
     allocated_qty: int
+    production_qty: int = 0
+    good_qty: int = 0
+    rejected_qty: int = 0
+    final_good_contribution: int = 0
     release_status: str
     current_stage: str
     wo_status: str
-    ok_completed: int
-    rejected: int
-    movable_wip: int
-    dispatched_qty: int
+    casting_process: Optional[str] = None
+    ok_completed: int = 0
+    rejected: int = 0
+    movable_wip: int = 0
+    dispatched_qty: int = 0
+    wo_date: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    release_date: Optional[datetime] = None
+    is_released: bool = False
+    ready_for_production: bool = False
+    excess_qty: Optional[int] = 0
+    heat_number: Optional[str] = None
+    classification: Optional[str] = "Production"
+
+class PlanningSummaryResponse(BaseModel):
+    unreleased_count: int
+    released_count: int
+    producing_today_count: int
+    ready_for_production_count: int
+    active_in_production_count: int
+    total_active_wos: int
+    total_dispatched_wos: int
 
 class OARListItem(BaseModel):
     oar_number: str
@@ -129,14 +209,81 @@ class OARListItem(BaseModel):
     customer_code: str
     customer_name: str
     customer_po: str
+    source_type: Optional[str] = "po"
+    oar_po_status: Optional[str] = None
+    po_matched: bool = False
+    po_coverage_status: Optional[str] = "COMMERCIAL_PO_PENDING"
+    order_type: Optional[str] = "Production"
+    classification: Optional[str] = "Production"
     part_number: str
+    customer_part_number: Optional[str] = None
+    part_name: Optional[str] = None
     oar_qty: int
     allocated_qty: int
     remaining_qty: int
     num_wos: int
+    num_original_wos: int = 0
+    num_patch_wos: int = 0
+    total_produced: int = 0
+    total_good: int = 0
+    total_rejected: int
+    excess_qty: Optional[int] = 0
+    fulfilled_from_stock_qty: Optional[int] = 0
+    part_id: Optional[str] = None
+    oar_fulfilled: int = 0
+    oar_shortfall: int = 0
+    status: str
+    delivery_date: Optional[date] = None
+    commitment_date: Optional[date] = None
+    revised_commitment_date: Optional[date] = None
+    effective_commitment_date: Optional[date] = None
+    commitment_date_revision_count: int = 0
+    route_stages: Optional[List[str]] = None
+    commitment_date_last_revised_at: Optional[datetime] = None
+    commitment_date_revision_reason: Optional[str] = None
+    created_at: datetime
+    po_date: Optional[date] = None
+    oar_date: Optional[datetime] = None
+    work_orders: List[OARWorkOrderSummary]
+
+class OARGenealogyResponse(BaseModel):
+    oar_number: str
+    order_id: str
+    customer_code: str
+    customer_name: str
+    customer_po: str
+    source_type: Optional[str] = "po"
+    oar_po_status: Optional[str] = None
+    po_matched: bool = False
+    po_coverage_status: Optional[str] = "COMMERCIAL_PO_PENDING"
+    order_type: Optional[str] = "Production"
+    classification: Optional[str] = "Production"
+    part_number: str
+    oar_qty: int
+    delivery_date: Optional[date] = None
+    commitment_date: Optional[date] = None
+    revised_commitment_date: Optional[date] = None
+    effective_commitment_date: Optional[date] = None
+    commitment_date_revision_count: int = 0
+    route_stages: Optional[List[str]] = None
+    commitment_date_last_revised_at: Optional[datetime] = None
+    commitment_date_revision_reason: Optional[str] = None
+    num_wos: int
+    num_original_wos: int
+    num_patch_wos: int
+    total_produced: int
+    total_good: int
+    total_rejected: int
+    excess_qty: Optional[int] = 0
+    shortfall_qty: Optional[int] = 0
+    shortfall_reason: Optional[str] = None
+    oar_fulfilled: int
+    oar_shortfall: int
     status: str
     delivery_date: Optional[date] = None
     created_at: datetime
+    po_date: Optional[date] = None
+    oar_date: Optional[datetime] = None
     work_orders: List[OARWorkOrderSummary]
 
 class WorkOrderRouteResponse(BaseModel):
@@ -149,3 +296,24 @@ class WorkOrderRouteResponse(BaseModel):
     stage_targets: dict
     # {stage: {"planned_start": "YYYY-MM-DD"|None, "planned_end": ...}} for routed WOs.
     stage_plans: Optional[dict] = None
+
+class MovableWorkOrderItem(BaseModel):
+    wo_id: str
+    wo_number: str
+    oar_number: Optional[str] = None
+    customer_code: str
+    customer_name: str
+    part_number: str
+    part_name: Optional[str] = None
+    from_stage: str
+    to_stage: Optional[str] = None
+    movable_wip: int
+    current_stage: str
+    heat_number: Optional[str] = None
+    delivery_date: Optional[date] = None
+    created_at: Optional[datetime] = None
+    priority_rank: int = 1
+    mrb_status: str = "APPROVED"  # APPROVED, PENDING_MRB, PARTIAL
+    pending_mrb_count: int = 0
+    mrb_pending_qty: int = 0
+

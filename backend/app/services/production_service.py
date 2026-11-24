@@ -10,11 +10,14 @@ from app.models.production import ProductionUpdate, ProductionStatus
 from app.models.packing import PackingRecord
 from app.models.nc import NCRecord, next_nc_number
 from app.models.audit import AuditLog
+from app.models.mrb import MRBReview, next_mrb_number
 from app.models.user import User
 from app.schemas.production import (
     MovePartsRequest, MovementResponse,
-    RecordStageProductionRequest, ProductionEntryResponse
+    RecordStageProductionRequest, ProductionEntryResponse,
+    DeclareShortfallRequest, DeclareShortfallResponse
 )
+from app.services.rejection_service import validate_active_rejection_type
 from app.services.oms_integration_service import (
     OMSIntegrationService,
     match_route_stage,
@@ -22,12 +25,118 @@ from app.services.oms_integration_service import (
 )
 
 def _get_next_movement_id(db: Session) -> str:
-    count = db.query(ProductionMovement).count()
-    return f"MOV-{count + 1:06d}"
+    import re
+    mov_re = re.compile(r"^MOV-(\d+)$")
+    highest = 0
+    for (m_id,) in db.query(ProductionMovement.movement_id).all():
+        m = mov_re.match(m_id or "")
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return f"MOV-{highest + 1:06d}"
 
 class ProductionService:
     @staticmethod
+    def _enforce_release_gate(wo: WorkOrder) -> None:
+        """Production is blocked until the release chain (Engineering Release ->
+        Manufacturing Release -> WO Released) is complete.
+
+        Backward-compatible activation for ORDINARY WOs: the chain only applies once a
+        WO has actually entered it (Engineering Release recorded) -- a WO that never
+        uses it (the existing intake-and-produce flow) is completely unaffected, so
+        existing production facts and tests are never silently changed.
+
+        Replacement WOs are the one exception: `is_replacement` WOs ALWAYS require the
+        full chain, starting from creation -- a replacement WO must never be producible
+        before Engineering Release, even though it was never explicitly put through
+        Engineering Release yet (that's the whole point: it's blocked until someone
+        does)."""
+        requires_full_chain = wo.is_replacement or wo.engineering_released_at is not None
+        if not requires_full_chain:
+            return
+        if wo.engineering_released_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Work Order '{wo.wo_number}' is blocked pending Engineering Release."
+            )
+        if wo.manufacturing_released_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Work Order '{wo.wo_number}' is blocked pending Manufacturing Release."
+            )
+        if wo.release_date is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Work Order '{wo.wo_number}' is blocked pending WO Release."
+            )
+
+    @staticmethod
+    def get_stage_dashboard(db: Session, wo_number: str, stage: str):
+        """Deterministic unified summary for one WO/stage -- Target, Produced, Rejected,
+        Good, WIP, Yet to Produce, Remaining Movable -- reused directly from the same
+        authoritative StageWIP/WORoute rows Entry/Move/Tracking already read from. No
+        new quantity engine; purely a read/reshape."""
+        from app.schemas.production import StageDashboard
+
+        wo = db.query(WorkOrder).filter(WorkOrder.wo_number == wo_number.strip()).first()
+        if not wo:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Work Order '{wo_number}' not found.")
+
+        routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
+        route_stages = [r.stage for r in routes]
+        matched_stage = match_route_stage(stage, route_stages) or stage.strip().upper()
+
+        route_rec = next((r for r in routes if r.stage == matched_stage), None)
+        wip = db.query(StageWIP).filter(StageWIP.work_order_id == wo.id, StageWIP.stage == matched_stage).first()
+
+        target = route_rec.stage_target_qty if route_rec else wo.physical_wo_qty
+        good = wip.ok_qty if wip else 0
+        rejected = wip.rejected_qty if wip else 0
+        produced = good + rejected
+        # WIP = material physically present at this stage that hasn't been produced
+        # yet (StageWIP.inproc_qty = ent - ok - rej) -- NOT the same figure as "Yet
+        # to Produce" below, even though they can coincide numerically at a stage
+        # whose entered quantity already equals its full target. They diverge
+        # wherever entered quantity lags the target (e.g. a downstream stage before
+        # upstream has finished feeding it): WIP reflects what has physically
+        # arrived, Yet to Produce reflects what is still owed against the overall
+        # target regardless of whether it has arrived yet.
+        wip_qty = wip.inproc_qty if wip else 0
+        yet_to_produce = max(target - produced, 0)
+        # Remaining Movable = completed good sitting on-hand, not yet moved
+        # downstream (StageWIP.onhand_qty) -- rejected quantity is never included.
+        from app.models.vendor import VendorDispatch
+        v_dispatches = db.query(VendorDispatch).filter(
+            VendorDispatch.work_order_id == wo.id,
+            VendorDispatch.dispatch_stage == matched_stage,
+            VendorDispatch.status.in_(["AT_VENDOR", "PARTIALLY_RECEIVED"])
+        ).all()
+        at_vendor_qty = sum(max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0) for d in v_dispatches)
+        remaining_movable = max((wip.onhand_qty if wip else 0) - at_vendor_qty, 0)
+
+        # Compute MRB approval status (Option 2)
+        from app.services.mrb_service import MRBService
+        already_moved = max(wip.ok_qty - wip.onhand_qty, 0) if wip else 0
+        mrb_summary = MRBService.get_stage_mrb_summary(
+            db=db,
+            work_order_id=wo.id,
+            stage=matched_stage,
+            onhand_qty=remaining_movable,
+            already_moved=already_moved
+        )
+
+        return StageDashboard(
+            wo_number=wo.wo_number, stage=matched_stage, target_qty=target,
+            total_produced=produced, total_rejected=rejected, total_good=good,
+            wip_qty=wip_qty, yet_to_produce=yet_to_produce, remaining_movable_qty=remaining_movable,
+            mrb_lock_status=mrb_summary["lock_status"],
+            mrb_approved_movable_qty=mrb_summary["approved_movable_qty"],
+            mrb_pending_qty=mrb_summary["pending_qty"],
+            pending_mrb_tickets=mrb_summary["pending_tickets"]
+        )
+
+    @staticmethod
     def move_parts(db: Session, req: MovePartsRequest, current_user: Optional[User] = None) -> MovementResponse:
+
         now = datetime.now()
 
         # 1. Idempotency Check: Prevent duplicate submissions on double-click / network retry
@@ -78,16 +187,19 @@ class ProductionService:
                 detail="Stage movement cannot cross Work Orders."
             )
 
-        if wo.status in (WOStatus.CLOSED, WOStatus.DISPATCHED):
+        if wo.status in (WOStatus.CLOSED, WOStatus.DISPATCHED) or wo.current_stage == "Completed":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot move parts for Work Order '{req.wo_number}' with status '{wo.status.value}'."
+                detail=f"Cannot move parts for Work Order '{req.wo_number}'. The work order is completely dispatched."
             )
+        ProductionService._enforce_release_gate(wo)
+        if req.rejected_quantity > 0:
+            validate_active_rejection_type(db, req.defect_code)
 
         # 3. Validate Work Order Route
         routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
         if not routes:
-            default_stages = ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+            default_stages = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
             targets = calculate_stage_targets(wo.physical_wo_qty, route=default_stages)
             routes = []
             for seq, stg in enumerate(default_stages, start=1):
@@ -127,7 +239,8 @@ class ProductionService:
         from_idx = route_stage_names.index(matched_from)
         to_idx = route_stage_names.index(matched_to)
 
-        if to_idx != from_idx + 1:
+        is_vendor_f2_to_fi = (matched_from == "F2" and matched_to in ("SP", "FI"))
+        if to_idx != from_idx + 1 and not is_vendor_f2_to_fi:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid stage sequence: Cannot jump directly from '{matched_from}' to '{matched_to}'. Next allowed stage on this Work Order's route is '{route_stage_names[from_idx + 1]}'."
@@ -171,13 +284,100 @@ class ProductionService:
             db.flush()
             wip_records[matched_to] = to_wip
 
-        # 5. Validate Available WIP at Source Stage
-        # Total pieces being processed/cleared from from_stage = req.quantity_moved + req.rejected_quantity
+        # 5. Validate Available Movable WIP at Source Stage
+        # Physical shop floor rule: parts MUST be produced (via Production Entry) before they can be moved downstream.
+        # Only completed good parts on-hand (onhand_qty) awaiting transfer are eligible for movement.
+        from app.models.vendor import VendorDispatch
+        v_dispatches = db.query(VendorDispatch).filter(
+            VendorDispatch.work_order_id == wo.id,
+            VendorDispatch.dispatch_stage == matched_from,
+            VendorDispatch.status.in_(["AT_VENDOR", "PARTIALLY_RECEIVED"])
+        ).all()
+        at_vendor_qty = sum(max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0) for d in v_dispatches)
+        available_onhand = from_wip.onhand_qty if from_wip else 0
+        if available_onhand <= 0 and matched_from.upper() == "PACKING":
+            packing_rec = db.query(PackingRecord).filter(PackingRecord.work_order_id == wo.id).first()
+            if packing_rec and packing_rec.packed_qty > 0:
+                available_onhand = max(packing_rec.packed_qty - (from_wip.moved_out_qty or 0), 0)
+                if from_wip:
+                    from_wip.onhand_qty = available_onhand
+                    from_wip.ok_qty = max(from_wip.ok_qty or 0, packing_rec.packed_qty)
+
+        if available_onhand <= 0:
+            if at_vendor_qty > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Cannot move parts from stage '{matched_from}'. "
+                        f"All completed pieces ({at_vendor_qty} pcs) are currently dispatched to outside vendor '{v_dispatches[0].vendor_name}' (DC #{v_dispatches[0].dc_number}). "
+                        f"Material must be inwarded back on the Vendor Tracking screen (/production/vendor) before moving on the shop floor."
+                    )
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot move parts from stage '{matched_from}'. "
+                    f"No completed good parts are on-hand awaiting transfer (0 pcs produced). "
+                    f"Please record production in Production Entry before moving parts."
+                )
+            )
+
+        max_movable = available_onhand
+
+        if req.quantity_moved > max_movable:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot move {req.quantity_moved} pieces from stage '{matched_from}'. "
+                    f"Only {max_movable} completed good pieces are currently on-hand awaiting transfer "
+                    f"({from_wip.inproc_qty} pieces still in-process / yet to produce). "
+                    f"Record production entry before moving additional parts."
+                )
+            )
+
+        # 5b. Validate MRB Quality Gate (Option 2: Lock movement until MRB Approval)
+        # Parts cannot move to the next gate until Quality/Planner verifies and approves in MRB.
+        from app.services.mrb_service import MRBService
+        already_moved = max(from_wip.ok_qty - from_wip.onhand_qty, 0) if from_wip else 0
+        mrb_summary = MRBService.get_stage_mrb_summary(
+            db=db,
+            work_order_id=wo.id,
+            stage=matched_from,
+            onhand_qty=max_movable,
+            already_moved=already_moved
+        )
+
+        if mrb_summary["total_tickets"] > 0:
+            if mrb_summary["lock_status"] == "LOCKED":
+                ticket_str = ", ".join(mrb_summary["pending_tickets"][:3])
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Movement locked: Parts cannot move from stage '{matched_from}' for Work Order '{req.wo_number}' "
+                        f"until Quality/Planner verifies and approves in the Material Review Board (MRB). "
+                        f"There are {mrb_summary['pending_tickets_count']} pending ticket(s) ({ticket_str}) totaling "
+                        f"{mrb_summary['pending_qty']} pcs awaiting review. "
+                        f"Please approve in the Material Review Board (/quality/mrb) before moving."
+                    )
+                )
+
+            if req.quantity_moved > mrb_summary["approved_movable_qty"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Movement locked: Cannot move {req.quantity_moved} pieces from stage '{matched_from}'. "
+                        f"Only {mrb_summary['approved_movable_qty']} pieces have been approved by Quality/Planner in MRB "
+                        f"({mrb_summary['pending_qty']} pieces still pending review). "
+                        f"Please approve pending tickets in MRB (/quality/mrb) before moving."
+                    )
+                )
+
         total_consumed = req.quantity_moved + req.rejected_quantity
+
         if total_consumed > from_wip.available_wip:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot move {req.quantity_moved} pieces (with {req.rejected_quantity} rejected). Only {from_wip.available_wip} pieces are currently available at stage '{matched_from}' for WO '{req.wo_number}'."
+                detail=f"Cannot process {total_consumed} pieces ({req.quantity_moved} moved + {req.rejected_quantity} rejected). Only {from_wip.available_wip} pieces are currently available at stage '{matched_from}' for WO '{req.wo_number}'."
             )
 
         # 6. Apply Movement in OMS Flow Counters
@@ -185,6 +385,12 @@ class ProductionService:
         # we do not double-increment ok_qty. Only increment ok_qty for direct movements where
         # production was not previously entered.
         additional_ok = max(req.quantity_moved - from_wip.onhand_qty, 0)
+        # Continuous-casting material gate (read-only; runs before any counter changes). Moving OUT of the
+        # first stage can create first-stage production implicitly: additional_ok + rejected is that amount.
+        from app.services.continuous_casting_gate_service import ContinuousCastingGateService
+        ContinuousCastingGateService.enforce_first_stage_production(
+            db, wo, routes, matched_from, from_wip.ok_qty + from_wip.rejected_qty,
+            additional_ok + req.rejected_quantity)
         from_wip.ok_qty += additional_ok
         from_wip.rejected_qty += req.rejected_quantity
 
@@ -238,6 +444,9 @@ class ProductionService:
             to_stage=matched_to,
             quantity_moved=req.quantity_moved,
             rejected_quantity=req.rejected_quantity,
+            production_type=req.production_type or "IN_HOUSE",
+            vendor_name=req.vendor_name.strip() if req.vendor_name and req.vendor_name.strip() else None,
+            dc_number=req.dc_number.strip() if req.dc_number and req.dc_number.strip() else None,
             machine_id=req.machine_id,
             # operator_id is always the authenticated caller, never client-supplied: it is
             # a foreign key to users.id, and trusting a client-sent value would let any
@@ -247,12 +456,15 @@ class ProductionService:
             shift=req.shift or "Shift A",
             movement_date=str(now.date()),
             movement_time=now.strftime("%H:%M:%S"),
+            heat_number=(req.heat_number.strip() if req.heat_number and req.heat_number.strip() else (wo.heat_number or None)),
             remarks=req.remarks,
             created_by=current_user.id if current_user else None
         )
+        if req.heat_number and req.heat_number.strip():
+            wo.heat_number = req.heat_number.strip()
         db.add(movement)
 
-        # 10. Record NC if rejected
+        # 10. Record NC and MRB review if rejected
         if req.rejected_quantity > 0:
             nc_num = next_nc_number(db)
             nc_record = NCRecord(
@@ -267,6 +479,29 @@ class ProductionService:
                 status="Open"
             )
             db.add(nc_record)
+
+            # Auto-route movement rejection to Material Review Board (MRB)
+            mrb_num = next_mrb_number(db)
+            mrb_ticket = MRBReview(
+                mrb_number=mrb_num,
+                movement_id=movement.id,
+                work_order_id=wo.id,
+                stage=matched_from,
+                machine_id=req.machine_id,
+                operator_name=req.operator_name or (current_user.full_name if current_user else "Floor Operator"),
+                shift=req.shift or "Shift A",
+                heat_number=movement.heat_number,
+                reported_ok_qty=req.quantity_moved,
+                reported_reject_qty=req.rejected_quantity,
+                reported_defect_code=req.defect_code or "DEF-POROSITY",
+                floor_remarks=req.remarks or f"Transfer rejection from {matched_from} to {matched_to}",
+                verified_ok_qty=req.quantity_moved,
+                verified_reject_qty=req.rejected_quantity,
+                verified_defect_code=req.defect_code or "DEF-POROSITY",
+                status="PENDING",
+                disposition="PENDING"
+            )
+            db.add(mrb_ticket)
 
         # 11. Create Audit Log
         audit = AuditLog(
@@ -313,6 +548,7 @@ class ProductionService:
                 available_wip_remaining=from_wip_ex.available_wip if from_wip_ex else 0,
                 to_stage_available_wip=to_wip_ex.available_wip if to_wip_ex else 0,
                 current_stage=wo_existing.current_stage if wo_existing else "N/A",
+                heat_number=existing_mov.heat_number,
                 timestamp=existing_mov.created_at or now,
                 message=f"Duplicate request detected with token '{req.client_request_id}'. Returning original transaction '{existing_mov.movement_id}'."
             )
@@ -335,6 +571,7 @@ class ProductionService:
             available_wip_remaining=from_wip.available_wip,
             to_stage_available_wip=to_wip.available_wip,
             current_stage=wo.current_stage,
+            heat_number=movement.heat_number,
             timestamp=now,
             message=f"Successfully moved {req.quantity_moved} pieces from {matched_from} to {matched_to} for {wo.wo_number}."
         )
@@ -366,6 +603,10 @@ class ProductionService:
                     stage_rejection_total=wip_existing.rejected_qty if wip_existing else existing_entry.reject_qty,
                     stage_onhand_available=wip_existing.onhand_qty if wip_existing else 0,
                     stage_inproc_remaining=wip_existing.inproc_qty if wip_existing else 0,
+                    heat_number=existing_entry.heat_number,
+                    production_type=existing_entry.production_type or "IN_HOUSE",
+                    vendor_name=existing_entry.vendor_name,
+                    dc_number=existing_entry.dc_number,
                     timestamp=existing_entry.created_at or now,
                     message=f"Duplicate production entry detected with token '{req.client_request_id}'. Returning original transaction."
                 )
@@ -376,12 +617,15 @@ class ProductionService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Work Order '{req.wo_number}' not found."
             )
-        if wo.status in (WOStatus.CLOSED, WOStatus.DISPATCHED):
+        if wo.status in (WOStatus.CLOSED, WOStatus.DISPATCHED) or wo.current_stage == "Completed":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot record production for Work Order '{req.wo_number}' with status '{wo.status.value}'."
+                detail=f"Cannot record production for Work Order '{req.wo_number}'. The work order is completely dispatched."
             )
-        
+        ProductionService._enforce_release_gate(wo)
+        if req.rejected_quantity > 0:
+            validate_active_rejection_type(db, req.defect_code)
+
         routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
         route_stages = [r.stage for r in routes]
         matched_stage = match_route_stage(req.stage, route_stages)
@@ -403,6 +647,11 @@ class ProductionService:
             StageWIP.stage == matched_stage
         ).with_for_update().first()
 
+        # Continuous-casting material gate (read-only; runs before any StageWIP / ProductionUpdate / NC write).
+        from app.services.continuous_casting_gate_service import ContinuousCastingGateService
+        ContinuousCastingGateService.enforce_first_stage_production(
+            db, wo, routes, matched_stage, (wip.ok_qty + wip.rejected_qty) if wip else 0, total_proc)
+
         if not wip:
             init_ent = wo.physical_wo_qty if route_stages and route_stages[0] == matched_stage else 0
             wip = StageWIP(
@@ -418,6 +667,13 @@ class ProductionService:
             db.add(wip)
             db.flush()
 
+        # Gate completion: if this gate has completed processing and material moved downstream
+        if wip.ent_qty > 0 and wip.inproc_qty == 0 and (wip.ok_qty + wip.rejected_qty) > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Gate '{matched_stage}' has completed and passed for Work Order '{req.wo_number}'. All {wip.ok_qty + wip.rejected_qty} pieces have been produced and moved downstream."
+            )
+
         # Authoritative production ceiling: a fresh production entry can only convert
         # material that is still physically unprocessed at this stage (inproc_qty =
         # ent_qty - ok_qty - rejected_qty), never `available_wip`. available_wip also
@@ -427,14 +683,100 @@ class ProductionService:
         # allows cumulative OK to run past ent_qty (and past the OMS target derived
         # from it) with no ceiling. This is the same ent/ok/rej accounting the OMS
         # Engine already uses to compute inproc_qty -- not a new formula.
+        is_f1 = matched_stage.upper() == "F1"
+        is_vendor = (req.production_type or "").upper() == "VENDOR"
+
         if total_proc > wip.inproc_qty:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot process {total_proc} pieces ({req.good_qty} Good + {req.rejected_quantity} Rej). Only {wip.inproc_qty} pieces of unprocessed material remain at stage '{matched_stage}' (target consumed: {wip.ok_qty + wip.rejected_qty} of {wip.ent_qty})."
-            )
+            if is_f1:
+                if not (req.remarks and req.remarks.strip()):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Remarks / Reason is mandatory when recording F1 Excess Production (e.g., Extra mould poured, Heat balance batch)."
+                    )
+                # F1 Excess Production: Expand physical WO quantity, F1 ent_qty, and all downstream route targets
+                excess_qty = total_proc - wip.inproc_qty
+                orig_target = wo.physical_wo_qty or 0
+                wo.physical_wo_qty = orig_target + excess_qty
+                wo.excess_qty = (getattr(wo, "excess_qty", 0) or 0) + excess_qty
+                wip.ent_qty = (wip.ent_qty or 0) + excess_qty
+                wip.inproc_qty = total_proc - (wip.ok_qty + wip.rejected_qty)
+                for r in routes:
+                    r.stage_target_qty = wo.physical_wo_qty
+
+                db.add(AuditLog(
+                    user_id=current_user.id if current_user else None,
+                    user_name=current_user.full_name if current_user else "Floor Operator",
+                    action="F1_EXCESS_PRODUCTION",
+                    entity="WorkOrder",
+                    entity_id=wo.wo_number,
+                    old_value=f"Planned Target: {orig_target} pcs",
+                    new_value=f"Expanded Target: {wo.physical_wo_qty} pcs (+{excess_qty} Excess pcs)",
+                    details=f"Reason: {req.remarks} (Heat: {req.heat_number or wo.heat_number or 'N/A'})"
+                ))
+
+                # Trigger In-System & Email Alert for F1 excess
+                try:
+                    from app.services.notification_service import NotificationService
+                    NotificationService.send_f1_excess_alert(
+                        wo=wo,
+                        stage=matched_stage,
+                        planned_qty=orig_target,
+                        produced_qty=total_proc,
+                        excess_qty=excess_qty,
+                        heat_number=req.heat_number or wo.heat_number,
+                        operator_name=req.operator_name or (current_user.full_name if current_user else "Floor Operator"),
+                        reason=req.remarks or "Foundry excess casting / extra mould poured"
+                    )
+                except Exception as _e:
+                    pass
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot process {total_proc} pieces ({req.good_qty} Good + {req.rejected_quantity} Rej). Only {wip.inproc_qty} pieces of unprocessed material remain at stage '{matched_stage}' (target consumed: {wip.ok_qty + wip.rejected_qty} of {wip.ent_qty})."
+                )
 
         wip.ok_qty += req.good_qty
         wip.rejected_qty += req.rejected_quantity
+
+        # F1 Shortfall (Less Production Closure): Finalize F1 with actual produced pieces, adjust downstream route targets, and log shortfall
+        is_f1_shortfall = is_f1 and bool(getattr(req, "is_f1_shortfall_closure", False))
+        if is_f1_shortfall:
+            shortfall_reason = (getattr(req, "shortfall_reason", None) or req.remarks or "").strip()
+            if not shortfall_reason:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Remarks / Reason is mandatory when closing F1 with less quantity (shortfall)."
+                )
+            total_produced_f1 = wip.ok_qty + wip.rejected_qty
+            total_good_f1 = wip.ok_qty
+            orig_planned = wo.physical_wo_qty or 0
+            shortfall_val = max(0, orig_planned - total_good_f1)
+
+            # Close F1 in-process balance so this Work Order is not left hanging at F1
+            wip.ent_qty = total_produced_f1
+            wip.inproc_qty = 0
+            wip.onhand_qty = total_good_f1
+            wip.available_wip = total_good_f1
+
+            # Adjust Work Order planned quantity and downstream stage targets to the actual good pieces produced
+            wo.physical_wo_qty = total_good_f1
+            wo.shortfall = "YES"
+            wo.shortfall_qty = shortfall_val
+            wo.shortfall_reason = shortfall_reason
+
+            for r in routes:
+                r.stage_target_qty = total_good_f1
+
+            db.add(AuditLog(
+                user_id=current_user.id if current_user else None,
+                user_name=current_user.full_name if current_user else "Floor Operator",
+                action="F1_SHORTFALL_PRODUCTION",
+                entity="WorkOrder",
+                entity_id=wo.wo_number,
+                old_value=f"Planned Target: {orig_planned} pcs",
+                new_value=f"Closed F1 with Shortfall: {total_good_f1} good pcs (-{shortfall_val} pcs Shortfall)",
+                details=f"Reason: {shortfall_reason} (Heat: {req.heat_number or wo.heat_number or 'N/A'})"
+            ))
 
         # Record ProductionUpdate log
         entry = ProductionUpdate(
@@ -445,12 +787,81 @@ class ProductionService:
             operator_id=current_user.id if current_user else None,
             operator_name=req.operator_name or (current_user.full_name if current_user else "Floor Operator"),
             shift=req.shift or "Shift A",
+            production_type=req.production_type or "IN_HOUSE",
+            vendor_name=req.vendor_name.strip() if req.vendor_name and req.vendor_name.strip() else None,
+            dc_number=req.dc_number.strip() if req.dc_number and req.dc_number.strip() else None,
             good_qty=req.good_qty,
             reject_qty=req.rejected_quantity,
             status=ProductionStatus.COMPLETED,
+            heat_number=(req.heat_number.strip() if req.heat_number and req.heat_number.strip() else (wo.heat_number or None)),
             remarks=req.remarks
         )
+        if req.heat_number and req.heat_number.strip():
+            wo.heat_number = req.heat_number.strip()
         db.add(entry)
+        db.flush()
+
+        # Create Material Review Board (MRB) ticket for Quality, Planner, and Admin review
+        # Note: Outside vendor dispatches and Stage FI (Final QA) do not require a pending floor scrap review.
+        # At Stage FI, production entry is the authoritative final inspection; good pieces are directly approved.
+        is_fi = matched_stage.upper() in ("FI", "FINAL_QA")
+        mrb_num = next_mrb_number(db)
+        if is_vendor:
+            mrb_status = "APPROVED"
+            mrb_disp = "DISPATCHED_TO_VENDOR"
+            mrb_rev_by = "System (Vendor Outward)"
+            mrb_rev_at = now
+        elif is_fi:
+            mrb_status = "APPROVED"
+            mrb_disp = "FINAL_INSPECTION_PASSED"
+            mrb_rev_by = (current_user.full_name if current_user else "Final QA Inspector") + " (Direct Pass)"
+            mrb_rev_at = now
+        else:
+            mrb_status = "PENDING"
+            mrb_disp = "PENDING"
+            mrb_rev_by = None
+            mrb_rev_at = None
+
+        mrb_ticket = MRBReview(
+            mrb_number=mrb_num,
+            production_update_id=entry.id,
+            work_order_id=wo.id,
+            stage=matched_stage,
+            machine_id=req.machine_id,
+            operator_name=req.operator_name or (current_user.full_name if current_user else "Floor Operator"),
+            shift=req.shift or "Shift A",
+            heat_number=entry.heat_number,
+            reported_ok_qty=req.good_qty,
+            reported_reject_qty=req.rejected_quantity,
+            reported_defect_code=req.defect_code if req.rejected_quantity > 0 else None,
+            floor_remarks=req.remarks or ("Final inspection passed directly to Packing & BSR" if is_fi else (f"Dispatched to outside vendor {req.vendor_name} on DC #{req.dc_number}" if is_vendor else None)),
+            verified_ok_qty=req.good_qty,
+            verified_reject_qty=req.rejected_quantity,
+            verified_defect_code=req.defect_code if req.rejected_quantity > 0 else None,
+            status=mrb_status,
+            disposition=mrb_disp,
+            reviewed_by_name=mrb_rev_by,
+            reviewed_at=mrb_rev_at,
+        )
+        db.add(mrb_ticket)
+
+        # Track outside vendor dispatch in vendor_dispatches table
+        if is_vendor and req.vendor_name and req.dc_number:
+            from app.models.vendor import VendorDispatch
+            target_ret = getattr(req, "target_return_stage", None) or "FI"
+            v_disp = VendorDispatch(
+                work_order_id=wo.id,
+                dispatch_stage=matched_stage,
+                vendor_name=req.vendor_name.strip(),
+                dc_number=req.dc_number.strip(),
+                target_return_stage=target_ret.strip().upper(),
+                dispatched_qty=req.good_qty,
+                status="AT_VENDOR",
+                created_by=current_user.id if current_user else None,
+                remarks=req.remarks
+            )
+            db.add(v_disp)
+            db.flush()
 
         # Log NC if rejected
         if req.rejected_quantity > 0:
@@ -479,7 +890,7 @@ class ProductionService:
             entity="WorkOrder",
             entity_id=wo.wo_number,
             old_value=f"Stage: {matched_stage}, Prev OK: {wip.ok_qty - req.good_qty}, Prev Rej: {wip.rejected_qty - req.rejected_quantity}",
-            new_value=f"Completed Good: {req.good_qty}, Rej: {req.rejected_quantity}, Total OK: {wip.ok_qty}",
+            new_value=f"Completed Good: {req.good_qty}, Rej: {req.rejected_quantity}, Total OK: {wip.ok_qty}, Heat No: {entry.heat_number or 'N/A'}",
             details=f"Production Entry on Machine {req.machine_id or 'Cell'} by {req.operator_name or 'Operator'}"
         )
         db.add(audit)
@@ -511,6 +922,10 @@ class ProductionService:
                 stage_rejection_total=wip_existing.rejected_qty if wip_existing else existing_entry.reject_qty,
                 stage_onhand_available=wip_existing.onhand_qty if wip_existing else 0,
                 stage_inproc_remaining=wip_existing.inproc_qty if wip_existing else 0,
+                heat_number=existing_entry.heat_number,
+                production_type=existing_entry.production_type or "IN_HOUSE",
+                vendor_name=existing_entry.vendor_name,
+                dc_number=existing_entry.dc_number,
                 timestamp=existing_entry.created_at or now,
                 message=f"Duplicate production entry detected with token '{req.client_request_id}'. Returning original transaction."
             )
@@ -529,6 +944,184 @@ class ProductionService:
             stage_rejection_total=wip.rejected_qty,
             stage_onhand_available=wip.onhand_qty,
             stage_inproc_remaining=wip.inproc_qty,
+            heat_number=entry.heat_number,
+            production_type=entry.production_type or "IN_HOUSE",
+            vendor_name=entry.vendor_name,
+            dc_number=entry.dc_number,
             timestamp=now,
             message=f"Successfully recorded stage production for {wo.wo_number} at {matched_stage}: {req.good_qty} Good, {req.rejected_quantity} Rejected."
+        )
+
+    @staticmethod
+    def declare_shortfall(
+        db: Session,
+        wo_identifier: str,
+        req: DeclareShortfallRequest,
+        current_user: Optional[User] = None
+    ) -> DeclareShortfallResponse:
+        """Declares an explicit shortfall on an active Work Order at stage F1 (Foundry),
+        closing out unproduced in-process pieces, adjusting the WO planned target to
+        actual good pieces produced, and optionally spawning a brand-new Patch Work Order
+        for the shortfall quantity under the same OAR."""
+        clean_wo = wo_identifier.strip()
+        try:
+            u = uuid.UUID(clean_wo)
+            wo = db.query(WorkOrder).filter((WorkOrder.id == u) | (WorkOrder.wo_number == clean_wo)).with_for_update().first()
+        except Exception:
+            wo = db.query(WorkOrder).filter(WorkOrder.wo_number == clean_wo).with_for_update().first()
+
+        if not wo:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Work Order '{clean_wo}' not found."
+            )
+
+        f1_wip = db.query(StageWIP).filter(
+            StageWIP.work_order_id == wo.id,
+            StageWIP.stage == "F1"
+        ).with_for_update().first()
+
+        if not f1_wip:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Stage F1 WIP record not found for Work Order '{wo.wo_number}'."
+            )
+
+        # Remaining unproduced material at F1
+        remaining_inproc = f1_wip.inproc_qty
+        if remaining_inproc <= 0 and wo.physical_wo_qty > (f1_wip.ok_qty + f1_wip.rejected_qty):
+            remaining_inproc = max(wo.physical_wo_qty - (f1_wip.ok_qty + f1_wip.rejected_qty), 0)
+
+        if remaining_inproc <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Work Order '{wo.wo_number}' has no remaining in-process material at F1 (all {wo.physical_wo_qty} planned pieces are accounted for)."
+            )
+
+        if req.shortfall_qty > remaining_inproc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Requested shortfall ({req.shortfall_qty} pcs) exceeds the remaining in-process quantity ({remaining_inproc} pcs) on {wo.wo_number}."
+            )
+
+        now = datetime.now()
+        orig_planned = wo.physical_wo_qty or 0
+        total_good_f1 = f1_wip.ok_qty
+        total_processed_f1 = f1_wip.ok_qty + f1_wip.rejected_qty
+
+        # 1. Close out F1 inproc balance for this Work Order
+        f1_wip.ent_qty = total_processed_f1
+        f1_wip.inproc_qty = 0
+        f1_wip.onhand_qty = total_good_f1
+        f1_wip.available_wip = total_good_f1
+
+        # 2. Adjust Work Order planned quantity and downstream stage targets to the actual good pieces produced
+        wo.physical_wo_qty = max(total_good_f1, 0)
+        wo.shortfall = "YES"
+        wo.shortfall_qty = (getattr(wo, "shortfall_qty", 0) or 0) + req.shortfall_qty
+        wo.shortfall_reason = req.reason.strip()
+
+        routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
+        for r in routes:
+            r.stage_target_qty = wo.physical_wo_qty
+
+        # Recompute existing WO
+        OMSIntegrationService.recompute_work_order(db, wo)
+
+        db.add(AuditLog(
+            user_id=current_user.id if current_user else None,
+            user_name=current_user.full_name if current_user else "Floor Operator",
+            action="F1_SHORTFALL_PRODUCTION",
+            entity="WorkOrder",
+            entity_id=wo.wo_number,
+            old_value=f"Planned Target: {orig_planned} pcs",
+            new_value=f"Declared Shortfall: {wo.physical_wo_qty} good pcs (-{req.shortfall_qty} pcs Shortfall)",
+            details=f"Reason: {req.reason} (Heat: {req.heat_number or wo.heat_number or 'N/A'})"
+        ))
+
+        # 3. If requested, automatically create New Patch Work Order for the shortfall quantity
+        patch_wo = None
+        if req.create_patch_wo and req.shortfall_qty > 0 and wo.order_id:
+            max_wo_num = 1000
+            for (existing_num,) in db.query(WorkOrder.wo_number).all():
+                if existing_num and existing_num.startswith("WO-") and existing_num[3:].isdigit():
+                    max_wo_num = max(max_wo_num, int(existing_num[3:]))
+            new_wo_num = f"WO-{max_wo_num + 1}"
+
+            patch_wo = WorkOrder(
+                wo_number=new_wo_num,
+                order_id=wo.order_id,
+                physical_wo_qty=req.shortfall_qty,
+                current_stage="F1",
+                projected_final_good=req.shortfall_qty,
+                shortfall="No",
+                status=WOStatus.IN_PRODUCTION,
+                source_wo_id=wo.id,
+                is_replacement=True,
+                replacement_reason=f"Shortfall Patch from {wo.wo_number}: {req.reason.strip()}",
+                heat_number=req.heat_number.strip() if req.heat_number else None,
+                released_by=current_user.full_name if current_user else "Floor Supervisor",
+                release_date=now,
+                engineering_released_by="Auto-Approved (Shortfall Patch)",
+                engineering_released_at=now,
+                manufacturing_released_by="Auto-Approved (Shortfall Patch)",
+                manufacturing_released_at=now,
+            )
+            db.add(patch_wo)
+            db.flush()
+
+            stage_names = [r.stage for r in routes] if routes else ["F1", "F2", "SP", "FI", "PACKING", "DISPATCH"]
+            targets = calculate_stage_targets(req.shortfall_qty, route=stage_names)
+            for seq, stg in enumerate(stage_names, start=1):
+                db.add(WORoute(
+                    work_order_id=patch_wo.id,
+                    stage=stg,
+                    sequence=seq,
+                    stage_target_qty=targets.get(stg, req.shortfall_qty),
+                    cumulative_ent_qty=req.shortfall_qty if seq == 1 else 0,
+                    cumulative_inproc_qty=req.shortfall_qty if seq == 1 else 0,
+                    stage_status="In-Progress" if seq == 1 else "Pending"
+                ))
+            db.add(StageWIP(
+                work_order_id=patch_wo.id,
+                stage="F1",
+                ent_qty=req.shortfall_qty,
+                ok_qty=0,
+                inproc_qty=req.shortfall_qty,
+                onhand_qty=0,
+                rejected_qty=0,
+                received_qty=req.shortfall_qty,
+                available_wip=req.shortfall_qty,
+                moved_out_qty=0
+            ))
+            OMSIntegrationService.recompute_work_order(db, patch_wo)
+
+            db.add(AuditLog(
+                user_id=current_user.id if current_user else None,
+                user_name=current_user.full_name if current_user else "Floor Operator",
+                action="SHORTFALL_PATCH_WO_CREATED",
+                entity="WorkOrder",
+                entity_id=patch_wo.wo_number,
+                old_value=f"Source WO: {wo.wo_number}",
+                new_value=f"New Patch WO: {patch_wo.wo_number} (Qty: {req.shortfall_qty} pcs)",
+                details=f"Spawned from shortfall declaration on {wo.wo_number}. Reason: {req.reason}"
+            ))
+
+        db.commit()
+
+        msg = f"Successfully declared {req.shortfall_qty} pcs shortfall on {wo.wo_number}."
+        if patch_wo:
+            msg += f" New Patch Work Order {patch_wo.wo_number} created for {req.shortfall_qty} pcs."
+
+        return DeclareShortfallResponse(
+            success=True,
+            wo_number=wo.wo_number,
+            original_qty=orig_planned,
+            new_physical_wo_qty=wo.physical_wo_qty,
+            shortfall_qty=req.shortfall_qty,
+            reason=req.reason,
+            patch_wo_id=str(patch_wo.id) if patch_wo else None,
+            patch_wo_number=patch_wo.wo_number if patch_wo else None,
+            patch_wo_qty=patch_wo.physical_wo_qty if patch_wo else None,
+            message=msg
         )

@@ -1,31 +1,51 @@
-"""Department -> shop-floor stage resolution, and stage-scoped posting.
+"""Stage roles: which shop-floor stage a stage Supervisor / Manager may post at, and the
+conversion of old generic roles (Operator, Machine Operator, Packing, Dispatch) to
+stage roles by department.
 
-A user's `department` is free text set on the Users screen (e.g. "F1 Foundry",
-"Subcontracting (SP)", "Packing / BSR"). The frontend uses the same matching rules in
-frontend/lib/workspaces.ts to choose which screens a user sees; the backend uses it here
-for one thing only: limiting *floor-level* roles to posting at their own stage.
-
-Who is stage-locked (STAGE_LOCKED_ROLES):
-  - SUPERVISOR, MACHINE_OPERATOR, OPERATOR -- only when their department names a stage.
-    A blank / non-stage department (e.g. "Manufacturing Operations") leaves them
-    unrestricted, exactly as before this change.
-  - PACKING -- always limited to the Packing / BSR stages, whatever the department.
-Admin, Production Manager and Store are never stage-locked.
+Backend stage lock (assert_user_may_post_at) applies ONLY to the stage roles
+(F1_SUPERVISOR ... PACKING_MANAGER): the stage is part of the role, so they can only
+record production / move material out of their own stage. A user who also holds a
+non-stage role (e.g. secondary_role = PRODUCTION_MANAGER) is not locked. Old roles keep
+today's behaviour (the frontend's userStage.ts hint only) until an admin converts them.
 """
 import re
-from typing import Optional
+from typing import FrozenSet, Optional
 
 from fastapi import HTTPException, status
 
 from app.models.user import User, UserRole
 
-PACKING_STAGE_ALIASES = {"PACKING", "BSR", "PACKING/BSR", "PACKING / BSR"}
+PACKING_STAGE_ALIASES = {"PACKING", "PACKING/BSR", "PACKING / BSR"}
 
-STAGE_LOCKED_ROLES = (UserRole.SUPERVISOR, UserRole.MACHINE_OPERATOR, UserRole.OPERATOR)
+# Stage(s) each stage role may post at. Packing covers the BSR hand-off too.
+STAGES_OF_ROLE = {
+    UserRole.F1_SUPERVISOR: frozenset({"F1"}), UserRole.F1_MANAGER: frozenset({"F1"}),
+    UserRole.F2_SUPERVISOR: frozenset({"F2"}), UserRole.F2_MANAGER: frozenset({"F2"}),
+    UserRole.F3_SUPERVISOR: frozenset({"F3"}), UserRole.F3_MANAGER: frozenset({"F3"}),
+    UserRole.SP_SUPERVISOR: frozenset({"SP"}), UserRole.SP_MANAGER: frozenset({"SP"}),
+    UserRole.FI_SUPERVISOR: frozenset({"FI"}), UserRole.FI_MANAGER: frozenset({"FI"}),
+    UserRole.PACKING_SUPERVISOR: frozenset({"PACKING", "BSR"}),
+    UserRole.PACKING_MANAGER: frozenset({"PACKING", "BSR"}),
+    UserRole.DISPATCH_SUPERVISOR: frozenset({"DISPATCH"}),
+    UserRole.DISPATCH_MANAGER: frozenset({"DISPATCH"}),
+}
+# Primary stage per role (used for labels and plan-date ownership).
+STAGE_OF_ROLE = {
+    r: ("PACKING" if "PACKING" in st else next(iter(st))) for r, st in STAGES_OF_ROLE.items()
+}
+
+_SUPERVISOR_FOR_STAGE = {
+    "F1": UserRole.F1_SUPERVISOR, "F2": UserRole.F2_SUPERVISOR, "F3": UserRole.F3_SUPERVISOR,
+    "SP": UserRole.SP_SUPERVISOR, "FI": UserRole.FI_SUPERVISOR, "PACKING": UserRole.PACKING_SUPERVISOR,
+}
+# Retired roles: still valid so existing accounts keep working, but no longer offered;
+# the Users screen flags them for an admin to reassign. MANUFACTURING is retired too --
+# Manufacturing Release remains available to Production Manager, Planner, Admin and CEO.
+LEGACY_ROLES = (UserRole.OPERATOR, UserRole.MACHINE_OPERATOR, UserRole.PACKING, UserRole.DISPATCH, UserRole.MANUFACTURING)
 
 
 def department_stage(department: Optional[str]) -> Optional[str]:
-    """The stage a department works at ("F1".."FI", "PACKING"), or None."""
+    """The stage a free-text department names ("F1".."FI", "PACKING"), or None."""
     if not department:
         return None
     d = department.upper()
@@ -45,28 +65,44 @@ def department_stage(department: Optional[str]) -> Optional[str]:
     return None
 
 
+def convert_legacy_role(role: UserRole, department: Optional[str]) -> Optional[UserRole]:
+    """Stage role an old-role account should become, or None if its stage can't be
+    worked out (it stays on its old role, flagged for an admin).
+
+    Operator / Machine Operator -> <stage> Supervisor by department. Packing -> Packing
+    Supervisor; Dispatch -> Dispatch Supervisor (same rights the old role had)."""
+    if role == UserRole.PACKING:
+        return UserRole.PACKING_SUPERVISOR
+    if role == UserRole.DISPATCH:
+        return UserRole.DISPATCH_SUPERVISOR
+    if role in (UserRole.OPERATOR, UserRole.MACHINE_OPERATOR):
+        return _SUPERVISOR_FOR_STAGE.get(department_stage(department))
+    return None
+
+
 def normalize_stage(stage: Optional[str]) -> str:
     s = (stage or "").strip().upper()
     return "PACKING" if s in PACKING_STAGE_ALIASES else s
 
 
-def allowed_stage_for(user: User) -> Optional[str]:
-    """The single stage this user may post at, or None if unrestricted."""
-    if user.role == UserRole.PACKING:
-        return "PACKING"
-    if user.role in STAGE_LOCKED_ROLES:
-        return department_stage(user.department)
-    return None
+def allowed_stages_for(user: User) -> Optional[FrozenSet[str]]:
+    """Stages this user may post at, or None if unrestricted. Locked only when every
+    role the user holds (primary + secondary) is a stage role."""
+    roles = [r for r in (user.role, getattr(user, "secondary_role", None)) if r is not None]
+    if not roles or any(r not in STAGES_OF_ROLE for r in roles):
+        return None
+    allowed: set = set()
+    for r in roles:
+        allowed |= STAGES_OF_ROLE[r]
+    return frozenset(allowed)
 
 
 def assert_user_may_post_at(user: User, stage: Optional[str], action: str) -> None:
-    """403 if a stage-locked user tries to record production / move material at a
-    stage other than their own."""
-    allowed = allowed_stage_for(user)
+    allowed = allowed_stages_for(user)
     if allowed is None:
         return
-    if normalize_stage(stage) != allowed:
-        label = "Packing / BSR" if allowed == "PACKING" else allowed
+    if normalize_stage(stage) not in allowed:
+        label = " / ".join(sorted(allowed))
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"You can only {action} at your own stage ({label}), not at '{stage}'.",

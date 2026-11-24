@@ -10,10 +10,108 @@ from app.models.production_movement import ProductionMovement, StageWIP
 from app.models.packing import PackingRecord
 from app.models.dispatch import Dispatch
 from app.models.nc import NCRecord
+from app.models.rejection_type import RejectionType
+from app.models.machine import Machine
+from app.models.shift import Shift
+from app.models.operator import Operator
 from app.services.oms_integration_service import calculate_stage_targets
 
 def _is_production() -> bool:
-    return settings.ENVIRONMENT.lower() == "production"
+    if os.environ.get("K_SERVICE") or os.environ.get("CLOUD_RUN_JOB") or (os.environ.get("PORT") and "cloudsql" in (os.environ.get("DATABASE_URL") or "")):
+        return True
+    return (settings.ENVIRONMENT or "").lower() == "production"
+
+# The same defect codes already used historically across this codebase (the demo
+# NC records seeded below, and the legacy hardcoded frontend dropdown they came
+# from) -- seeding these as the initial Rejection Type master rows means
+# Production Entry's mandatory validation gate (see
+# rejection_service.validate_active_rejection_type) never blocks on an empty,
+# unconfigured master. Quality can still add/edit/deactivate types afterward;
+# this only guarantees a safe, working starting set.
+_DEFAULT_REJECTION_TYPES = [
+    ("DEF-POROSITY", "Porosity", "Gas/shrinkage cavity"),
+    ("DEF-DIM-OUT", "Dimensional Out of Spec", "Dimensional out of specification"),
+    ("DEF-SURFACE", "Surface Defect", "Surface roughness/blemish"),
+    ("DEF-CRACK", "Crack", "Thermal/handling crack"),
+    ("DEF-HARDNESS", "Hardness Mismatch", "Hardness out of spec"),
+    ("DEF-INCLUSION", "Inclusion", "Slag/sand particle inclusion"),
+    ("DEF-BLOWHOLE", "Blowhole", "Casting blowhole defect"),
+    ("DEF-CMM-OUT", "CMM Out of Tolerance", "Final inspection (CMM) dimensional failure"),
+    ("DEF-SURF-BLOW", "Surface Blow", "Surface blow defect"),
+]
+
+def _seed_default_rejection_types(db: Session) -> None:
+    """Additive/idempotent: a no-op the moment any RejectionType row exists (so
+    Quality's own edits/additions/deactivations are never touched or reset).
+    Runs in EVERY environment, including production -- unlike the demo Users/
+    Orders/WorkOrders seeded below, this is real master data every deployment
+    needs for Production Entry's rejection validation to function at all, not a
+    dev/UAT-only convenience."""
+    if db.query(RejectionType).first():
+        return
+    for code, name, description in _DEFAULT_REJECTION_TYPES:
+        db.add(RejectionType(
+            code=code, name=name, description=description, is_active=True,
+            created_by="system:seed", updated_by="system:seed",
+        ))
+    db.flush()
+
+_DEFAULT_MACHINES = [
+    ("M-CC01", "CC Machine 01 (Foundry F1)", "Foundry"),
+    ("M-CC02", "CC Machine 02 (Foundry F1)", "Foundry"),
+    ("M-CNC01", "CNC Lathe 01 (Rough Machining F2)", "Rough Machining"),
+    ("M-CNC02", "CNC Lathe 02 (Rough Machining F2)", "Rough Machining"),
+    ("M-VMC01", "VMC Milling 01 (Finish Machining F3)", "Finish Machining"),
+    ("M-VMC02", "VMC Milling 02 (Finish Machining F3)", "Finish Machining"),
+    ("M-SP01", "Special Process Cell 01 (SP)", "Special Process"),
+    ("M-FI01", "Final Inspection Bench 01 (FI)", "Final Inspection"),
+    ("M-PACK01", "Packing Station 01", "Packing"),
+    ("M-BSR01", "Bonded Store Bay 01", "Stores"),
+]
+
+def _seed_default_machines(db: Session) -> None:
+    if db.query(Machine).first():
+        return
+    for code, name, dept in _DEFAULT_MACHINES:
+        db.add(Machine(
+            machine_code=code, machine_name=name, department=dept, is_active=True,
+            created_by_name="system:seed",
+        ))
+    db.flush()
+
+_DEFAULT_SHIFTS = [
+    ("Shift A", "Shift A (06:00 - 14:00)", "06:00", "14:00"),
+    ("Shift B", "Shift B (14:00 - 22:00)", "14:00", "22:00"),
+    ("Shift C", "Shift C (22:00 - 06:00)", "22:00", "06:00"),
+]
+
+def _seed_default_shifts(db: Session) -> None:
+    if db.query(Shift).first():
+        return
+    for code, name, start, end in _DEFAULT_SHIFTS:
+        db.add(Shift(
+            shift_code=code, shift_name=name, start_time=start, end_time=end, is_active=True,
+            created_by_name="system:seed",
+        ))
+    db.flush()
+
+_DEFAULT_OPERATORS = [
+    ("OP-101", "Ramesh Kumar"),
+    ("OP-102", "Suresh Patil"),
+    ("OP-103", "Anand Sharma"),
+    ("OP-104", "Mahesh Verma"),
+    ("OP-105", "Dinesh Gowda"),
+]
+
+def _seed_default_operators(db: Session) -> None:
+    if db.query(Operator).first():
+        return
+    for code, name in _DEFAULT_OPERATORS:
+        db.add(Operator(
+            employee_code=code, display_name=name, is_active=True,
+            created_by_name="system:seed",
+        ))
+    db.flush()
 
 def _bootstrap_production_admin(db: Session) -> None:
     """In production, no demo user with a known password is ever created. The only
@@ -40,6 +138,13 @@ def _bootstrap_production_admin(db: Session) -> None:
     db.flush()
 
 def seed_database_if_empty(db: Session):
+    # Runs first, in every environment: real master data (see docstring above),
+    # not a demo/UAT convenience like everything else in this function.
+    _seed_default_rejection_types(db)
+    _seed_default_machines(db)
+    _seed_default_shifts(db)
+    _seed_default_operators(db)
+
     if _is_production():
         # Production never auto-creates demo/seed accounts with known passwords.
         _bootstrap_production_admin(db)
@@ -82,10 +187,33 @@ def seed_database_if_empty(db: Session):
                 is_active=True
             )
             db.add(u)
+
+    # Stage Supervisor / Manager demo accounts (one pair per stage) plus Accounts --
+    # development/UAT only, same gate as above. Password: stage123 (hashed once).
+    stage_demo = [
+        ("f1", "F1", "F1 Foundry"), ("f2", "F2", "F2"), ("f3", "F3", "F3"),
+        ("sp", "SP", "Subcontracting (SP)"), ("fi", "FI", "FI Final Inspection"),
+        ("packing", "Packing", "Packing / BSR"), ("dispatch", "Dispatch", "Dispatch"),
+    ]
+    extra_users = [
+        (f"{key}.{level}@vspl.com", f"{label} {level.title()}", UserRole(f"{key}_{level}"), dept, f"{key.upper()}-{level[:3].upper()}")
+        for key, label, dept in stage_demo for level in ("supervisor", "manager")
+    ] + [
+        ("accounts@vspl.com", "Accounts Desk", UserRole.ACCOUNTS, "Accounts", "ACC-001"),
+        ("sales@vspl.com", "Sales Desk", UserRole.SALES, "Sales", "SLS-001"),
+        ("engineering@vspl.com", "Engineering Desk", UserRole.ENGINEERING, "Engineering", "ENG-001"),
+    ]
+    missing = [u for u in extra_users if not db.query(User).filter(User.email == u[0]).first()]
+    stage_hash = get_password_hash("stage123") if missing else None
+    for email, name, role, dept, emp_id in missing:
+        db.add(User(
+            email=email, hashed_password=stage_hash, full_name=name,
+            role=role, employee_id=emp_id, department=dept, is_active=True,
+        ))
     db.flush()
 
     # Check if orders already seeded
-    if db.query(WorkOrder).first():
+    if db.query(Customer).first() or db.query(Order).first() or db.query(WorkOrder).first():
         db.commit()
         return
 

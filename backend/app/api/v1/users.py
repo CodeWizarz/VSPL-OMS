@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.schemas.auth import AdminUserCreate, AdminUserUpdate, TempPasswordResult, UserOut, SetActiveRequest
+from app.schemas.auth import AdminUserCreate, AdminUserUpdate, TempPasswordResult, UserOut, SetActiveRequest, UserDeleteResponse
 from app.services.user_admin_service import UserAdminService
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
@@ -15,6 +15,19 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(get_current_u
     """Admin-only user directory. Never returns hashed_password -- UserOut has no such
     field."""
     return UserAdminService.list_users(db, current_user=user)
+
+
+@router.get("/legacy-roles")
+def legacy_roles_preview(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Admin preview of accounts on old roles (Operator, Machine Operator, Packing,
+    Dispatch) and the stage role each would be converted to."""
+    return UserAdminService.legacy_role_plan(db, current_user=user)
+
+
+@router.post("/convert-legacy-roles")
+def convert_legacy_roles(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Admin: convert every old-role account whose stage is known. Audit-logged."""
+    return UserAdminService.convert_legacy_roles(db, current_user=user)
 
 
 @router.post("", response_model=TempPasswordResult)
@@ -37,6 +50,16 @@ def reset_password(
     return UserAdminService.reset_password(db, user_id, current_user=user)
 
 
+@router.patch("/{user_id}", response_model=UserOut)
+def update_user_profile(
+    user_id: str,
+    payload: AdminUserUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return UserAdminService.update_user(db, user_id, payload, current_user=user)
+
+
 @router.patch("/{user_id}/status", response_model=UserOut)
 def set_status(
     user_id: str,
@@ -47,13 +70,11 @@ def set_status(
     return UserAdminService.set_active(db, user_id, payload.is_active, current_user=user)
 
 
-@router.patch("/{user_id}", response_model=UserOut)
-def update_user(
+@router.delete("/{user_id}", response_model=UserDeleteResponse)
+def delete_user(
     user_id: str,
-    payload: AdminUserUpdate,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Admin-only edit of an existing account's name, department and role. Every
-    change is audit-logged with its before -> after values."""
-    return UserAdminService.update_user(db, user_id, payload, current_user=user)
+    return UserAdminService.delete_user(db, user_id, current_user=user)
+

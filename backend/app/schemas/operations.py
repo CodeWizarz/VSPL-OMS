@@ -8,12 +8,14 @@ class OrderIntakeCreate(BaseModel):
     customer_name: str = Field(..., max_length=300)
     customer_po: str = Field(..., max_length=200)
     part_number: str = Field(..., max_length=100)
+    customer_part_number: Optional[str] = Field(None, max_length=200)
     grade: Optional[str] = Field("Standard", max_length=100)
     part_description: Optional[str] = Field("", max_length=1000)
     po_quantity: int = Field(..., gt=0, le=1_000_000)
-    max_batch_size: int = Field(..., gt=0, le=1_000_000)
+    max_batch_size: Optional[int] = Field(None, gt=0, le=1_000_000)
     delivery_date: Optional[date] = None
-    order_type: Optional[str] = Field("Standard", max_length=100)
+    commitment_date: Optional[date] = None
+    order_type: Optional[str] = Field("Production", max_length=100, description="'Production' or 'NPD'")
     status: OrderStatus = OrderStatus.ACCEPT
     remarks: Optional[str] = Field(None, max_length=2000)
     wo_quantities: Optional[List[int]] = Field(
@@ -25,6 +27,10 @@ class OrderIntakeCreate(BaseModel):
             "the existing automatic max_batch_size-driven split (unchanged behavior)."
         ),
     )
+    # Optional manual OAR number (e.g. OAR-8326 or 8326). When omitted, auto-generated.
+    oar_number: Optional[str] = Field(None, max_length=100)
+    # When False (default for Sales workflow), creates only the OAR and leaves WO generation to Planning.
+    create_wos: bool = Field(False, description="When False, creates OAR only. Planner generates WOs in step 2.")
     # Demand-source linkage -- all optional, all default to the pre-existing behavior
     # (a plain PO-sourced OAR) when omitted, so every existing caller is unaffected.
     source_type: Optional[str] = Field("po", description="'po' or 'schedule'.")
@@ -35,17 +41,120 @@ class OrderIntakeResponse(BaseModel):
     success: bool
     oar_number: str
     order_id: str
-    wos_created: List[str]
+    wos_created: List[str] = []
     wo_quantities: List[int] = []
     total_qty: int
     source_type: str = "po"
     oar_po_status: Optional[str] = None
+    order_type: str = "Production"
     message: str
+
+class OARUpdate(BaseModel):
+    oar_qty: Optional[int] = Field(None, gt=0, description="Update OAR quantity and sync with linked Customer PO line")
+    commitment_date: Optional[date] = None
+    revised_commitment_date: Optional[date] = None
+    revision_reason: Optional[str] = None
+    delivery_date: Optional[date] = None
+    customer_part_number: Optional[str] = None
+    status: Optional[str] = Field(None, description="'accept', 'hold', or 'reject'")
+    order_type: Optional[str] = Field(None, description="'Production' or 'NPD'")
+    remarks: Optional[str] = Field(None, max_length=2000)
+
+class WorkOrderCreatePayload(BaseModel):
+    oar_number: str = Field(..., max_length=100)
+    wo_number: Optional[str] = Field(None, max_length=100, description="Optional manual WO number (e.g. WO-17617 or WO 16772). If omitted, auto-generated.")
+    physical_wo_qty: int = Field(..., gt=0, le=1_000_000)
+    wo_quantities: Optional[List[int]] = Field(None, description="Optional split quantities into multiple Work Orders")
+    allow_overrun: bool = Field(False, description="Allow generating Work Order(s) even if quantity exceeds remaining OAR balance")
+    classification: Optional[str] = Field(None, max_length=50, description="'Production' or 'NPD'. If omitted, inherited from OAR.")
+    wo_date: Optional[date] = None
+    target_date: Optional[date] = None
+    casting_process: Optional[str] = Field("CENTRIFUGAL", max_length=50)
+    heat_number: Optional[str] = Field(None, max_length=100)
+    route_stages: Optional[List[str]] = Field(None, description="Optional custom stages e.g. ['F1', 'F2', 'F3', 'SP', 'FI', 'PACKING', 'DISPATCH']")
+    remarks: Optional[str] = Field(None, max_length=2000)
+
+class MergedOARItem(BaseModel):
+    oar_number: str = Field(..., max_length=100)
+    qty: int = Field(..., gt=0, le=1_000_000)
+
+
+class MergedWorkOrderCreatePayload(BaseModel):
+    oar_allocations: List[MergedOARItem] = Field(..., min_length=2)
+    wo_number: Optional[str] = Field(None, max_length=100)
+    allow_overrun: bool = False
+    classification: Optional[str] = Field(None, max_length=50)
+    wo_date: Optional[date] = None
+    target_date: Optional[date] = None
+    casting_process: Optional[str] = Field("CENTRIFUGAL", max_length=50)
+    heat_number: Optional[str] = Field(None, max_length=100)
+    route_stages: Optional[List[str]] = Field(None)
+    remarks: Optional[str] = Field(None, max_length=2000)
+
+
+class WorkOrderUpdatePayload(BaseModel):
+    wo_number: Optional[str] = Field(None, max_length=100, description="New Work Order ID")
+    physical_wo_qty: Optional[int] = Field(None, gt=0, le=1_000_000, description="Updated quantity")
+    wo_date: Optional[date] = None
+    target_date: Optional[date] = None
+    casting_process: Optional[str] = Field(None, max_length=50)
+    heat_number: Optional[str] = Field(None, max_length=100)
+    route_stages: Optional[List[str]] = Field(None, description="Optional updated custom stages")
+    remarks: Optional[str] = Field(None, max_length=2000)
+    allow_overrun: bool = Field(False, description="Allow quantity above parent OAR balance")
+
+class WorkOrderCreateResponse(BaseModel):
+    success: bool
+    wo_number: str
+    wos_created: List[str] = []
+    wo_quantities: List[int] = []
+    order_id: str
+    oar_number: str
+    customer_code: str
+    part_number: str
+    physical_wo_qty: int
+    current_stage: str = "F1"
+    status: str
+    release_status: str
+    created_at: datetime
+    message: str
+    merged_oars: List[dict] = []
+
+class NextSequencesResponse(BaseModel):
+    next_oar_number: str
+    next_wo_number: str
+
+class MovableWorkOrderItem(BaseModel):
+    wo_id: str
+    wo_number: str
+    oar_number: Optional[str] = None
+    customer_code: str
+    customer_name: str
+    part_number: str
+    part_name: Optional[str] = None
+    from_stage: str
+    to_stage: Optional[str] = None
+    movable_wip: int
+    current_stage: str
+    heat_number: Optional[str] = None
+    delivery_date: Optional[date] = None
+    created_at: Optional[datetime] = None
+    priority_rank: int = 1
 
 class WOReleaseCreate(BaseModel):
     wo_number: str
     physical_wo_qty: int = Field(..., gt=0, le=1_000_000)
     route_stages: List[str] = Field(..., max_length=50, description="Ordered list of stages e.g. ['F1', 'F2', 'F3', 'SP', 'FI', 'PACKING', 'DISPATCH']")
+    casting_process: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Required when F1 stage is selected: 'CENTRIFUGAL' (Centrifugal Casting / Melt) or 'CONTINUOUS' (Continuous Casting)."
+    )
+    heat_number: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Heat number / cast batch from which parts are produced"
+    )
     remarks: Optional[str] = Field(None, max_length=2000)
 
 class StagePlanEdit(BaseModel):
@@ -77,7 +186,37 @@ class WOReleaseResponse(BaseModel):
     wo_number: str
     released_qty: int
     route: str
+    casting_process: Optional[str] = None
+    heat_number: Optional[str] = None
     stage_targets: dict[str, int]
+    message: str
+
+class ReleaseEvidenceCreate(BaseModel):
+    document_name: Optional[str] = Field(None, max_length=255)
+    document_url: Optional[str] = Field(None, max_length=1000)
+    document_revision: Optional[str] = Field(None, max_length=50)
+    remarks: Optional[str] = Field(None, max_length=2000)
+
+class EngineeringReleaseResponse(BaseModel):
+    success: bool
+    wo_number: str
+    engineering_released_by: str
+    engineering_released_at: datetime
+    engineering_document_name: Optional[str] = None
+    engineering_document_url: Optional[str] = None
+    engineering_document_revision: Optional[str] = None
+    engineering_remarks: Optional[str] = None
+    message: str
+
+class ManufacturingReleaseResponse(BaseModel):
+    success: bool
+    wo_number: str
+    manufacturing_released_by: str
+    manufacturing_released_at: datetime
+    manufacturing_document_name: Optional[str] = None
+    manufacturing_document_url: Optional[str] = None
+    manufacturing_document_revision: Optional[str] = None
+    manufacturing_remarks: Optional[str] = None
     message: str
 
 class ConversionCreate(BaseModel):

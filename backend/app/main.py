@@ -9,11 +9,13 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.core.config import settings
 from app.core.database import engine, Base, SessionLocal, auto_migrate_schema, LIFESPAN_STATUS
 from app.core.rate_limit import limiter
+from app.core.activity_log import ActivityLogMiddleware
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.api.v1 import (
     auth, oms, production, work_orders, packing,
     dispatch, operations, dashboard, reports, ai, admin, analytics, rejection,
-    conversion_mapping, users, migration, masters, po_matching, accounts, subcontract
+    conversion_mapping, users, migration, masters, po_matching, roles, continuous_casting,
+    mrb, vendor, bsr_stock, planning, activity_log, accounts, subcontract
 )
 from app.services.seed_service import seed_database_if_empty
 
@@ -56,6 +58,8 @@ def _json_safe(obj):
     Pydantic correctly rejects but Python's spec-compliant JSON encoder cannot
     serialize -- with their string form, so echoing a rejected value back to the
     client in a validation-error body can never itself crash the response."""
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
     if isinstance(obj, float) and not math.isfinite(obj):
         return str(obj)
     if isinstance(obj, dict):
@@ -74,6 +78,8 @@ def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=422, content={"detail": _json_safe(exc.errors())})
 
 
+# Who-did-what log for every create/update/delete request (observes only; see module).
+app.add_middleware(ActivityLogMiddleware)
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -104,6 +110,13 @@ app.include_router(users.router)
 app.include_router(migration.router)  # TEMPORARY -- see app/api/v1/migration.py; remove after use
 app.include_router(masters.router)
 app.include_router(po_matching.router)
+app.include_router(roles.router)
+app.include_router(continuous_casting.router)
+app.include_router(mrb.router)
+app.include_router(vendor.router)
+app.include_router(bsr_stock.router)
+app.include_router(planning.router)
+app.include_router(activity_log.router)
 app.include_router(accounts.router)
 app.include_router(subcontract.router)
 

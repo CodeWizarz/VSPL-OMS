@@ -42,18 +42,36 @@ def _auth(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-def _unique_code(prefix="CUST"):
+def _unique_code(prefix="BRZ"):
     return f"{prefix}-{uuid.uuid4().hex[:8].upper()}"
 
 
-def _create_customer(client, headers, code=None):
+def _create_customer(client, headers, code=None, part_numbers=("BRZ-BUSH-100", "BRZ-RING-250")):
     code = code or _unique_code()
     resp = client.post(
         "/api/v1/masters/customers", headers=headers,
         json={"customer_code": code, "name": f"Test Customer {code}", "email": "buyer@example.com"},
     )
     assert resp.status_code == 200, resp.text
-    return resp.json()
+    cust_data = resp.json()
+
+    from app.core.database import SessionLocal
+    from app.models.customer_part_mapping import CustomerPartMapping
+    from app.models.order import Part, Customer
+    db = SessionLocal()
+    try:
+        c = db.query(Customer).filter(Customer.customer_code == code).first()
+        if c:
+            for pn in part_numbers:
+                p = db.query(Part).filter(Part.part_number == pn).first()
+                if p:
+                    m = db.query(CustomerPartMapping).filter(CustomerPartMapping.customer_id == c.id, CustomerPartMapping.part_id == p.id).first()
+                    if not m:
+                        db.add(CustomerPartMapping(customer_id=c.id, part_id=p.id, customer_part_number=f"CPN-{pn}", status="Active"))
+            db.commit()
+    finally:
+        db.close()
+    return cust_data
 
 
 def _create_schedule(client, headers, customer_code, part_number="BRZ-BUSH-100", qty=500, ref=None):
@@ -361,7 +379,7 @@ def test_existing_plain_oar_to_wo_workflow_unchanged(client):
         json={
             "customer_code": "CUST-VALVE", "customer_name": "Flowserve Sanmar Ltd",
             "customer_po": f"PO-PLAIN-{uuid.uuid4().hex[:8]}", "part_number": "BRZ-BUSH-100",
-            "po_quantity": 100, "max_batch_size": 100,
+            "po_quantity": 100, "max_batch_size": 100, "create_wos": True,
         },
     )
     assert resp.status_code == 200, resp.text
@@ -379,3 +397,141 @@ def test_non_planning_role_cannot_manage_masters_or_matching(client):
     assert client.post("/api/v1/masters/schedules", headers=headers, json={
         "customer_code": "CUST-VALVE", "part_number": "BRZ-BUSH-100", "scheduled_qty": 10,
     }).status_code == 403
+
+
+def test_po_unit_price_and_total_value_calculation(client):
+    headers = _auth(_login(client))
+    customer = _create_customer(client, headers)
+    po_num = f"PO-VAL-{uuid.uuid4().hex[:6].upper()}"
+
+    # Create PO with unit prices
+    resp = client.post(
+        "/api/v1/masters/pos",
+        headers=headers,
+        json={
+            "customer_code": customer["customer_code"],
+            "po_number": po_num,
+            "lines": [
+                {
+                    "customer_part_number": "CUST-PART-A",
+                    "po_qty": 200,
+                    "unit_price": 45.50,
+                },
+                {
+                    "customer_part_number": "CUST-PART-B",
+                    "po_qty": 100,
+                    "unit_price": 120.00,
+                },
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    # 200 * 45.50 = 9100.00
+    # 100 * 120.00 = 12000.00
+    # Total PO value = 21100.00
+    line_a = [l for l in data["lines"] if l["customer_part_number"] == "CUST-PART-A"][0]
+    line_b = [l for l in data["lines"] if l["customer_part_number"] == "CUST-PART-B"][0]
+
+    assert line_a["unit_price"] == 45.50
+    assert line_a["line_total"] == 9100.00
+    assert line_b["unit_price"] == 120.00
+    assert line_b["line_total"] == 12000.00
+    assert data["total_value"] == 21100.00
+    assert data["total_qty"] == 300
+
+    # Update line quantity and price
+    po_id = data["id"]
+    update_resp = client.put(
+        f"/api/v1/masters/pos/{po_id}",
+        headers=headers,
+        json={
+            "lines": [
+                {
+                    "id": line_a["id"],
+                    "customer_part_number": "CUST-PART-A",
+                    "po_qty": 300,
+                    "unit_price": 50.00,
+                },
+                {
+                    "id": line_b["id"],
+                    "customer_part_number": "CUST-PART-B",
+                    "po_qty": 100,
+                    "unit_price": 120.00,
+                },
+            ],
+        },
+    )
+    assert update_resp.status_code == 200, update_resp.text
+    upd_data = update_resp.json()
+    # 300 * 50 = 15000 + 12000 = 27000
+    assert upd_data["total_value"] == 27000.00
+    assert upd_data["total_qty"] == 400
+
+
+def test_schedule_unit_price_and_total_value_calculation(client):
+    headers = _auth(_login(client))
+    customer = _create_customer(client, headers)
+
+    resp = client.post(
+        "/api/v1/masters/schedules",
+        headers=headers,
+        json={
+            "customer_code": customer["customer_code"],
+            "part_number": "BRZ-BUSH-100",
+            "scheduled_qty": 250,
+            "unit_price": 75.00,
+            "customer_schedule_ref": "SCH-REF-01",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    # 250 * 75.00 = 18750.00
+    assert data["scheduled_qty"] == 250
+    assert data["unit_price"] == 75.00
+    assert data["total_value"] == 18750.00
+
+
+def test_schedule_update_price_and_details(client):
+    headers = _auth(_login(client))
+    customer = _create_customer(client, headers)
+
+    # 1. Create a schedule without price (legacy schedule like SCH-00001)
+    resp = client.post(
+        "/api/v1/masters/schedules",
+        headers=headers,
+        json={
+            "customer_code": customer["customer_code"],
+            "part_number": "BRZ-BUSH-100",
+            "scheduled_qty": 500,
+            "unit_price": 0.0,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    created = resp.json()
+    schedule_id = created["id"]
+    assert created["unit_price"] == 0.0
+    assert created["total_value"] == 0.0
+
+    # 2. Update price and details via PUT endpoint
+    upd_resp = client.put(
+        f"/api/v1/masters/schedules/{schedule_id}",
+        headers=headers,
+        json={
+            "unit_price": 250.00,
+            "scheduled_qty": 500,
+        },
+    )
+    assert upd_resp.status_code == 200, upd_resp.text
+    updated = upd_resp.json()
+    # 500 * 250.00 = 125000.00
+    assert updated["unit_price"] == 250.00
+    assert updated["total_value"] == 125000.00
+
+    # 3. Delete schedule
+    del_resp = client.delete(f"/api/v1/masters/schedules/{schedule_id}", headers=headers)
+    assert del_resp.status_code == 200, del_resp.text
+
+

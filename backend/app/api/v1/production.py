@@ -1,14 +1,17 @@
+from app.core.gate_scope import deny_if_supervisor, require_own_stage, require_wo_at_gate, supervisor_gate
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.deps import get_current_user, require_roles
 from app.models.user import User
-from app.models.production_movement import ProductionMovement
+from app.models.production_movement import ProductionMovement, StageWIP
+from app.models.work_order import WORoute
 from app.schemas.production import (
     MovePartsRequest, MovementResponse, MovementListItem,
     RecordStageProductionRequest, ProductionEntryResponse,
-    WIPMatrixResponse, PlantReconciliationResponse
+    WIPMatrixResponse, PlantReconciliationResponse, StageDashboard,
+    DeclareShortfallRequest, DeclareShortfallResponse
 )
 from app.services.production_service import ProductionService
 from app.services.work_order_service import WorkOrderService
@@ -27,6 +30,18 @@ def record_stage_production(
     """Record production completion (Good Qty & Rejection Qty) at a stage without immediately moving material."""
     assert_user_may_post_at(user, payload.stage, "record production")
     return ProductionService.record_stage_production(db, payload, current_user=user)
+
+@router.post("/wo/{wo_number}/declare-shortfall", response_model=DeclareShortfallResponse)
+def declare_wo_shortfall(
+    wo_number: str,
+    payload: DeclareShortfallRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PRODUCTION_ENTRY_ROLES))
+):
+    """Declares a shortfall on an active Work Order at stage F1 (Foundry),
+    closing out remaining in-process pieces, adjusting the WO planned target to
+    actual good pieces produced, and optionally creating a new Patch WO for the shortfall."""
+    return ProductionService.declare_shortfall(db=db, wo_identifier=wo_number, req=payload, current_user=user)
 
 @router.post("/move", response_model=MovementResponse)
 def move_parts(
@@ -48,6 +63,9 @@ def list_movements(
     user: User = Depends(get_current_user)
 ):
     """Retrieve immutable production movement ledger history."""
+    gate = supervisor_gate(user)
+    if gate:
+        stage = gate  # gate supervisors only see movements in/out of their gate
     query = db.query(ProductionMovement)
     if wo_number:
         query = query.join(ProductionMovement.work_order).filter(ProductionMovement.work_order.has(wo_number=wo_number.strip()))
@@ -59,6 +77,24 @@ def list_movements(
     for m in movs:
         wo = m.work_order
         part = wo.order.part if (wo and wo.order) else None
+
+        # Live, deterministic context for the FROM stage -- same authoritative
+        # StageWIP/WORoute rows every other screen reads from (no new engine).
+        good_qty = target_qty = wip_qty = yet_to_produce = available_to_move = None
+        if wo:
+            wip = db.query(StageWIP).filter(StageWIP.work_order_id == wo.id, StageWIP.stage == m.from_stage).first()
+            route_rec = db.query(WORoute).filter(WORoute.work_order_id == wo.id, WORoute.stage == m.from_stage).first()
+            if wip:
+                good_qty = wip.ok_qty
+                # WIP = physically-present-but-not-yet-produced material (inproc_qty)
+                # -- distinct from "Yet to Produce" below (see StageDashboard for the
+                # full rationale). Available-to-move (onhand_qty) is a separate figure.
+                wip_qty = wip.inproc_qty
+                available_to_move = wip.onhand_qty
+                target = route_rec.stage_target_qty if route_rec else wo.physical_wo_qty
+                target_qty = target
+                yet_to_produce = max(target - (wip.ok_qty + wip.rejected_qty), 0)
+
         results.append(MovementListItem(
             id=str(m.id),
             movement_id=m.movement_id,
@@ -76,11 +112,32 @@ def list_movements(
             shift=m.shift,
             movement_date=m.movement_date,
             movement_time=m.movement_time,
+            production_type=getattr(m, "production_type", "IN_HOUSE") or "IN_HOUSE",
+            vendor_name=getattr(m, "vendor_name", None),
+            dc_number=getattr(m, "dc_number", None),
+            heat_number=getattr(m, "heat_number", None),
             remarks=m.remarks,
             created_by_name=m.creator.full_name if m.creator else None,
-            created_at=m.created_at
+            created_at=m.created_at,
+            good_qty=good_qty, target_qty=target_qty, wip_qty=wip_qty,
+            yet_to_produce=yet_to_produce, available_to_move=available_to_move
         ))
     return results
+
+@router.get("/stage-summary", response_model=StageDashboard)
+def get_stage_summary(
+    wo_number: str = Query(..., description="Work Order Number e.g. WO-1001"),
+    stage: str = Query(..., description="Stage e.g. F1, F2, F3, SP, FI"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """The ONE unified production summary -- Target, Produced, Rejected, Good, WIP, Yet
+    to Produce, and Remaining Movable Qty for a WO/stage, deterministically reused from
+    the same authoritative StageWIP/WORoute rows Entry, Move, and Tracking all read
+    from. Not a second quantity engine."""
+    require_own_stage(user, stage)
+    require_wo_at_gate(db, user, wo_number)
+    return ProductionService.get_stage_dashboard(db, wo_number, stage)
 
 @router.get("/wip", response_model=WIPMatrixResponse)
 def get_wip_matrix(
@@ -88,6 +145,7 @@ def get_wip_matrix(
     user: User = Depends(get_current_user)
 ):
     """Retrieve live stage-wise Work In Progress (WIP) matrix across all active work orders with InProc and OnHand breakdown."""
+    deny_if_supervisor(user)
     return WorkOrderService.get_wip_matrix(db)
 
 @router.get("/reconciliation", response_model=PlantReconciliationResponse)
@@ -96,4 +154,5 @@ def get_plant_reconciliation(
     user: User = Depends(get_current_user)
 ):
     """Retrieve authoritative manufacturing reconciliation verifying Released Qty == WIP + Rejections + Dispatched."""
+    deny_if_supervisor(user)
     return OMSIntegrationService.reconcile_all_work_orders(db)

@@ -1,0 +1,1508 @@
+"use client";
+import React, { useState, useEffect, useRef } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import {
+  ArrowRightLeft,
+  Building2,
+  Truck,
+  Search,
+  QrCode,
+  CheckCircle2,
+  AlertTriangle,
+  Layers,
+  Factory,
+  UserCheck,
+  Clock,
+  ShieldCheck,
+  ShieldAlert,
+  Lock,
+  ChevronRight,
+  ClipboardList,
+  CheckSquare,
+  ArrowRight,
+  TrendingUp,
+  BrainCircuit,
+  Ban,
+  Flame,
+  RotateCcw
+} from "lucide-react";
+import { AppShell } from "@/app/components/layout/AppShell";
+import { Badge, getRAGVariant } from "@/app/components/ui/Badge";
+import { StageGateFilter } from "@/app/components/ui/StageGateFilter";
+import { resolveAssignedStage } from "@/lib/userStage";
+import { Modal } from "@/app/components/ui/Modal";
+import {
+  getWorkOrders,
+  getWorkOrderTracking,
+  getStageState,
+  moveParts,
+  predictDelay,
+  predictRejection,
+  getMovableWorkOrders,
+  MovableWorkOrderItem,
+  getMasterMachines,
+  getShifts,
+  getOperators,
+  batchApproveStageMRB,
+  MasterMachine,
+  MasterShift,
+  MasterOperator,
+  getCurrentUser,
+} from "@/lib/api";
+
+
+const MACHINES = [
+  { id: "M-CC01", name: "M-CC01 (Centrifugal Casting 1)", stage: "F1" },
+  { id: "M-CC02", name: "M-CC02 (Centrifugal Casting 2)", stage: "F1" },
+  { id: "M-LATHE-01", name: "M-LATHE-01 (CNC Heavy Lathe 01)", stage: "F2" },
+  { id: "M-LATHE-02", name: "M-LATHE-02 (CNC Precision Lathe 02)", stage: "F2" },
+  { id: "M-VMC-01", name: "M-VMC-01 (Vertical Machining Center)", stage: "F3" },
+  { id: "M-SUBCON-01", name: "M-SUBCON-01 (External Heat Treatment)", stage: "SP" },
+  { id: "M-INSPECT-01", name: "M-INSPECT-01 (CMM & Final Inspection Bay)", stage: "FI" },
+  { id: "M-PACK-01", name: "M-PACK-01 (Packaging & Banding Bay)", stage: "PACKING" },
+];
+
+export function MovePartsContent() {
+  const searchParams = useSearchParams();
+  const urlWO = searchParams?.get("wo");
+  const urlStage = searchParams?.get("stage");
+
+  const [searchTerm, setSearchTerm] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [woData, setWoData] = useState<any>(null);
+  const [selectedStageOverride, setSelectedStageOverride] = useState<string | null>(null);
+  const [stageState, setStageState] = useState<any>(null);
+  const [mlDelayPred, setMlDelayPred] = useState<any>(null);
+  const [mlRejPred, setMlRejPred] = useState<any>(null);
+  const [availableWOs, setAvailableWOs] = useState<any[]>([]);
+  const [searchError, setSearchError] = useState("");
+  const [movableWOs, setMovableWOs] = useState<MovableWorkOrderItem[]>([]);
+  const [loadingMovable, setLoadingMovable] = useState(false);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [activeGate, setActiveGate] = useState<string>("ALL");
+  const [isGateLocked, setIsGateLocked] = useState<boolean>(false);
+
+  // Form State
+  const [quantityToMove, setQuantityToMove] = useState<number | "">("");
+  const [selectedMachine, setSelectedMachine] = useState<string>("M-LATHE-01");
+  const [operatorName, setOperatorName] = useState("Ramesh Kumar (Logistics)");
+  const [shift, setShift] = useState("Shift A");
+  const [heatNumber, setHeatNumber] = useState("");
+  const [remarks, setRemarks] = useState("");
+  const [productionType, setProductionType] = useState<"IN_HOUSE" | "VENDOR">("IN_HOUSE");
+  const [vendorName, setVendorName] = useState("");
+  const [dcNumber, setDcNumber] = useState("");
+  const [machinesList, setMachinesList] = useState<MasterMachine[]>([]);
+  const [shiftsList, setShiftsList] = useState<MasterShift[]>([]);
+  const [operatorsList, setOperatorsList] = useState<MasterOperator[]>([]);
+
+  // Submission & Result Modal
+  const [submitting, setSubmitting] = useState(false);
+  const [resultData, setResultData] = useState<any>(null);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [showQRModal, setShowQRModal] = useState(false);
+  const [qrInput, setQrInput] = useState("");
+  const [formError, setFormError] = useState("");
+
+  // Tally-Style Keyboard Navigation Refs
+  const inputSearchRef = useRef<HTMLInputElement>(null);
+  const inputQtyRef = useRef<HTMLInputElement>(null);
+  const selectMachineRef = useRef<HTMLSelectElement>(null);
+  const selectShiftRef = useRef<HTMLSelectElement>(null);
+  const inputOperatorRef = useRef<HTMLInputElement>(null);
+  const inputRemarksRef = useRef<HTMLInputElement>(null);
+  const btnSubmitRef = useRef<HTMLButtonElement>(null);
+
+  const loadMovableWOs = async (targetGate: string = activeGate) => {
+    setLoadingMovable(true);
+    try {
+      const stageParam = targetGate && targetGate !== "ALL" ? targetGate : undefined;
+      const data = await getMovableWorkOrders(25, stageParam);
+      setMovableWOs(data);
+    } catch {
+      setMovableWOs([]);
+    } finally {
+      setLoadingMovable(false);
+    }
+  };
+
+  const handleSelectGate = (gate: string) => {
+    setActiveGate(gate);
+    loadMovableWOs(gate);
+  };
+
+  // Fetch quick selectable active WOs and movable queue from backend on load
+  const loadAvailableWOs = async () => {
+    try {
+      const data = await getWorkOrders({ limit: 50, exclude_dispatched: true });
+      if (Array.isArray(data) && data.length > 0) {
+        setAvailableWOs(data);
+        return data;
+      } else {
+        setAvailableWOs([]);
+        return [];
+      }
+    } catch (err) {
+      console.error("[MoveParts] Failed to load Work Orders from backend:", err);
+      return [];
+    }
+  };
+
+  useEffect(() => {
+    getCurrentUser()
+      .then((user) => {
+        setCurrentUser(user);
+        const resolved = resolveAssignedStage(user);
+        if (resolved.stage && resolved.isLocked) {
+          setActiveGate(resolved.stage);
+          setIsGateLocked(true);
+          loadMovableWOs(resolved.stage);
+        } else if (urlStage) {
+          setActiveGate(urlStage.toUpperCase());
+          loadMovableWOs(urlStage.toUpperCase());
+        } else {
+          loadMovableWOs("ALL");
+        }
+      })
+      .catch(() => {
+        loadMovableWOs("ALL");
+      });
+
+    loadAvailableWOs()
+      .then((data) => {
+        if (data && data.length > 0) {
+          const initialTarget = urlWO || (data.find((w: any) => !w.is_at_vendor) || data[0])?.wo_number;
+          lookupWO(initialTarget, urlStage || undefined);
+        } else if (urlWO) {
+          lookupWO(urlWO, urlStage || undefined);
+        }
+      });
+
+    getMasterMachines()
+      .then((data) => {
+        const active = data.filter((m) => m.is_active);
+        if (active.length > 0) {
+          setMachinesList(active);
+          setSelectedMachine(active[0].machine_code);
+        }
+      })
+      .catch(() => {});
+
+    getShifts()
+      .then((data) => {
+        const active = data.filter((s) => s.is_active);
+        if (active.length > 0) {
+          setShiftsList(active);
+          setShift(active[0].shift_name || active[0].shift_code);
+        }
+      })
+      .catch(() => {});
+
+    getOperators()
+      .then((data) => {
+        const active = data.filter((o) => o.is_active);
+        if (active.length > 0) {
+          setOperatorsList(active);
+          setOperatorName(active[0].display_name);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const machineOptions = machinesList.length > 0
+    ? machinesList.map((m) => ({ id: m.machine_code, name: `${m.machine_code} - ${m.machine_name}` }))
+    : MACHINES;
+
+  const shiftOptions = shiftsList.length > 0
+    ? shiftsList.map((s) => ({
+        code: s.shift_code,
+        label: s.start_time && s.end_time ? `${s.shift_name} (${s.start_time} - ${s.end_time})` : s.shift_name,
+        value: s.shift_name || s.shift_code,
+      }))
+    : [
+        { code: "A", label: "Shift A (06:00 - 14:00)", value: "Shift A" },
+        { code: "B", label: "Shift B (14:00 - 22:00)", value: "Shift B" },
+        { code: "C", label: "Shift C (22:00 - 06:00)", value: "Shift C" },
+      ];
+
+  const handleSelectMovable = (item: MovableWorkOrderItem) => {
+    setSelectedStageOverride(item.from_stage || null);
+    lookupWO(item.wo_number, item.from_stage);
+    setQuantityToMove(item.mrb_status === "PENDING_MRB" ? "" : item.movable_wip);
+    document.getElementById("move-form-section")?.scrollIntoView({ behavior: "smooth" });
+  };
+
+
+  const lookupWO = async (woNum: string, initialStage?: string) => {
+    if (!woNum || !woNum.trim()) return;
+    const targetWO = woNum.trim();
+
+    setSearchTerm(targetWO);
+    setLoading(true);
+    setSearchError("");
+    setFormError("");
+    setResultData(null);
+
+    try {
+      const data = await getWorkOrderTracking(targetWO);
+      if (data.status === "dispatched" || data.status === "closed" || data.current_stage === "Completed") {
+        setWoData(null);
+        setMlDelayPred(null);
+        setMlRejPred(null);
+        setSearchError(`Work Order '${targetWO}' is completely dispatched. Material movement is closed.`);
+        return;
+      }
+      setWoData(data);
+      setSearchTerm(data.wo_number);
+      setHeatNumber(data.heat_number || "");
+
+      // Movement quantity is always a fresh transaction amount, never prefilled with
+      // the available WIP -- an operator must enter what was actually physically moved.
+      setQuantityToMove("");
+
+      const effectiveStage = initialStage || data.movable_from_stage || data.current_stage;
+      setSelectedStageOverride(initialStage || null);
+
+      getStageState(targetWO, effectiveStage)
+        .then((s) => setStageState(s))
+        .catch(() => setStageState(null));
+
+      // Preset machine based on the actual movement destination
+      const stgIdx = data.timeline?.findIndex((s: any) => s.stage === effectiveStage);
+      const nextStg = (stgIdx >= 0 && stgIdx + 1 < (data.timeline?.length || 0))
+        ? data.timeline[stgIdx + 1].stage
+        : (data.movable_to_stage || data.next_allowed_stage);
+      const matchingMach = MACHINES.find((m) => m.stage === nextStg || m.stage === effectiveStage);
+      if (matchingMach) setSelectedMachine(matchingMach.id);
+
+      // Fetch ML risk insights
+      predictDelay(data.wo_number)
+        .then((pred) => setMlDelayPred(pred))
+        .catch(() => setMlDelayPred(null));
+
+      predictRejection({ wo_number: data.wo_number, target_stage: data.current_stage })
+        .then((pred) => setMlRejPred(pred))
+        .catch(() => setMlRejPred(null));
+
+      // Auto focus Quantity field on successful load
+      setTimeout(() => inputQtyRef.current?.focus(), 150);
+    } catch (err: any) {
+      console.error("[MoveParts] API lookup error:", err);
+      setWoData(null);
+      setMlDelayPred(null);
+      setMlRejPred(null);
+      if (!err?.response) {
+        setSearchError("Backend / API service is currently unavailable. Please verify connection.");
+      } else if (err?.response?.status === 404) {
+        setSearchError(err?.response?.data?.detail || `Work Order '${targetWO}' not found in backend.`);
+      } else {
+        setSearchError(err?.response?.data?.detail || `Error retrieving tracking for Work Order '${targetWO}'.`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStageSelect = (stg: string) => {
+    setSelectedStageOverride(stg);
+    setFormError("");
+    setQuantityToMove("");
+    if (woData) {
+      getStageState(woData.wo_number, stg)
+        .then((s) => setStageState(s))
+        .catch(() => setStageState(null));
+      const stgIdx = woData.timeline?.findIndex((s: any) => s.stage === stg);
+      const nextStg = (stgIdx >= 0 && stgIdx + 1 < (woData.timeline?.length || 0))
+        ? woData.timeline[stgIdx + 1].stage
+        : (woData.movable_to_stage || woData.next_allowed_stage);
+      const matchingMach = MACHINES.find((m) => m.stage === nextStg || m.stage === stg);
+      if (matchingMach) setSelectedMachine(matchingMach.id);
+    }
+  };
+
+  // Tally-Style Enter Key Handler
+  const handleKeyDownEnter = (
+    e: React.KeyboardEvent,
+    nextTarget: "machine" | "shift" | "operator" | "remarks" | "submit"
+  ) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (nextTarget === "machine") {
+        selectMachineRef.current?.focus();
+      } else if (nextTarget === "shift") {
+        selectShiftRef.current?.focus();
+      } else if (nextTarget === "operator") {
+        inputOperatorRef.current?.focus();
+      } else if (nextTarget === "remarks") {
+        inputRemarksRef.current?.focus();
+      } else if (nextTarget === "submit") {
+        btnSubmitRef.current?.focus();
+      }
+    }
+  };
+
+  const timelineStages: string[] = woData?.timeline?.map((s: any) => s.stage) || [];
+  const originStage: string | null = selectedStageOverride || (woData ? (woData.movable_from_stage || woData.current_stage) : null);
+  const originIndex = originStage ? timelineStages.indexOf(originStage) : -1;
+  const destStage: string | null = (originIndex >= 0 && originIndex < timelineStages.length - 1)
+    ? timelineStages[originIndex + 1]
+    : (woData ? (woData.movable_to_stage || woData.next_allowed_stage) : null);
+
+  const curTimelineStep = woData?.timeline?.find((s: any) => s.stage === originStage);
+  const onHandAtOrigin: number = curTimelineStep
+    ? (curTimelineStep.on_hand_wip ?? 0)
+    : (woData ? (woData.movable_wip || 0) : 0);
+
+  // MRB Quality Gate (Option 2: Lock movement until MRB Approval)
+  // Stage FI is the authoritative Final Quality Inspection; production entry at FI is directly movable to Packing.
+  const isFiStage = originStage === "FI" || originStage === "FINAL_QA";
+  const isMrbLocked = !isFiStage && stageState?.mrb_lock_status === "LOCKED";
+  const isMrbPartial = !isFiStage && stageState?.mrb_lock_status === "PARTIAL";
+  const mrbApprovedMovable = isFiStage ? onHandAtOrigin : (stageState?.mrb_approved_movable_qty ?? onHandAtOrigin);
+  const availableAtOrigin: number = isMrbLocked ? 0 : mrbApprovedMovable;
+
+  const isTerminalStage = woData && (!destStage || originStage === "DISPATCH" || woData.current_stage === "Completed");
+
+  const handleFormSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!woData) return;
+
+    const moveQtyNum = Number(quantityToMove);
+
+    if (moveQtyNum <= 0) {
+      setFormError("Movement quantity must be greater than 0.");
+      return;
+    }
+
+    const originStageNow = originStage;
+    const destStageNow = destStage;
+    const availableNow = availableAtOrigin;
+
+    if (!originStageNow) {
+      setFormError("Source stage could not be determined for this Work Order.");
+      return;
+    }
+
+    if (isMrbLocked) {
+      setFormError(
+        `Movement locked: Parts produced at stage ${originStageNow} require Quality or Planning review and approval in the Material Review Board (MRB) before they can move to ${destStageNow || "next stage"}.`
+      );
+      return;
+    }
+
+    if (availableNow <= 0) {
+      setFormError(
+        `Cannot move parts from stage ${originStageNow}. No completed good parts are on-hand awaiting transfer (0 pcs produced). Please record production in Production Entry before moving parts.`
+      );
+      return;
+    }
+
+    if (moveQtyNum > availableNow) {
+      if (isMrbPartial) {
+        setFormError(
+          `Cannot move ${moveQtyNum} pieces. Only ${availableNow} pieces are approved by Quality/Planner in MRB (${stageState?.mrb_pending_qty} pieces still pending review).`
+        );
+      } else {
+        setFormError(
+          `Cannot move ${moveQtyNum} pieces. Only ${availableNow} completed good pieces are currently available at stage ${originStageNow}.`
+        );
+      }
+      return;
+    }
+
+
+    if (!destStageNow) {
+      setFormError("Terminal Stage — No further movement available for this Work Order.");
+      return;
+    }
+
+    setSubmitting(true);
+    setFormError("");
+
+    const clientReqId = `REQ-MOV-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+
+    try {
+      const res = await moveParts({
+        wo_number: woData.wo_number,
+        from_stage: originStageNow,
+        to_stage: destStageNow,
+        quantity_moved: moveQtyNum,
+        rejected_quantity: 0,
+        machine_id: productionType === "VENDOR" ? undefined : selectedMachine,
+        operator_name: operatorName,
+        shift: shift,
+        remarks: remarks || undefined,
+        heat_number: heatNumber.trim() || undefined,
+        client_request_id: clientReqId,
+        production_type: productionType,
+        vendor_name: productionType === "VENDOR" ? vendorName.trim() : undefined,
+        dc_number: productionType === "VENDOR" ? dcNumber.trim() : undefined,
+      });
+
+      setResultData({
+        title: "Material Transfer Recorded Successfully",
+        movement_id: res.movement_id,
+        wo_number: res.wo_number,
+        from_stage: res.from_stage,
+        to_stage: res.to_stage,
+        quantity_moved: res.quantity_moved,
+        available_wip_remaining: res.available_wip_remaining,
+        to_stage_available_wip: res.to_stage_available_wip,
+        message: res.message
+      });
+
+      setShowSuccessModal(true);
+      await Promise.all([
+        lookupWO(woData.wo_number, originStageNow),
+        loadMovableWOs(activeGate),
+        loadAvailableWOs(),
+      ]);
+    } catch (err: any) {
+      let detailMsg = "Transfer failed. Please check route and WIP balance.";
+      if (err?.response?.data?.detail) {
+        if (typeof err.response.data.detail === "string") {
+          detailMsg = err.response.data.detail;
+        } else if (Array.isArray(err.response.data.detail)) {
+          detailMsg = err.response.data.detail.map((d: any) => d.msg || JSON.stringify(d)).join(", ");
+        } else {
+          detailMsg = JSON.stringify(err.response.data.detail);
+        }
+      } else if (err?.message) {
+        detailMsg = err.message;
+      }
+      setFormError(detailMsg);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+      <div className="max-w-5xl mx-auto space-y-6">
+        {/* Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="rounded-md bg-blue-600 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
+                Material Logistics
+              </span>
+              <span className="text-xs text-zinc-400">Strict Sequential Route • Tally Navigation</span>
+            </div>
+            <h1 className="text-2xl font-extrabold tracking-tight text-zinc-900 dark:text-zinc-50 mt-1">
+              Shop Floor Move Parts
+            </h1>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+              Physical material transfer between manufacturing cells along the OMS-validated dynamic route.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <Link
+              href="/production/entry"
+              className="flex items-center gap-2 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3.5 py-2 text-xs font-bold text-zinc-700 dark:text-zinc-300 shadow-sm hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
+            >
+              <CheckSquare className="h-4 w-4 text-emerald-600" />
+              <span>Record Production</span>
+            </Link>
+
+            <button
+              type="button"
+              onClick={() => setShowQRModal(true)}
+              className="flex items-center gap-2 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3.5 py-2 text-xs font-bold text-zinc-700 dark:text-zinc-300 shadow-sm hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            >
+              <QrCode className="h-4 w-4 text-blue-600" />
+              <span>Scan Barcode / QR</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Shop Floor Gate Filter -- F1, F2, F3, SP, FI, Packing, Dispatch */}
+        <StageGateFilter
+          currentGate={activeGate}
+          onSelectGate={handleSelectGate}
+          isLocked={isGateLocked}
+          userStageName={currentUser?.department}
+        />
+
+        {/* Priority Queue: Pending Parts Waiting to Move */}
+        <div className="rounded-2xl border border-amber-200 dark:border-amber-900/50 bg-gradient-to-r from-amber-50/60 to-orange-50/40 dark:from-amber-950/20 dark:to-orange-950/10 p-5 shadow-sm space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="rounded-md bg-amber-600 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
+                  Priority Dispatch Queue
+                </span>
+                <span className="text-xs text-amber-800 dark:text-amber-300 font-bold">
+                  {movableWOs.length} Work Order{movableWOs.length === 1 ? "" : "s"} Waiting to Move
+                </span>
+              </div>
+              <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100 mt-1 flex items-center gap-2">
+                <ArrowRightLeft className="h-4 w-4 text-amber-600" />
+                Pending Parts Waiting to Move to Next Stage
+              </h2>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Material produced and ready for physical transit. 1-click loads Work Order and populates moving quantity.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => loadMovableWOs(activeGate)}
+              disabled={loadingMovable}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl border border-amber-200 dark:border-amber-900/60 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-amber-50 dark:hover:bg-amber-950/30 transition self-start sm:self-auto cursor-pointer"
+            >
+              <Clock className={`h-3.5 w-3.5 ${loadingMovable ? "animate-spin" : ""}`} />
+              Refresh Queue
+            </button>
+          </div>
+
+          {loadingMovable ? (
+            <p className="text-xs text-zinc-400 py-3 text-center">Checking shop floor movable WIP...</p>
+          ) : movableWOs.length === 0 ? (
+            <div className="py-4 text-center text-xs text-zinc-500 bg-white/70 dark:bg-zinc-900/70 rounded-xl border border-dashed border-amber-200 dark:border-amber-900/40">
+              No produced parts currently waiting to move. Once production is recorded, waiting parts appear here automatically.
+            </div>
+          ) : (
+            <div className="overflow-x-auto max-h-64 overflow-y-auto border border-amber-200/80 dark:border-amber-900/50 rounded-xl bg-white dark:bg-zinc-900">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-amber-100/60 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 uppercase text-[10px] tracking-wider sticky top-0">
+                  <tr>
+                    <th className="p-2.5">Priority</th>
+                    <th className="p-2.5">Work Order</th>
+                    <th className="p-2.5">Customer &amp; Part</th>
+                    <th className="p-2.5">Route Hop</th>
+                    <th className="p-2.5 text-right">Waiting Qty</th>
+                    <th className="p-2.5 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                  {movableWOs.map((item, idx) => {
+                    const isSelected = woData?.wo_number === item.wo_number;
+                    return (
+                      <tr
+                        key={`${item.wo_id}-${item.from_stage}-${idx}`}
+                        className={`transition-colors ${
+                          isSelected
+                            ? "bg-amber-50 dark:bg-amber-950/40 border-l-4 border-l-amber-600 font-semibold"
+                            : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                        }`}
+                      >
+                        <td className="p-2.5 font-mono text-[11px] text-zinc-400">
+                          #{idx + 1}
+                        </td>
+                        <td className="p-2.5">
+                          <span className="font-mono font-bold text-blue-600 dark:text-blue-400 block">
+                            {item.wo_number}
+                          </span>
+                          {item.oar_number && (
+                            <span className="text-[10px] text-zinc-400 font-mono">
+                              OAR: {item.oar_number}
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-2.5">
+                          <span className="font-semibold text-zinc-800 dark:text-zinc-200 block truncate max-w-xs">
+                            {item.customer_name || item.customer_code}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 font-mono block">
+                            {item.part_number} {item.heat_number ? `• Heat: ${item.heat_number}` : ""}
+                          </span>
+                        </td>
+                        <td className="p-2.5">
+                          <div className="flex items-center gap-1.5 font-mono text-xs font-bold">
+                            <span className="px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300">
+                              {item.from_stage}
+                            </span>
+                            <ArrowRight className="h-3 w-3 text-zinc-400" />
+                            <span className="px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300">
+                              {item.to_stage || "Next Stage"}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="p-2.5 text-right font-mono">
+                          <span className="inline-block px-2.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 font-extrabold text-xs">
+                            {item.movable_wip} pcs
+                          </span>
+                          {item.mrb_status === "PENDING_MRB" && (
+                            <span className="mt-1 flex items-center justify-end gap-1 text-[10px] font-bold text-rose-600 dark:text-rose-400">
+                              <Lock className="h-2.5 w-2.5" /> MRB Pending ({item.pending_mrb_count || 1})
+                            </span>
+                          )}
+                          {item.mrb_status === "PARTIAL" && (
+                            <span className="mt-1 flex items-center justify-end gap-1 text-[10px] font-bold text-amber-600 dark:text-amber-400">
+                              MRB Partial
+                            </span>
+                          )}
+                          {item.mrb_status === "APPROVED" && (
+                            <span className="mt-1 flex items-center justify-end gap-1 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                              <CheckCircle2 className="h-2.5 w-2.5" /> MRB Cleared
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="p-2.5 text-right">
+                          <button
+                            type="button"
+                            onClick={() => handleSelectMovable(item)}
+                            className={`px-3 py-1 text-xs font-bold rounded-lg transition cursor-pointer ${
+                              isSelected
+                                ? "bg-amber-600 text-white shadow-sm"
+                                : "bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800"
+                            }`}
+                          >
+                            {isSelected ? "Loaded" : "Move Now"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Search / Lookup Bar */}
+        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 shadow-sm">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              lookupWO(searchTerm);
+            }}
+            className="flex flex-col sm:flex-row gap-3"
+          >
+            <div className="relative flex-1">
+              <Search className="absolute left-3.5 top-3 h-4 w-4 text-zinc-400" />
+              <input
+                ref={inputSearchRef}
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Enter Work Order Number (e.g. WO-1001, WO-1008)... [Press Enter to find]"
+                className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 pl-10 pr-4 py-2.5 text-xs text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono font-bold"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={loading}
+              className="flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-xs font-bold text-white shadow-sm shadow-blue-500/20 hover:bg-blue-500 disabled:opacity-50 transition-colors cursor-pointer"
+            >
+              {loading ? "Loading..." : "Find Work Order"}
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                await Promise.all([
+                  loadAvailableWOs(),
+                  loadMovableWOs(activeGate),
+                  searchTerm ? lookupWO(searchTerm) : Promise.resolve(),
+                ]);
+              }}
+              disabled={loading}
+              title="Refresh Work Orders list"
+              className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-2.5 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer flex items-center justify-center shadow-xs"
+            >
+              <RotateCcw className={`h-4 w-4 ${loading ? "animate-spin text-blue-600" : ""}`} />
+            </button>
+          </form>
+
+          {/* Quick WO chips dynamically rendered from backend */}
+          {availableWOs.length > 0 && (
+            <div className="flex items-center gap-2 mt-3 pt-3 border-t border-zinc-100 dark:border-zinc-800/80 overflow-x-auto text-[11px]">
+              <span className="text-zinc-400 whitespace-nowrap">Quick Select:</span>
+              {availableWOs
+                .filter((wo) => !wo.is_at_vendor && (activeGate === "ALL" || wo.current_stage === activeGate))
+                .slice(0, 8)
+                .map((wo) => (
+                <button
+                  key={wo.wo_number}
+                  type="button"
+                  onClick={() => lookupWO(wo.wo_number)}
+                  className={`rounded-lg px-2.5 py-1 font-mono font-semibold transition-all cursor-pointer ${
+                    woData?.wo_number === wo.wo_number
+                      ? "bg-blue-600 text-white"
+                      : "bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                  }`}
+                >
+                  {wo.wo_number} ({wo.current_stage})
+                </button>
+              ))}
+            </div>
+          )}
+
+          {searchError && (
+            <div className="mt-3 flex items-center gap-2 rounded-lg bg-rose-500/10 border border-rose-500/20 p-2.5 text-xs font-semibold text-rose-500">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>{searchError}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Work Order Details & Movement Form */}
+        {woData && (
+          <div id="move-form-section" className="space-y-6">
+            {/* Header Strip */}
+            <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-zinc-100 dark:border-zinc-800">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+                      Work Order
+                    </span>
+                    <h2 className="text-xl font-extrabold text-zinc-900 dark:text-zinc-50 font-mono">
+                      {woData.wo_number}
+                    </h2>
+                    <span className="rounded-md bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs font-bold text-zinc-700 dark:text-zinc-300 font-mono">
+                      {woData.part_number} ({woData.grade || "Alloy"})
+                    </span>
+                    {woData.heat_number && (
+                      <span className="rounded-md bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 text-xs font-bold text-amber-600 dark:text-amber-400 font-mono flex items-center gap-1">
+                        <Flame className="h-3 w-3" />
+                        Heat: {woData.heat_number}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                    Customer: <span className="font-semibold text-zinc-800 dark:text-zinc-200">{woData.customer_name}</span> | PO: <span className="font-mono">{woData.customer_po}</span> | Planned: <span className="font-bold text-zinc-900 dark:text-zinc-100">{woData.physical_wo_qty} pcs</span> | Heat: <span className="font-mono font-bold text-amber-600 dark:text-amber-400">{woData.heat_number || "Not assigned"}</span>
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge variant={getRAGVariant(woData.delivery_risk)}>
+                    {woData.status.toUpperCase()}
+                  </Badge>
+                  <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-lg">
+                    Yield: {woData.yield_pct}%
+                  </span>
+                </div>
+              </div>
+
+              {/* Dynamic Route Pipeline Visualizer */}
+              <div>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                    Dynamic Route Sequence (Click any stage to move from it):
+                  </span>
+                  {woData.timeline && woData.timeline.length > 1 && (
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="text-[11px] font-semibold text-zinc-500">Source:</span>
+                      <select
+                        value={originStage || ""}
+                        onChange={(e) => handleStageSelect(e.target.value)}
+                        className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-2 py-0.5 text-xs font-mono font-bold text-blue-600 focus:outline-none cursor-pointer"
+                      >
+                        {woData.timeline.slice(0, -1).map((step: any) => (
+                          <option key={step.stage} value={step.stage}>
+                            {step.stage} ({step.on_hand_wip || 0} pcs on-hand)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-2">
+                  {woData.timeline.map((step: any, i: number) => {
+                    const isOrigin = step.stage === originStage;
+                    const isDest = step.stage === destStage;
+                    const isDone = step.is_completed;
+                    const onHand = step.on_hand_wip || 0;
+                    const canSelect = i < woData.timeline.length - 1;
+
+                    return (
+                      <React.Fragment key={step.stage}>
+                        <button
+                          type="button"
+                          disabled={!canSelect}
+                          onClick={() => canSelect && handleStageSelect(step.stage)}
+                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-mono font-bold transition-all ${
+                            canSelect ? "cursor-pointer hover:scale-[1.02]" : "cursor-default"
+                          } ${
+                            isOrigin
+                              ? "bg-blue-600 text-white border-blue-500 shadow-md ring-2 ring-blue-500/30"
+                              : isDest
+                              ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-400 dark:border-emerald-700"
+                              : onHand > 0
+                              ? "bg-purple-50 dark:bg-purple-950/30 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-700"
+                              : isDone
+                              ? "bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700 opacity-80"
+                              : "bg-zinc-50 dark:bg-zinc-950 text-zinc-400 border-zinc-200 dark:border-zinc-800 opacity-50"
+                          }`}
+                        >
+                          <span>{step.stage}</span>
+                          {onHand > 0 && !isOrigin && (
+                            <span className="text-[9px] bg-purple-200 dark:bg-purple-900/60 text-purple-900 dark:text-purple-100 px-1 rounded font-extrabold">
+                              {onHand}
+                            </span>
+                          )}
+                          {isOrigin && <span className="text-[9px] bg-white/20 px-1 rounded uppercase">From</span>}
+                          {isDest && <span className="text-[9px] bg-emerald-600 text-white px-1 rounded uppercase">To</span>}
+                        </button>
+                        {i < woData.timeline.length - 1 && (
+                          <ChevronRight className="h-4 w-4 text-zinc-400 shrink-0" />
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Production & Material Summary -- authoritative breakdown for the
+                SELECTED SOURCE stage only (never plant-wide totals), from the same
+                get_current_stage_state data source the Production Entry screen uses,
+                so the two screens can never disagree. */}
+            {stageState && (
+              <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-sm">
+                <div className="flex items-center justify-between pb-3 mb-3 border-b border-zinc-100 dark:border-zinc-800">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                    Production &amp; Material Summary — Stage {stageState.stage}
+                  </h3>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+                  <div className="rounded-xl bg-zinc-50 dark:bg-zinc-950/50 border border-zinc-200 dark:border-zinc-800 p-3">
+                    <span className="block text-[10px] uppercase font-bold text-zinc-400">Target / Required</span>
+                    <span className="font-mono font-extrabold text-zinc-900 dark:text-zinc-100 text-sm">{stageState.target_qty} pcs</span>
+                  </div>
+                  <div className="rounded-xl bg-zinc-50 dark:bg-zinc-950/50 border border-zinc-200 dark:border-zinc-800 p-3">
+                    <span className="block text-[10px] uppercase font-bold text-zinc-400">OK Produced</span>
+                    <span className="font-mono font-extrabold text-emerald-600 text-sm">{stageState.ok_completed_qty} pcs</span>
+                  </div>
+                  <div className="rounded-xl bg-zinc-50 dark:bg-zinc-950/50 border border-zinc-200 dark:border-zinc-800 p-3">
+                    <span className="block text-[10px] uppercase font-bold text-zinc-400">Rejected</span>
+                    <span className="font-mono font-extrabold text-rose-600 text-sm">{stageState.rejected_qty} pcs</span>
+                  </div>
+                  <div className="rounded-xl bg-zinc-50 dark:bg-zinc-950/50 border border-zinc-200 dark:border-zinc-800 p-3">
+                    <span className="block text-[10px] uppercase font-bold text-zinc-400">Already Moved</span>
+                    <span className="font-mono font-extrabold text-blue-600 text-sm">{stageState.already_moved_qty} pcs</span>
+                  </div>
+                  <div className="rounded-xl bg-purple-50 dark:bg-purple-950/20 border border-purple-300 dark:border-purple-800 p-3">
+                    <span className="block text-[10px] uppercase font-bold text-purple-700 dark:text-purple-400">Available to Move (On-Hand)</span>
+                    <span className="font-mono font-extrabold text-purple-700 dark:text-purple-400 text-sm">{stageState.on_hand_qty} pcs</span>
+                  </div>
+                  <div className="rounded-xl bg-amber-50 dark:bg-amber-950/20 border border-amber-300 dark:border-amber-800 p-3">
+                    <span className="block text-[10px] uppercase font-bold text-amber-700 dark:text-amber-400">Remaining to Produce</span>
+                    <span className="font-mono font-extrabold text-amber-700 dark:text-amber-400 text-sm">{stageState.in_process_qty} pcs</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Outside Vendor Banner */}
+            {woData?.is_at_vendor && (
+              <div className="rounded-2xl border border-purple-200 dark:border-purple-800 bg-purple-50/70 dark:bg-purple-950/40 p-4 shadow-sm flex items-start gap-3">
+                <div className="p-2 rounded-xl bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300 shrink-0">
+                  <Truck className="h-5 w-5" />
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-xs font-extrabold uppercase tracking-wider text-purple-900 dark:text-purple-200">
+                      Material Dispatched to Outside Subcontractor / Vendor
+                    </h4>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-purple-200 dark:bg-purple-900/60 text-purple-800 dark:text-purple-200">
+                      {woData.active_vendor_qty} pcs at vendor
+                    </span>
+                  </div>
+                  <p className="text-xs text-purple-800/90 dark:text-purple-300/90 mt-1">
+                    Dispatched to vendor <strong>{woData.active_vendor_name}</strong> on Delivery Challan #<strong>{woData.active_vendor_dc}</strong> from stage <strong>{woData.active_vendor_stage || "F2"}</strong>.
+                  </p>
+                  <p className="text-[11px] text-zinc-500 mt-1">
+                    {availableAtOrigin <= 0 ? (
+                      <span>
+                        These parts cannot be moved on the shop floor while at the vendor. Once returned, inward them on{" "}
+                        <Link href="/production/vendor" className="font-bold text-purple-700 dark:text-purple-400 underline">
+                          Vendor Tracking &amp; Subcontractor Inward (/production/vendor)
+                        </Link>{" "}
+                        to land in Final Inspection (FI) or back to F2.
+                      </span>
+                    ) : (
+                      <span>
+                        {availableAtOrigin} pieces are available on the shop floor for movement, while {woData.active_vendor_qty} pieces remain with the vendor.
+                      </span>
+                    )}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Terminal Stage Banner if at DISPATCH */}
+            {isTerminalStage ? (
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-6 text-center space-y-2">
+                <div className="flex items-center justify-center gap-2 text-amber-600 dark:text-amber-400">
+                  <Ban className="h-6 w-6" />
+                  <h3 className="text-base font-extrabold">Terminal Stage — No further movement available</h3>
+                </div>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 max-w-lg mx-auto">
+                  Work Order <strong>{woData.wo_number}</strong> is currently at <strong>{woData.current_stage}</strong>, which is the terminal stage of its manufacturing route. All parts have completed the physical routing pipeline.
+                </p>
+                <div className="pt-2">
+                  <Link
+                    href="/production/tracking"
+                    className="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline"
+                  >
+                    <span>View Complete Tracking History</span>
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </Link>
+                </div>
+              </div>
+            ) : availableAtOrigin <= 0 ? (
+              /* No movable WIP at the current stage -- show the actual reason, not a
+                 generic message. Planned/target quantity is never movable WIP; only
+                 production actually recorded at this stage is. */
+              (() => {
+                const curStep = woData.timeline?.find((s: any) => s.stage === originStage);
+                const ok = stageState?.ok_completed_qty ?? curStep?.ok_completed_qty ?? 0;
+                const rej = stageState?.rejected_qty ?? curStep?.rejected_qty ?? 0;
+                const alreadyMoved = stageState?.already_moved_qty ?? 0;
+
+                let reason = "No good material is currently available for movement.";
+                if (ok === 0 && rej === 0) {
+                  reason = "No good production has been recorded at this stage.";
+                } else if (ok > 0 && alreadyMoved >= ok) {
+                  reason = "All completed good material has already been moved.";
+                } else if (ok === 0 && rej > 0) {
+                  reason = "Rejected quantity is not movable good WIP.";
+                }
+
+                return (
+                  <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-6 text-center space-y-3">
+                    <div className="flex items-center justify-center gap-2 text-amber-600 dark:text-amber-400">
+                      <Ban className="h-6 w-6" />
+                      <h3 className="text-base font-extrabold">No Movable Material at {originStage}</h3>
+                    </div>
+                    <p className="text-xs text-zinc-600 dark:text-zinc-400 max-w-lg mx-auto font-semibold">
+                      {reason}
+                    </p>
+                    <div className="flex flex-wrap items-center justify-center gap-4 pt-2 text-xs">
+                      <div className="rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 px-4 py-2">
+                        <span className="block text-[10px] uppercase font-bold text-zinc-400">Current Stage</span>
+                        <span className="font-mono font-extrabold text-blue-600">{originStage}</span>
+                      </div>
+                      <div className="rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 px-4 py-2">
+                        <span className="block text-[10px] uppercase font-bold text-zinc-400">OK Produced</span>
+                        <span className="font-mono font-extrabold text-emerald-600">{ok} pcs</span>
+                      </div>
+                      <div className="rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 px-4 py-2">
+                        <span className="block text-[10px] uppercase font-bold text-zinc-400">Rejected</span>
+                        <span className="font-mono font-extrabold text-rose-600">{rej} pcs</span>
+                      </div>
+                      <div className="rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 px-4 py-2">
+                        <span className="block text-[10px] uppercase font-bold text-zinc-400">Already Moved</span>
+                        <span className="font-mono font-extrabold text-blue-600">{alreadyMoved} pcs</span>
+                      </div>
+                      <div className="rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 px-4 py-2">
+                        <span className="block text-[10px] uppercase font-bold text-zinc-400">Movable WIP</span>
+                        <span className="font-mono font-extrabold text-purple-600">{availableAtOrigin} pcs</span>
+                      </div>
+                    </div>
+                    <div className="pt-2">
+                      <Link
+                        href={`/production/entry?wo=${encodeURIComponent(woData.wo_number)}&stage=${encodeURIComponent(originStage || "F1")}`}
+                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow-sm shadow-blue-500/20 transition-all cursor-pointer"
+                      >
+                        <span>Record Production at {originStage}</span>
+                        <ArrowRight className="h-4 w-4" />
+                      </Link>
+                    </div>
+                  </div>
+                );
+              })()
+            ) : (
+              /* Physical Movement Execution Grid */
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Stage Transfer Route Card */}
+                <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-sm space-y-4">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+                    Routing Direction (OMS Controlled)
+                  </span>
+
+                  {/* Transfer Visual Card */}
+                  <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/40 dark:to-indigo-950/20 p-4 border border-blue-200 dark:border-blue-900/40 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-zinc-400">Origin Stage</span>
+                        <p className="text-xl font-extrabold text-zinc-900 dark:text-zinc-50 font-mono">
+                          {originStage}
+                        </p>
+                        <p className="text-[11px] font-bold text-blue-600">
+                          {availableAtOrigin} pcs available
+                        </p>
+                      </div>
+
+                      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-600 text-white shadow-md">
+                        <ArrowRightLeft className="h-5 w-5" />
+                      </div>
+
+                      <div className="text-right">
+                        <span className="text-[10px] uppercase font-bold text-zinc-400">Destination Stage</span>
+                        <p className="text-xl font-extrabold text-emerald-600 font-mono">
+                          {destStage}
+                        </p>
+                        <p className="text-[11px] text-zinc-500">
+                          Next route target
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-blue-200/60 dark:border-blue-900/60 text-[11px] text-zinc-600 dark:text-zinc-400 flex items-center gap-1.5">
+                      <ShieldCheck className="h-3.5 w-3.5 text-blue-600 shrink-0" />
+                      <span>Route validation is locked. Stage jumping is prevented.</span>
+                    </div>
+                  </div>
+
+                  {/* Tally Hint */}
+                  <div className="p-3 rounded-xl bg-zinc-100 dark:bg-zinc-800/60 text-[11px] text-zinc-500">
+                    <p className="font-bold text-zinc-700 dark:text-zinc-300 mb-1">⚡ Fast Keyboard Entry:</p>
+                    <p>Enter quantity and press <kbd className="px-1.5 py-0.5 bg-white dark:bg-zinc-900 border rounded font-mono text-[10px]">Enter</kbd> to cycle through inputs and submit instantly.</p>
+                  </div>
+                </div>
+
+                {/* Material Movement Form */}
+                <div className="lg:col-span-2">
+                  <form
+                    onSubmit={handleFormSubmit}
+                    className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm space-y-5"
+                  >
+                    <div className="flex items-center justify-between pb-3 border-b border-zinc-100 dark:border-zinc-800">
+                      <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
+                        <ArrowRightLeft className="h-4 w-4 text-blue-600" />
+                        <span>Physical Material Transfer</span>
+                      </h3>
+                      <span className="text-xs font-mono font-bold text-blue-600 dark:text-blue-400">
+                        {originStage} ➔ {destStage}
+                      </span>
+                    </div>
+
+                    {formError && (
+                      <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs font-semibold text-rose-500">
+                        {formError}
+                      </div>
+                    )}
+
+                    {/* MRB Quality Gate Lock Status Alert (Option 2) */}
+                    {isMrbLocked && (
+                      <div className="rounded-xl border border-rose-300 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 p-4 space-y-2">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="flex items-center gap-2.5 text-rose-700 dark:text-rose-400 font-bold text-xs">
+                            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-rose-600 text-white">
+                              <Lock className="h-4 w-4" />
+                            </div>
+                            <div>
+                              <span className="block font-extrabold text-sm text-rose-900 dark:text-rose-200">
+                                Movement Locked — MRB Quality / Planner Approval Required
+                              </span>
+                              <span className="block text-[11px] font-normal text-rose-700 dark:text-rose-300">
+                                Option 2 Quality Gate Active: Parts cannot move until verified &amp; approved in MRB.
+                              </span>
+                            </div>
+                          </div>
+                          <Link
+                            href={`/quality/mrb?search=${encodeURIComponent(woData.wo_number)}`}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg bg-rose-600 hover:bg-rose-500 text-white shadow-sm transition shrink-0"
+                          >
+                            <span>Open MRB Board</span>
+                            <ArrowRight className="h-3 w-3" />
+                          </Link>
+                        </div>
+                        <div className="pt-2 border-t border-rose-200 dark:border-rose-900/60 text-[11px] text-rose-800 dark:text-rose-300 flex flex-wrap items-center gap-2">
+                          <span>
+                            Awaiting Quality Review: <strong>{stageState?.mrb_pending_qty ?? onHandAtOrigin} pcs</strong> on-hand
+                          </span>
+                          {stageState?.pending_mrb_tickets && stageState.pending_mrb_tickets.length > 0 && (
+                            <span className="font-mono bg-white dark:bg-zinc-900 px-2 py-0.5 rounded border border-rose-200 dark:border-rose-800">
+                              Ticket(s): {stageState.pending_mrb_tickets.join(", ")}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {isMrbPartial && (
+                      <div className="rounded-xl border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-amber-800 dark:text-amber-300">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                          <span>
+                            <strong>Partial MRB Approval:</strong> Only <strong>{availableAtOrigin} pcs</strong> of {onHandAtOrigin} pcs have been approved for movement. The remaining {stageState?.mrb_pending_qty} pcs are pending review.
+                          </span>
+                        </div>
+                        <Link
+                          href={`/quality/mrb?search=${encodeURIComponent(woData.wo_number)}`}
+                          className="font-bold text-amber-700 dark:text-amber-400 hover:underline shrink-0"
+                        >
+                          Review in MRB →
+                        </Link>
+                      </div>
+                    )}
+
+                    {!isMrbLocked && !isMrbPartial && (stageState?.ok_completed_qty || 0) > 0 && (
+                      <div className="rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/60 dark:bg-emerald-950/20 px-3.5 py-2 flex items-center justify-between text-xs text-emerald-800 dark:text-emerald-300">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                          <span>
+                            {isFiStage
+                              ? "Final Inspection Passed: Good pieces ready for immediate transfer to Packing & BSR."
+                              : "MRB Quality Gate Cleared: Production approved for downstream movement."}
+                          </span>
+                        </div>
+                        <span className="font-mono font-bold text-emerald-700 dark:text-emerald-300">
+                          {availableAtOrigin} pcs ready
+                        </span>
+                      </div>
+                    )}
+
+
+                    {/* Special Routing: In-House vs At Vendor Toggle */}
+                    {originStage !== "DISPATCH" && (
+                      <div className="p-4 rounded-xl border border-indigo-200 dark:border-indigo-900/60 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-bold text-indigo-950 dark:text-indigo-200 flex items-center gap-1.5">
+                            <Factory className="h-4 w-4 text-indigo-600" />
+                            STAGE {originStage} PRODUCTION MODE / ROUTING *
+                          </label>
+                          <span className="text-[10px] uppercase tracking-wider font-extrabold text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-900/60 px-2 py-0.5 rounded-md">
+                            Stage {originStage} Execution
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setProductionType("IN_HOUSE")}
+                            className={`py-2 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                              productionType === "IN_HOUSE"
+                                ? "border-indigo-600 bg-indigo-600 text-white shadow-sm ring-2 ring-indigo-500/20"
+                                : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                            }`}
+                          >
+                            <Factory className="h-4 w-4" />
+                            <span>In-House Machining</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setProductionType("VENDOR")}
+                            className={`py-2 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                              productionType === "VENDOR"
+                                ? "border-purple-600 bg-purple-600 text-white shadow-sm ring-2 ring-purple-500/20"
+                                : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                            }`}
+                          >
+                            <Building2 className="h-4 w-4" />
+                            <span>At Vendor (External DC)</span>
+                          </button>
+                        </div>
+
+                        {productionType === "VENDOR" && (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-indigo-200/60 dark:border-indigo-900/40">
+                            <div>
+                              <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1 flex items-center gap-1.5">
+                                <Building2 className="h-3.5 w-3.5 text-purple-600" />
+                                VENDOR NAME <span className="text-rose-500">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                list="move-vendor-suggestions"
+                                value={vendorName}
+                                onChange={(e) => setVendorName(e.target.value)}
+                                placeholder="e.g. Sharada Engineering, Lakshmi CNC..."
+                                className="w-full rounded-xl border border-purple-300 dark:border-purple-800 bg-white dark:bg-zinc-900 px-3.5 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                                required={productionType === "VENDOR"}
+                              />
+                              <datalist id="move-vendor-suggestions">
+                                <option value="Sharada Engineering" />
+                                <option value="Lakshmi CNC Machining" />
+                                <option value="Super Tech Precision Works" />
+                                <option value="Standard Machining Works" />
+                                <option value="A-One Engineering Works" />
+                              </datalist>
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1 flex items-center gap-1.5">
+                                <Truck className="h-3.5 w-3.5 text-purple-600" />
+                                DELIVERY CHALLAN NUMBER (DC #) <span className="text-rose-500">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                value={dcNumber}
+                                onChange={(e) => setDcNumber(e.target.value)}
+                                placeholder="e.g. DC-2026-0042..."
+                                className="w-full rounded-xl border border-purple-300 dark:border-purple-800 bg-white dark:bg-zinc-900 px-3.5 py-2 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                                required={productionType === "VENDOR"}
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Quantity to Move */}
+                    <div>
+                      <label className="text-xs font-bold text-zinc-900 dark:text-zinc-100 flex items-center justify-between">
+                        <span>Quantity to Move *</span>
+                        <span className="text-[11px] text-zinc-400">
+                          Available at {originStage}: <strong>{availableAtOrigin} pcs</strong>
+                        </span>
+                      </label>
+                      <input
+                        ref={inputQtyRef}
+                        type="number"
+                        required
+                        min={1}
+                        max={availableAtOrigin}
+                        value={quantityToMove}
+                        onChange={(e) => setQuantityToMove(e.target.value === "" ? "" : Number(e.target.value))}
+                        onKeyDown={(e) => handleKeyDownEnter(e, "machine")}
+                        placeholder={`1 to ${availableAtOrigin}`}
+                        className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-4 py-2.5 text-base font-extrabold text-zinc-900 dark:text-zinc-50 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                      />
+                    </div>
+
+                    {/* Machine, Shift, Operator Grid */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      <div>
+                        <label className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                          Destination Machine / Bay
+                        </label>
+                        <select
+                          ref={selectMachineRef}
+                          value={selectedMachine}
+                          onChange={(e) => setSelectedMachine(e.target.value)}
+                          onKeyDown={(e) => handleKeyDownEnter(e, "shift")}
+                          className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 font-medium focus:border-blue-500 focus:outline-none"
+                        >
+                          {machineOptions.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                          Shift
+                        </label>
+                        <select
+                          ref={selectShiftRef}
+                          value={shift}
+                          onChange={(e) => setShift(e.target.value)}
+                          onKeyDown={(e) => handleKeyDownEnter(e, "operator")}
+                          className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 font-medium focus:border-blue-500 focus:outline-none"
+                        >
+                          {shiftOptions.map((s) => (
+                            <option key={s.code} value={s.value}>
+                              {s.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                          Logistics / Operator
+                        </label>
+                        <input
+                          ref={inputOperatorRef}
+                          type="text"
+                          list="operator-list-options"
+                          value={operatorName}
+                          onChange={(e) => setOperatorName(e.target.value)}
+                          onKeyDown={(e) => handleKeyDownEnter(e, "remarks")}
+                          className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
+                        />
+                        <datalist id="operator-list-options">
+                          {operatorsList.map((o) => (
+                            <option key={o.id} value={o.display_name}>
+                              {o.employee_code ? `${o.display_name} (${o.employee_code})` : o.display_name}
+                            </option>
+                          ))}
+                        </datalist>
+                      </div>
+                    </div>
+
+                    {/* Heat Number & Remarks */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-xs font-semibold text-zinc-700 dark:text-zinc-300 flex items-center gap-1.5">
+                          <Flame className="h-3.5 w-3.5 text-amber-500" />
+                          <span>Heat Number / Melt Batch</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={heatNumber}
+                          onChange={(e) => setHeatNumber(e.target.value)}
+                          placeholder="e.g. HT-2026-904..."
+                          className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100 focus:border-amber-500 focus:outline-none"
+                        />
+                        <span className="text-[10px] text-zinc-400 mt-1 block">Cast heat batch from which parts are being produced</span>
+                      </div>
+
+                      <div>
+                        <label className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                          Movement Remarks / Notes
+                        </label>
+                        <input
+                          ref={inputRemarksRef}
+                          type="text"
+                          value={remarks}
+                          onChange={(e) => setRemarks(e.target.value)}
+                          onKeyDown={(e) => handleKeyDownEnter(e, "submit")}
+                          placeholder="e.g. Batch moved to CNC bay for turning"
+                          className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Submit Button */}
+                    <div className="pt-2">
+                      <button
+                        ref={btnSubmitRef}
+                        type="submit"
+                        disabled={submitting || availableAtOrigin <= 0 || !destStage || isMrbLocked}
+                        className={`flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-sm font-bold text-white shadow-lg transition-all ${
+                          availableAtOrigin <= 0 && woData?.is_at_vendor
+                            ? "bg-purple-600/60 dark:bg-purple-900/40 cursor-not-allowed opacity-75"
+                            : isMrbLocked
+                            ? "bg-zinc-400 dark:bg-zinc-700 cursor-not-allowed opacity-75"
+                            : "bg-blue-600 hover:bg-blue-500 shadow-blue-500/25 cursor-pointer"
+                        }`}
+                      >
+                        {availableAtOrigin <= 0 && woData?.is_at_vendor ? (
+                          <>
+                            <Truck className="h-4 w-4" />
+                            <span>Material is at Outside Vendor ({woData.active_vendor_qty} pcs at {woData.active_vendor_name})</span>
+                          </>
+                        ) : isMrbLocked ? (
+                          <>
+                            <Lock className="h-4 w-4" />
+                            <span>Movement Locked Pending MRB Approval</span>
+                          </>
+                        ) : (
+                          <>
+                            <ArrowRightLeft className="h-4 w-4" />
+                            <span>
+                              {submitting
+                                ? "Validating & Moving..."
+                                : `Transfer ${quantityToMove || 0} pcs to Stage ${destStage}`}
+                            </span>
+                          </>
+                        )}
+                      </button>
+
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Success Confirmation Modal */}
+        <Modal
+          isOpen={showSuccessModal}
+          onClose={() => setShowSuccessModal(false)}
+          title={resultData?.title || "Movement Successful"}
+          subtitle={`Movement ID: ${resultData?.movement_id}`}
+        >
+          <div className="space-y-4">
+            <div className="flex items-center justify-center p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/50">
+              <div className="text-center">
+                <CheckCircle2 className="h-10 w-10 text-emerald-500 mx-auto" />
+                <p className="text-sm font-bold text-emerald-800 dark:text-emerald-300 mt-2">
+                  {resultData?.message}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2 text-xs border border-zinc-200 dark:border-zinc-800 rounded-xl p-3.5">
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Work Order:</span>
+                <span className="font-mono font-bold text-zinc-900 dark:text-zinc-100">{resultData?.wo_number}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Routing:</span>
+                <span className="font-bold text-blue-600">{resultData?.from_stage} ➔ {resultData?.to_stage}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Quantity Transferred:</span>
+                <span className="font-bold text-zinc-900 dark:text-zinc-100">{resultData?.quantity_moved} pcs</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Remaining at {resultData?.from_stage}:</span>
+                <span className="font-bold text-zinc-900 dark:text-zinc-100">{resultData?.available_wip_remaining} pcs</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Now Available at {resultData?.to_stage}:</span>
+                <span className="font-bold text-emerald-600">{resultData?.to_stage_available_wip} pcs</span>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowSuccessModal(false)}
+                className="rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-500 cursor-pointer"
+              >
+                Continue Movement
+              </button>
+            </div>
+          </div>
+        </Modal>
+
+        {/* QR Scanner Modal */}
+        <Modal
+          isOpen={showQRModal}
+          onClose={() => setShowQRModal(false)}
+          title="Scan Work Order QR / Barcode"
+          subtitle="Point scanner at router sheet or enter code manually"
+        >
+          <div className="space-y-4">
+            <div className="flex flex-col items-center justify-center p-6 border-2 border-dashed border-zinc-300 dark:border-zinc-700 rounded-2xl bg-zinc-50 dark:bg-zinc-950 text-center">
+              <QrCode className="h-16 w-16 text-blue-600 animate-pulse mb-3" />
+              <p className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                Camera / Barcode Scanner Active
+              </p>
+              <p className="text-[11px] text-zinc-400 mt-1">
+                Scan standard 1D / 2D barcode on shop-floor traveller sheet
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                Or Type / Paste Scanned Barcode Payload:
+              </label>
+              <div className="flex gap-2 mt-1.5">
+                <input
+                  type="text"
+                  value={qrInput}
+                  onChange={(e) => setQrInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && qrInput.trim()) {
+                      e.preventDefault();
+                      lookupWO(qrInput.trim());
+                      setShowQRModal(false);
+                      setQrInput("");
+                    }
+                  }}
+                  placeholder="e.g. WO-1001"
+                  className="flex-1 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (qrInput.trim()) {
+                      lookupWO(qrInput.trim());
+                      setShowQRModal(false);
+                      setQrInput("");
+                    }
+                  }}
+                  className="rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-500 cursor-pointer"
+                >
+                  Load
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      </div>
+  );
+}

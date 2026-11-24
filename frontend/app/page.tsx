@@ -11,10 +11,9 @@ export default function Home() {
   useEffect(() => {
     const token = Cookies.get("access_token");
     if (token) {
-      // Land each department on its own home screen (e.g. F1 -> My Work Queue);
-      // everyone else, or any lookup failure, keeps the dashboard as before.
+      // New stage roles / Accounts land on their own home; everyone else on Dashboard.
       getCurrentUser()
-        .then((u) => router.replace(resolveWorkspace(u.role, u.department)?.home ?? "/dashboard"))
+        .then((u: any) => router.replace(resolveWorkspace([u.role, u.secondary_role, ...(u.roles || [])])?.home ?? "/dashboard"))
         .catch(() => router.replace("/dashboard"));
     } else {
       router.replace("/login");

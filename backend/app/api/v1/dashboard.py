@@ -1,3 +1,4 @@
+from app.core.gate_scope import deny_if_supervisor
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.core.database import get_db
@@ -14,4 +15,5 @@ def get_dashboard_stats(
     user: User = Depends(get_current_user)
 ):
     """Retrieve comprehensive live executive & operational manufacturing KPIs."""
+    deny_if_supervisor(user)
     return DashboardService.get_dashboard_stats(db)

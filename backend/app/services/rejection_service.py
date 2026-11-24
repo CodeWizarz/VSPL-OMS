@@ -5,18 +5,23 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, func as sa_func
 from app.models.nc import NCRecord
 from app.models.rejection_disposition import RejectionDisposition
+from app.models.rejection_type import RejectionType
 from app.models.conversion import Conversion
 from app.models.work_order import WorkOrder, WORoute, WOStatus
 from app.models.production_movement import StageWIP
+from app.models.packing import PackingRecord
+from app.models.dispatch import Dispatch
 from app.models.order import Order, Customer
 from app.models.audit import AuditLog
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.core.roles import PLANNING_ROLES, QUALITY_APPROVAL_ROLES, MELTING_ENTRY_ROLES
 from app.schemas.rejection import (
     ExcessNonMovingCreate, DispositionCreate, DispositionResponse, DispositionOut,
     RejectionListItem, RejectionDetail, RejectionSourceBlock, RejectionBalance,
     RejectionOutcomeBreakdown, RejectionSummary, CWODetail,
-    MeltingEntryCreate, MeltingEntryResponse
+    MeltingEntryCreate, MeltingEntryResponse,
+    ReplacementCreate, ReplacementResponse,
+    RejectionTypeCreate, RejectionTypeUpdate, RejectionTypeOut
 )
 from app.services.oms_integration_service import OMSIntegrationService, calculate_stage_targets
 from app.services.conversion_mapping_service import ConversionMappingService
@@ -29,7 +34,7 @@ WO_CREATING_ACTIONS = ("CONVERT_PART", "SAME_PART", "CWO")
 TERMINAL_ACTIONS = ("SCRAP", "DEVIATION_ACCEPT")
 VALID_ACTIONS = WO_CREATING_ACTIONS + TERMINAL_ACTIONS
 VALID_SOURCE_TYPES = ("EXCESS_PRODUCTION", "NON_MOVING")
-ALL_ROUTE_STAGES = ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+ALL_ROUTE_STAGES = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
 
 
 def _consumed_qty(db: Session, nc_id) -> int:
@@ -40,11 +45,107 @@ def _consumed_qty(db: Session, nc_id) -> int:
 
 
 def _require_role(current_user: Optional[User], allowed: tuple, action_label: str):
-    if current_user is None or current_user.role not in allowed:
+    if current_user is None or not current_user.has_any_role(*allowed):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Role '{current_user.role.value if current_user else 'anonymous'}' is not authorized to {action_label}."
         )
+
+
+def validate_active_rejection_type(db: Session, code: Optional[str]) -> None:
+    """Backend-authoritative gate for Production Entry / Move Parts: a NEW rejection
+    transaction (rejected_quantity > 0) must always select an existing, ACTIVE
+    RejectionType by its code -- never arbitrary free text. Unconditionally
+    mandatory (not backward-compatible/optional) -- the Rejection Type master is
+    never actually empty in a real deployment because `seed_database_if_empty`
+    (app/services/seed_service.py) seeds a default set of types covering every
+    historically-used defect code, in every environment including production, so
+    Quality never has to manually create the first type before this gate works.
+
+    This has no effect on historical data: NCRecord.defect_code is a plain string
+    column, never rewritten by this check or by anything in the RejectionType
+    master -- a historical row keeps displaying exactly the code it was recorded
+    with, active/inactive/deleted-type or not."""
+    if not code or not code.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A Rejection Type is required when Rejected Qty > 0."
+        )
+    rt = db.query(RejectionType).filter(RejectionType.code == code.strip().upper()).first()
+    if not rt or not rt.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Rejection Type '{code}' does not exist or is inactive."
+        )
+
+
+def _rejection_type_out(rt: RejectionType) -> RejectionTypeOut:
+    return RejectionTypeOut(
+        id=str(rt.id), code=rt.code, name=rt.name, description=rt.description,
+        is_active=rt.is_active, created_by=rt.created_by, updated_by=rt.updated_by,
+        created_at=rt.created_at, updated_at=rt.updated_at
+    )
+
+
+class RejectionTypeService:
+    """The dedicated Rejection Type master. Deliberately kept inside the existing
+    rejection subsystem (this file / rejection.py / schemas/rejection.py) rather
+    than as a new module -- it is part of Rejection Tracking, not a separate
+    concern. `code` is the same natural key already used as NCRecord.defect_code;
+    historical rows are never rewritten, only validated against going forward
+    (see validate_active_rejection_type)."""
+
+    @staticmethod
+    def list_types(db: Session, include_inactive: bool = False) -> List[RejectionTypeOut]:
+        q = db.query(RejectionType)
+        if not include_inactive:
+            q = q.filter(RejectionType.is_active.is_(True))
+        return [_rejection_type_out(rt) for rt in q.order_by(RejectionType.name).all()]
+
+    @staticmethod
+    def create_type(db: Session, req: RejectionTypeCreate, current_user: Optional[User] = None) -> RejectionTypeOut:
+        code = req.code.strip().upper()
+        if db.query(RejectionType).filter(RejectionType.code == code).first():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Rejection Type code '{code}' already exists.")
+        actor = current_user.full_name if current_user else "System"
+        rt = RejectionType(
+            code=code, name=req.name.strip(), description=req.description,
+            is_active=True, created_by=actor, updated_by=actor,
+        )
+        db.add(rt)
+        db.flush()
+        db.add(AuditLog(
+            user_id=current_user.id if current_user else None, user_name=actor,
+            action="REJECTION_TYPE_CREATED", entity="RejectionType", entity_id=code,
+            new_value=f"Name: {rt.name}"
+        ))
+        db.commit()
+        db.refresh(rt)
+        return _rejection_type_out(rt)
+
+    @staticmethod
+    def update_type(db: Session, req: RejectionTypeUpdate, current_user: Optional[User] = None) -> RejectionTypeOut:
+        rt = db.query(RejectionType).filter(RejectionType.id == req.id).first()
+        if not rt:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Rejection Type not found.")
+        old_active = rt.is_active
+        if req.name is not None:
+            rt.name = req.name.strip()
+        if req.description is not None:
+            rt.description = req.description
+        if req.is_active is not None:
+            # Never physically deleted -- historical NCRecord.defect_code values
+            # keep resolving/displaying regardless of active status.
+            rt.is_active = req.is_active
+        rt.updated_by = current_user.full_name if current_user else "System"
+        db.add(AuditLog(
+            user_id=current_user.id if current_user else None, user_name=rt.updated_by,
+            action="REJECTION_TYPE_UPDATED", entity="RejectionType", entity_id=rt.code,
+            old_value=f"Active: {old_active}", new_value=f"Active: {rt.is_active}"
+        ))
+        db.commit()
+        db.refresh(rt)
+        return _rejection_type_out(rt)
 
 
 class RejectionService:
@@ -453,6 +554,222 @@ class RejectionService:
             conversion_wo_number=destination_wo_number,
             message=f"Recorded {action} disposition of {req.quantity} pcs against '{record.nc_number}'."
                     + (f" New Work Order '{destination_wo_number}' created." if destination_wo_number else "")
+        )
+
+    @staticmethod
+    def create_replacement(db: Session, req: ReplacementCreate, current_user: Optional[User] = None) -> ReplacementResponse:
+        """Quality-controlled: 'Replacement Required'. Raises a brand-new Work Order
+        against the SAME OAR as the original, against the same RejectionDisposition
+        ledger/NCRecord.qty balance every other disposition action consumes -- but,
+        unlike CONVERT_PART/SAME_PART/CWO, it never sets released_by/release_date (no
+        automatic release) and never requires a Conversion Part Mapping approval (it is
+        the same part replacing rejected material, not a conversion to a different
+        destination). The original WO's history, target, and route are NEVER modified.
+        A replacement WO must go through the full Engineering Release -> Manufacturing
+        Release -> WO Release chain like any other WO before it can be produced --
+        enforced by ProductionService._enforce_release_gate and
+        OperationsService.release_work_order via WorkOrder.is_replacement."""
+        PATCH_WO_ROLES = QUALITY_APPROVAL_ROLES + PLANNING_ROLES
+        _require_role(current_user, PATCH_WO_ROLES, "approve a replacement / patch WO")
+
+        record = None
+        remaining = 0
+        original_wo = None
+        order = None
+
+        if req.nc_number and req.nc_number.strip():
+            record = db.query(NCRecord).filter(NCRecord.nc_number == req.nc_number.strip()).with_for_update().first()
+            if not record:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Rejection Tracking record '{req.nc_number}' not found."
+                )
+
+            consumed = _consumed_qty(db, record.id)
+            remaining = record.qty - consumed
+            if req.quantity > remaining:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot replace {req.quantity} pieces. Only {remaining} pieces remain undispositioned on '{record.nc_number}' (source qty {record.qty}, already consumed {consumed})."
+                )
+
+            original_wo = record.work_order
+            if not original_wo:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Could not resolve the original Work Order for this record.")
+
+            order = db.query(Order).filter(Order.id == original_wo.order_id).with_for_update().first()
+        elif req.oar_number and req.oar_number.strip():
+            order = db.query(Order).filter(Order.oar_number == req.oar_number.strip()).with_for_update().first()
+            if not order:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Order with OAR number '{req.oar_number}' not found."
+                )
+            if req.source_wo_number and req.source_wo_number.strip():
+                original_wo = db.query(WorkOrder).filter(
+                    WorkOrder.wo_number == req.source_wo_number.strip(),
+                    WorkOrder.order_id == order.id
+                ).first()
+                if not original_wo:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Source Work Order '{req.source_wo_number}' not found for OAR '{req.oar_number}'."
+                    )
+            else:
+                original_wo = next((w for w in order.work_orders if not w.is_replacement), (order.work_orders[0] if order.work_orders else None))
+                if not original_wo:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"No Work Orders found for OAR '{req.oar_number}'."
+                    )
+
+            # Optionally link an open NCRecord from this source WO / OAR if available
+            candidate_ncs = db.query(NCRecord).filter(
+                NCRecord.work_order_id == original_wo.id,
+                NCRecord.status != "Closed"
+            ).order_by(NCRecord.date_raised.desc()).all()
+            for cand in candidate_ncs:
+                cand_consumed = _consumed_qty(db, cand.id)
+                cand_rem = cand.qty - cand_consumed
+                if cand_rem >= req.quantity:
+                    record = cand
+                    remaining = cand_rem
+                    break
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either 'nc_number' or 'oar_number' must be provided to create a replacement / patch Work Order."
+            )
+
+        if not order:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order associated with Work Order not found.")
+
+        # Compute authoritative OAR genealogy and shortfall across all WOs
+        from app.services.work_order_service import WorkOrderService
+        oar_summary = WorkOrderService.build_oar_summary(db, order)
+        total_good_produced = oar_summary.oar_fulfilled
+        max_recoverable = oar_summary.oar_shortfall
+
+        if req.quantity > max_recoverable:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot create replacement WO for {req.quantity} pieces. Maximum recoverable shortfall for OAR '{order.oar_number}' is {max_recoverable} pieces (Order Qty: {order.po_qty}, Good Produced: {total_good_produced})."
+            )
+
+        # Same numbering convention as order intake / conversion WOs: parse-max-and-
+        # increment against the real column, never a separate counter table.
+        max_wo_num = 1000
+        for (existing_num,) in db.query(WorkOrder.wo_number).all():
+            if existing_num and existing_num.startswith("WO-") and existing_num[3:].isdigit():
+                max_wo_num = max(max_wo_num, int(existing_num[3:]))
+        new_wo_num = f"WO-{max_wo_num + 1}"
+
+        replacement_wo = WorkOrder(
+            wo_number=new_wo_num,
+            order_id=original_wo.order_id,  # SAME OAR
+            physical_wo_qty=req.quantity,
+            current_stage="F1",
+            projected_final_good=req.quantity,
+            shortfall="No",
+            status=WOStatus.IN_PRODUCTION,
+            source_wo_id=original_wo.id,
+            is_replacement=True,
+            replacement_reason=req.reason.strip(),
+        )
+        db.add(replacement_wo)
+        db.flush()
+
+        targets = calculate_stage_targets(req.quantity, route=ALL_ROUTE_STAGES)
+        for seq, stg in enumerate(ALL_ROUTE_STAGES, start=1):
+            db.add(WORoute(
+                work_order_id=replacement_wo.id, stage=stg, sequence=seq,
+                stage_target_qty=targets.get(stg, req.quantity),
+                cumulative_ent_qty=req.quantity if seq == 1 else 0,
+                cumulative_inproc_qty=req.quantity if seq == 1 else 0,
+                stage_status="In-Progress" if seq == 1 else "Pending"
+            ))
+        db.add(StageWIP(
+            work_order_id=replacement_wo.id, stage="F1", ent_qty=req.quantity,
+            ok_qty=0, inproc_qty=req.quantity, onhand_qty=0, rejected_qty=0,
+            received_qty=req.quantity, available_wip=req.quantity, moved_out_qty=0
+        ))
+        OMSIntegrationService.recompute_work_order(db, replacement_wo)
+
+        conv = Conversion(
+            conversion_wo_number=new_wo_num,
+            source_wo_id=original_wo.id,
+            destination_order_id=original_wo.order_id,
+            conversion_wo_id=replacement_wo.id,
+            entry_stage="F1",
+            quantity=req.quantity,
+            reason=req.reason,
+            planner=current_user.full_name if current_user else "Planning/Quality",
+            nc_record_id=record.id if record else None
+        )
+        db.add(conv)
+        db.flush()
+
+        if record:
+            disposition = RejectionDisposition(
+                nc_record_id=record.id,
+                action="REPLACEMENT",
+                quantity=req.quantity,
+                destination_wo_number=new_wo_num,
+                destination_part_number=original_wo.order.part.part_number if original_wo.order and original_wo.order.part else None,
+                conversion_id=conv.id,
+                authorized_by_id=current_user.id if current_user else None,
+                authorized_by_name=current_user.full_name if current_user else "System",
+                remarks=req.remarks or req.reason
+            )
+            db.add(disposition)
+
+            new_remaining = remaining - req.quantity
+            if new_remaining <= 0 and record.status != "Closed":
+                record.status = "Closed"
+                record.date_closed = datetime.now()
+            if record.disposition is None:
+                record.disposition = "REPLACEMENT"
+
+            audit = AuditLog(
+                user_id=current_user.id if current_user else None,
+                user_name=current_user.full_name if current_user else "System",
+                action="REJECTION_DISPOSITION_REPLACEMENT",
+                entity="NCRecord",
+                entity_id=record.nc_number,
+                old_value=f"Source WO: {original_wo.wo_number}, Remaining before: {remaining}",
+                new_value=f"Replacement WO: {new_wo_num}, Qty: {req.quantity}, Remaining after: {new_remaining}",
+                details=req.reason
+            )
+            db.add(audit)
+        else:
+            audit = AuditLog(
+                user_id=current_user.id if current_user else None,
+                user_name=current_user.full_name if current_user else "System",
+                action="PATCH_WO_CREATION",
+                entity="WorkOrder",
+                entity_id=new_wo_num,
+                old_value=f"OAR: {order.oar_number}, Shortfall before: {max_recoverable}",
+                new_value=f"Patch WO: {new_wo_num}, Qty: {req.quantity}, Shortfall after: {max(max_recoverable - req.quantity, 0)}",
+                details=req.reason
+            )
+            db.add(audit)
+
+        db.commit()
+        db.refresh(replacement_wo)
+
+        order = original_wo.order
+        return ReplacementResponse(
+            success=True,
+            nc_number=record.nc_number if record else "N/A",
+            replacement_wo_number=new_wo_num,
+            original_wo_number=original_wo.wo_number,
+            oar_number=order.oar_number if order else "N/A",
+            quantity=req.quantity,
+            remaining_qty=max(max_recoverable - req.quantity, 0),
+            message=f"Replacement Work Order '{new_wo_num}' created against OAR "
+                    f"'{order.oar_number if order else 'N/A'}' for {req.quantity} pieces "
+                    f"(source: {original_wo.wo_number}). It must follow the normal release "
+                    f"chain (Engineering Release -> Manufacturing Release -> WO Release) before production."
         )
 
     @staticmethod

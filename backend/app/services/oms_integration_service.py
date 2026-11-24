@@ -1,13 +1,19 @@
 import math
+import re
 from datetime import datetime, date
 from typing import List, Dict, Optional, Tuple, Union
 from sqlalchemy.orm import Session
+from sqlalchemy import func, or_
 from app.models.work_order import WorkOrder, WORoute, WOStatus
 from app.models.production_movement import ProductionMovement, StageWIP
 from app.models.packing import PackingRecord
 from app.models.dispatch import Dispatch
 from app.models.nc import NCRecord
+from app.models.order import Order, Customer, Part, OrderStatus
+from app.models.audit import AuditLog
+from app.models.oms_exception import OMSException
 from app.schemas.production import ReconciliationItem, PlantReconciliationResponse
+from app.schemas.oms import WOOarLinkRow, LinkResult, LinkException, LinkResultItem
 
 # Authoritative OMS Yields & Defaults from oms_core/oms_engine.py
 DEFAULT_YIELDS: Dict[str, float] = {
@@ -31,7 +37,7 @@ def parse_route(route_str: Union[str, List[str]]) -> List[str]:
     'F1 > F2 > F3 > SP > FI > Packing > Dispatch' -> ['F1', 'F2', 'F3', 'SP', 'FI', 'Packing', 'Dispatch']
     """
     if not route_str:
-        return ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+        return ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
     if isinstance(route_str, list):
         parts = [str(x).strip() for x in route_str]
     else:
@@ -80,7 +86,7 @@ def calculate_stage_targets(good_target: int, yields: Optional[Dict[str, float]]
     Back-calculates stage target quantities from good target using stage yields over the route.
     """
     yd = yields or DEFAULT_YIELDS
-    rt = route or ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+    rt = route or ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
     prod = [s for s in rt if s.upper() not in ("DISPATCH", "PACKING", "BSR", "PACKING / BSR")]
     targets: Dict[str, int] = {}
     need = float(good_target)
@@ -159,6 +165,8 @@ class OMSIntegrationService:
         route_names = [r.stage for r in routes]
         wip_map = {w.stage: w for w in db.query(StageWIP).filter(StageWIP.work_order_id == wo.id).all()}
         pr = db.query(PackingRecord).filter(PackingRecord.work_order_id == wo.id).first()
+        from app.models.vendor import VendorDispatch
+        vendor_dispatches = db.query(VendorDispatch).filter(VendorDispatch.work_order_id == wo.id).all()
 
         # 1. Flow calculations along the route
         for i, r in enumerate(routes):
@@ -182,6 +190,9 @@ class OMSIntegrationService:
             ent = wip_rec.ent_qty
             ok = wip_rec.ok_qty
             rej = wip_rec.rejected_qty
+            # If the stage target was inflated beyond the released WO quantity, cap it to physical_wo_qty
+            if wo.physical_wo_qty and wo.physical_wo_qty > 0 and r.stage_target_qty > wo.physical_wo_qty:
+                r.stage_target_qty = wo.physical_wo_qty
             tgt = r.stage_target_qty
 
             is_packing_or_final = (
@@ -190,20 +201,54 @@ class OMSIntegrationService:
                 or (i + 1 < len(routes) and routes[i + 1].stage.upper() == "DISPATCH")
             )
 
-            if is_packing_or_final and pr:
-                net_ip = pr.pending_qty
-                on_hand = pr.ready_for_dispatch_qty
-            else:
-                # OMS Flow Formula: In-Process (net) = max(Ent - OK - Rej, 0)
-                net_ip = max(ent - ok - rej, 0)
+            # OMS Flow Formula: In-Process (net) = max(Ent - OK - Rej, 0)
+            std_inproc = max(ent - ok - rej, 0)
 
-                # OMS Flow Formula: On-Hand = max(OK - Ent(next), 0)
-                nxt_ent = 0
-                if i + 1 < len(routes):
-                    nxt_stg = routes[i + 1].stage
-                    nxt_wip = wip_map.get(nxt_stg)
-                    nxt_ent = nxt_wip.ent_qty if nxt_wip else 0
-                on_hand = max(ok - nxt_ent, 0)
+            # Vendor outflow from this stage:
+            # 1. Pieces currently at vendor (not yet received or scrapped)
+            active_at_vendor = sum(
+                max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0)
+                for d in vendor_dispatches
+                if d.dispatch_stage == stg and d.status in ("AT_VENDOR", "PARTIALLY_RECEIVED")
+            )
+            # 2. Pieces that were received into a downstream stage != stg and != nxt_stg
+            # (If received into nxt_stg, they are already counted inside nxt_wip.ent_qty below;
+            # excluding nxt_stg avoids subtracting those pieces twice).
+            nxt_stg = routes[i + 1].stage if (i + 1 < len(routes)) else None
+            received_beyond_next = sum(
+                (d.received_qty or 0)
+                for d in vendor_dispatches
+                if d.dispatch_stage == stg 
+                and (d.received_stage or d.target_return_stage or "FI") not in (stg, nxt_stg)
+            )
+            # 3. Pieces scrapped at vendor
+            scrapped_at_vendor = sum(
+                (d.scrap_qty or 0)
+                for d in vendor_dispatches
+                if d.dispatch_stage == stg
+            )
+            vendor_outflow = active_at_vendor + received_beyond_next + scrapped_at_vendor
+
+            # OMS Flow Formula: On-Hand = max(OK - Ent(next) - vendor_outflow, 0)
+            nxt_ent = 0
+            if nxt_stg:
+                nxt_wip = wip_map.get(nxt_stg)
+                nxt_ent = nxt_wip.ent_qty if nxt_wip else 0
+                std_on_hand = max(ok - nxt_ent - vendor_outflow, 0)
+            else:
+                dispatched_total = sum(d.dispatched_qty or 0 for d in db.query(Dispatch).filter(Dispatch.work_order_id == wo.id).all())
+                std_on_hand = max(ok - dispatched_total - vendor_outflow, 0)
+
+            if stg.upper() == "DISPATCH":
+                dispatched_total = sum(d.dispatched_qty or 0 for d in db.query(Dispatch).filter(Dispatch.work_order_id == wo.id).all())
+                net_ip = 0
+                on_hand = max(ok - dispatched_total, 0)
+            elif is_packing_or_final and pr:
+                net_ip = max(std_inproc, pr.pending_qty)
+                on_hand = max(std_on_hand, pr.ready_for_dispatch_qty)
+            else:
+                net_ip = std_inproc
+                on_hand = std_on_hand
 
             # Update StageWIP
             wip_rec.inproc_qty = net_ip
@@ -218,9 +263,18 @@ class OMSIntegrationService:
             r.cumulative_rej_qty = rej
             r.cumulative_inproc_qty = net_ip
             r.cumulative_onhand_qty = on_hand
-            r.stage_status = calculate_rag_status(ok, rej, net_ip, tgt)
 
-        # 2. Furthest data-bearing stage (OMS Snapshot Rule)
+            # Gate lock status: If all entered material has been produced (net_ip == 0) and all good product moved out (on_hand == 0):
+            is_completed_gate = bool(ent > 0 and net_ip == 0 and on_hand == 0 and (ok + rej) > 0)
+            if is_completed_gate:
+                if active_at_vendor > 0:
+                    r.stage_status = "At Vendor"
+                else:
+                    r.stage_status = "Completed"
+            else:
+                r.stage_status = calculate_rag_status(ok, rej, net_ip, tgt)
+
+        # 2. Furthest data-bearing stage & Active Stage (OMS Snapshot Rule)
         def _has_data(stg_name: str) -> bool:
             w = wip_map.get(stg_name)
             if not w:
@@ -232,7 +286,17 @@ class OMSIntegrationService:
             if _has_data(r.stage):
                 furthest = r.stage
 
-        if furthest is None:
+        # Find first stage along the route that has active WIP (inproc > 0 or onhand > 0)
+        active_stg = None
+        for r in routes:
+            w = wip_map.get(r.stage)
+            if w and (w.inproc_qty > 0 or w.onhand_qty > 0):
+                active_stg = r.stage
+                break
+
+        if active_stg:
+            cur = active_stg
+        elif furthest is None:
             cur = routes[0].stage
         elif furthest == routes[-1].stage and routes[-1].stage_status in DISPATCH_DONE:
             cur = "Completed"
@@ -242,7 +306,7 @@ class OMSIntegrationService:
 
         # 3. Projected Final Good & Shortfall Calculation
         good = wo.physical_wo_qty
-        prod_routes = [r for r in routes if r.stage.upper() not in ("DISPATCH",)]
+        prod_routes = [r for r in routes if r.stage.upper() not in ("DISPATCH", "PACKING", "BSR", "PACKING / BSR", "PACKING/BSR")]
         proj = good
         last_ok_stage = None
         for pr_route in prod_routes:
@@ -270,10 +334,16 @@ class OMSIntegrationService:
             lp_w = wip_map.get(last_prod)
             prod_done = lp_w is not None and (lp_w.ok_qty > 0 or lp_w.rejected_qty > 0)
 
+        cur_upper = (cur or "").upper()
         if (pr and pr.dispatched_qty > 0 and pr.ready_for_dispatch_qty == 0 and pr.pending_qty == 0) or str(wo.status).lower() in ("dispatched", "wostatus.dispatched"):
             wo.status = WOStatus.DISPATCHED
             wo.current_stage = "Completed"
-        elif prod_done or cur in ("DISPATCH", "Completed"):
+        elif cur_upper in ("DISPATCH", "COMPLETED"):
+            wo.status = WOStatus.READY
+        elif cur_upper in ("PACKING", "BSR", "PACKING / BSR", "PACKING/BSR"):
+            # Material has finished manufacturing & QA and is now in post-production packaging
+            wo.status = WOStatus.READY
+        elif prod_done:
             wo.status = WOStatus.READY
         else:
             wo.status = WOStatus.IN_PRODUCTION
@@ -347,27 +417,38 @@ class OMSIntegrationService:
             StageWIP.stage == (matched or stage_name)
         ).first()
 
-        target_qty = route_rec.stage_target_qty if route_rec else (wo.physical_wo_qty or 0)
+        # Cap target_qty to physical_wo_qty so released WO target never inflates
+        target_qty = min(route_rec.stage_target_qty, wo.physical_wo_qty) if (route_rec and wo.physical_wo_qty and wo.physical_wo_qty > 0) else (wo.physical_wo_qty if (wo.physical_wo_qty and wo.physical_wo_qty > 0) else (route_rec.stage_target_qty if route_rec else 0))
         ok_qty = wip_rec.ok_qty if wip_rec else 0
         rej_qty = wip_rec.rejected_qty if wip_rec else 0
         inproc_qty = wip_rec.inproc_qty if wip_rec else 0
         onhand_qty = wip_rec.onhand_qty if wip_rec else 0
-        avail_wip = inproc_qty + onhand_qty
-        # Good quantity that has already left this stage via movement -- the portion of
-        # cumulative OK that is no longer sitting here as on-hand WIP. Derived from the
-        # same ok_qty/onhand_qty this function already computes; not a new calculation,
-        # just exposing an existing relationship (onhand_qty = max(ok_qty - next stage's
-        # ent_qty, 0), so ok_qty - onhand_qty is exactly what has moved on).
+        avail_wip = onhand_qty
         already_moved_qty = max(ok_qty - onhand_qty, 0)
-        # Production-planning view (Target vs. cumulative OK), distinct from inproc_qty
-        # (the physical unprocessed-material ceiling above). These can legitimately
-        # differ once anything has been rejected: e.g. Target=10, 2 rejected, 5 OK ->
-        # inproc_qty = 10-5-2 = 3 pieces of raw material still physically convertible,
-        # while "Not Yet Produced" = 10-5 = 5 against the original target. Both are
-        # real, correct answers to different questions -- not an inconsistency.
-        not_yet_produced = max(target_qty - ok_qty, 0)
-        rag = route_rec.stage_status if route_rec else calculate_rag_status(ok_qty, rej_qty, inproc_qty, target_qty)
+        
+        # Remaining unprocessed pieces to produce at this stage
+        remaining_to_produce = inproc_qty
+        
+        # Gate lock status: If all entered material has been produced (inproc == 0) and all good product moved out (onhand == 0):
+        is_gate_locked = bool(
+            wip_rec
+            and wip_rec.ent_qty > 0
+            and inproc_qty == 0
+            and onhand_qty == 0
+            and (ok_qty + rej_qty) > 0
+        )
+        rag = "Completed" if is_gate_locked else (route_rec.stage_status if route_rec else calculate_rag_status(ok_qty, rej_qty, inproc_qty, target_qty))
         next_stage = OMSIntegrationService.get_next_stage(db, wo, matched or stage_name)
+
+        # Check MRB summary for this stage (Option 2)
+        from app.services.mrb_service import MRBService
+        mrb_summary = MRBService.get_stage_mrb_summary(
+            db=db,
+            work_order_id=wo.id,
+            stage=matched or stage_name,
+            onhand_qty=onhand_qty,
+            already_moved=already_moved_qty
+        )
 
         return {
             "wo_number": wo.wo_number,
@@ -375,16 +456,23 @@ class OMSIntegrationService:
             "target_qty": target_qty,
             "ok_completed_qty": ok_qty,
             "rejected_qty": rej_qty,
+            "total_produced": ok_qty + rej_qty,
             "in_process_qty": inproc_qty,
             "on_hand_qty": onhand_qty,
-            "available_wip": avail_wip,
+            "available_wip": onhand_qty,
             "already_moved_qty": already_moved_qty,
-            "not_yet_produced": not_yet_produced,
-            "remaining_to_produce": not_yet_produced,
+            "not_yet_produced": remaining_to_produce,
+            "remaining_to_produce": remaining_to_produce,
             "stage_status": rag,
+            "is_gate_locked": is_gate_locked,
             "is_current_stage": (wo.current_stage == (matched or stage_name)),
-            "next_stage": next_stage
+            "next_stage": next_stage,
+            "mrb_lock_status": mrb_summary["lock_status"],
+            "mrb_approved_movable_qty": mrb_summary["approved_movable_qty"],
+            "mrb_pending_qty": mrb_summary["pending_qty"],
+            "pending_mrb_tickets": mrb_summary["pending_tickets"]
         }
+
 
     @staticmethod
     def initialize_wo_stages(db: Session, wo: WorkOrder, route_str: Optional[str] = None) -> List[WORoute]:
@@ -396,13 +484,12 @@ class OMSIntegrationService:
         db.query(WORoute).filter(WORoute.work_order_id == wo.id).delete()
         db.query(StageWIP).filter(StageWIP.work_order_id == wo.id).delete()
 
-        stage_list = parse_route(route_str) if route_str else ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
-        targets = calculate_stage_targets(wo.physical_wo_qty, route=stage_list)
+        stage_list = parse_route(route_str) if route_str else ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
 
         created_routes = []
         for seq, stg in enumerate(stage_list, start=1):
             is_first = (seq == 1)
-            tgt = targets.get(stg, wo.physical_wo_qty)
+            tgt = wo.physical_wo_qty
             r = WORoute(
                 work_order_id=wo.id,
                 stage=stg,
@@ -461,3 +548,469 @@ class OMSIntegrationService:
             reconciliations=recs,
             is_plant_balanced=(mismatched_count == 0)
         )
+
+    @staticmethod
+    def link_wo_to_oar(db: Session, rows: List[WOOarLinkRow]) -> LinkResult:
+        return link_wo_to_oar(db, rows)
+
+
+def extract_oar_number(oar_str: Optional[str]) -> Optional[int]:
+    """Extract numeric suffix from OAR identifiers like 'OAR-8326', 'OAR 8326', 'OAR8326', '8326'."""
+    if not oar_str:
+        return None
+    s = str(oar_str).strip().upper()
+    m = re.match(r"^(?:OAR[\s\-_]*)?(\d+)$", s)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    return None
+
+
+def extract_wo_number(wo_str: Optional[str]) -> Optional[int]:
+    """Extract numeric suffix from WO identifiers like 'WO-16772', 'WO 16772', 'WO16772', '16772'."""
+    if not wo_str:
+        return None
+    s = str(wo_str).strip().upper()
+    m = re.match(r"^(?:WO[\s\-_]*)?(\d+)$", s)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    return None
+
+
+def _normalize_code(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    s = str(val).strip().upper()
+    return re.sub(r"\s*-\s*", "-", s)
+
+
+def _normalize_oar_code(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    s = str(val).strip()
+    num = extract_oar_number(s)
+    if num is not None:
+        return f"OAR-{num:04d}" if num < 10000 else f"OAR-{num}"
+    return _normalize_code(s)
+
+
+def _normalize_wo_code(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    s = str(val).strip()
+    num = extract_wo_number(s)
+    if num is not None:
+        return f"WO-{num}"
+    return _normalize_code(s)
+
+
+def _parse_delivery_date(val: Optional[Union[date, datetime, str]]) -> Optional[date]:
+    if not val:
+        return None
+    if isinstance(val, date) and not isinstance(val, datetime):
+        return val
+    if isinstance(val, datetime):
+        return val.date()
+    s = str(val).strip()
+    if not s or s.lower() in ("none", "null", "nan"):
+        return None
+    date_part = s.split()[0].split("T")[0]
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(date_part, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def _record_exception(db: Session, exc_type: str, detail: str, wo_id: Optional[str] = None):
+    try:
+        exc = OMSException(
+            exception_type=exc_type,
+            detail=detail,
+            wo_id=wo_id
+        )
+        db.add(exc)
+        db.flush()
+    except Exception:
+        pass
+    try:
+        audit = AuditLog(
+            user_name="system:wo-oar-link",
+            action="LINK_EXCEPTION",
+            entity="WorkOrder" if wo_id else "OAR",
+            entity_id=wo_id,
+            new_value=exc_type,
+            details=detail
+        )
+        db.add(audit)
+        db.flush()
+    except Exception:
+        pass
+
+
+def next_oar_sequence(db: Session, reserved_set: Optional[set] = None) -> str:
+    """Collision-free next OAR sequence generator.
+    Scans all existing OARs (regardless of formatting like OAR-8326, OAR 8326, 8326)
+    and continues from highest + 1.
+    """
+    highest = 0
+    for (oar_num,) in db.query(Order.oar_number).filter(Order.oar_number.isnot(None)).all():
+        num = extract_oar_number(oar_num)
+        if num is not None:
+            highest = max(highest, num)
+
+    if reserved_set:
+        for item in reserved_set:
+            num = extract_oar_number(item)
+            if num is not None:
+                highest = max(highest, num)
+
+    curr_int = highest + 1 if highest > 0 else db.query(Order).count() + 1
+    candidate = f"OAR-{curr_int:04d}" if curr_int < 10000 else f"OAR-{curr_int}"
+    while (
+        (reserved_set and candidate in reserved_set)
+        or db.query(Order).filter(
+            or_(
+                Order.oar_number == candidate,
+                Order.oar_number == f"OAR {curr_int}",
+                Order.oar_number == str(curr_int),
+            )
+        ).first()
+    ):
+        curr_int += 1
+        candidate = f"OAR-{curr_int:04d}" if curr_int < 10000 else f"OAR-{curr_int}"
+
+    if reserved_set is not None:
+        reserved_set.add(candidate)
+    return candidate
+
+
+def next_wo_sequence(db: Session, reserved_set: Optional[set] = None) -> str:
+    """Collision-free next WO sequence generator.
+    Scans all existing Work Orders (regardless of formatting like WO-16772, WO 16772, 16772)
+    and continues from highest + 1.
+    """
+    highest = 1000
+    for (wo_num,) in db.query(WorkOrder.wo_number).filter(WorkOrder.wo_number.isnot(None)).all():
+        num = extract_wo_number(wo_num)
+        if num is not None:
+            highest = max(highest, num)
+
+    if reserved_set:
+        for item in reserved_set:
+            num = extract_wo_number(item)
+            if num is not None:
+                highest = max(highest, num)
+
+    curr_int = highest + 1
+    candidate = f"WO-{curr_int}"
+    while (
+        (reserved_set and candidate in reserved_set)
+        or db.query(WorkOrder).filter(
+            or_(
+                WorkOrder.wo_number == candidate,
+                WorkOrder.wo_number == f"WO {curr_int}",
+                WorkOrder.wo_number == str(curr_int),
+            )
+        ).first()
+    ):
+        curr_int += 1
+        candidate = f"WO-{curr_int}"
+
+    if reserved_set is not None:
+        reserved_set.add(candidate)
+    return candidate
+
+
+def _find_or_create_customer(db: Session, cust_str: str) -> Customer:
+    cleaned = cust_str.strip()
+    cust = db.query(Customer).filter(
+        or_(
+            func.lower(Customer.name) == cleaned.lower(),
+            func.lower(Customer.customer_code) == cleaned.lower()
+        )
+    ).first()
+    if cust:
+        return cust
+    norm_input = re.sub(r"[^a-zA-Z0-9]", "", cleaned).lower()
+    for c in db.query(Customer).all():
+        if (
+            re.sub(r"[^a-zA-Z0-9]", "", c.name).lower() == norm_input
+            or re.sub(r"[^a-zA-Z0-9]", "", c.customer_code).lower() == norm_input
+        ):
+            return c
+    prefix = re.sub(r"[^A-Za-z]", "", cleaned)[:4].upper() or "CUST"
+    code = prefix
+    counter = 1
+    while db.query(Customer).filter(Customer.customer_code == code).first():
+        code = f"{prefix[:3]}{counter}"
+        counter += 1
+    cust = Customer(customer_code=code, name=cleaned, is_active=True)
+    db.add(cust)
+    db.flush()
+    return cust
+
+
+def _find_or_create_part(db: Session, part_no_str: str, grade: Optional[str] = None) -> Part:
+    cleaned = part_no_str.strip()
+    part = db.query(Part).filter(
+        func.lower(Part.part_number) == cleaned.lower()
+    ).first()
+    if part:
+        return part
+    norm_input = re.sub(r"[^a-zA-Z0-9]", "", cleaned).lower()
+    for p in db.query(Part).all():
+        if re.sub(r"[^a-zA-Z0-9]", "", p.part_number).lower() == norm_input:
+            return p
+
+    # Check if part_no_str is a Customer Part Number in CustomerPartMapping or CustomerPartCrossReference
+    from app.models.customer_part_mapping import CustomerPartMapping
+    m = db.query(CustomerPartMapping).filter(
+        func.lower(CustomerPartMapping.customer_part_number) == cleaned.lower()
+    ).first()
+    if m:
+        part = db.query(Part).filter(Part.id == m.part_id).first()
+        if part:
+            return part
+    try:
+        from app.models.customer_part_cross_reference import CustomerPartCrossReference
+        xref = db.query(CustomerPartCrossReference).filter(
+            func.lower(CustomerPartCrossReference.customer_part_no) == cleaned.lower(),
+            CustomerPartCrossReference.is_active == True,
+        ).first()
+        if xref:
+            part = db.query(Part).filter(Part.id == xref.part_id).first()
+            if part:
+                return part
+    except Exception:
+        pass
+
+    part = Part(
+        part_number=cleaned,
+        grade=grade or "Standard",
+        description=f"Component {cleaned}"
+    )
+    db.add(part)
+    db.flush()
+    return part
+
+
+def link_wo_to_oar(db: Session, rows: List[WOOarLinkRow]) -> LinkResult:
+    """
+    Links team-assigned Work Order IDs to OARs (Orders) idempotently.
+    Creates the OAR (= accepting a PO) only when one doesn't already exist for that order.
+    Executes in a single DB transaction per row so one invalid row does not abort the batch.
+    """
+    result = LinkResult(
+        total_processed=len(rows),
+        linked_count=0,
+        already_linked_count=0,
+        created_oars_count=0,
+        exceptions_count=0
+    )
+
+    for row in rows:
+        try:
+            # 1. SKIP IF ALREADY LINKED
+            raw_wo = str(row.wo_id).strip()
+            norm_wo = _normalize_wo_code(raw_wo)
+            existing_wo = db.query(WorkOrder).filter(
+                or_(
+                    WorkOrder.wo_number == raw_wo,
+                    WorkOrder.wo_number == norm_wo,
+                    WorkOrder.wo_number == f"WO-{raw_wo}",
+                    WorkOrder.wo_number == f"WO {raw_wo}",
+                )
+            ).first()
+
+            if existing_wo:
+                result.already_linked.append(row.wo_id)
+                result.items.append(LinkResultItem(
+                    wo_id=row.wo_id,
+                    oar_no=existing_wo.order.oar_number if existing_wo.order else None,
+                    status="already_linked",
+                    detail="Work Order already exists in software"
+                ))
+                continue
+
+            # 2. REQUIRED FIELDS
+            missing_fields = []
+            if not row.customer_po_number or not str(row.customer_po_number).strip():
+                missing_fields.append("customer_po_number")
+            if not row.part_no or not str(row.part_no).strip():
+                missing_fields.append("part_no")
+            if not row.customer or not str(row.customer).strip():
+                missing_fields.append("customer")
+            if row.wo_quantity is None or row.wo_quantity <= 0:
+                missing_fields.append(f"wo_quantity (got {row.wo_quantity})")
+
+            if missing_fields:
+                detail = f"WO {row.wo_id}: missing or invalid required field(s): {', '.join(missing_fields)}"
+                _record_exception(db, "missing_field", detail, row.wo_id)
+                db.commit()
+                result.exceptions.append(LinkException(type="missing_field", detail=detail, wo_id=row.wo_id))
+                result.items.append(LinkResultItem(wo_id=row.wo_id, oar_no=None, status="exception", detail=detail))
+                continue
+
+            # Resolve Customer and Part
+            cust = _find_or_create_customer(db, row.customer)
+            part = _find_or_create_part(db, row.part_no, grade=row.grade)
+
+            # 3. FIND OR CREATE THE OAR — idempotent on (customer_po_number, part_no).
+            # This is the 'one accepted order = one OAR' rule.
+            clean_po = row.customer_po_number.strip()
+            clean_part_no = row.part_no.strip()
+            raw_oar = str(row.oar_no).strip() if row.oar_no else ""
+            norm_oar = _normalize_oar_code(raw_oar) if raw_oar else ""
+
+            existing_oar = db.query(Order).join(Part).filter(
+                func.lower(func.trim(Order.customer_po)) == clean_po.lower(),
+                func.lower(func.trim(Part.part_number)) == clean_part_no.lower()
+            ).first()
+
+            if not existing_oar:
+                existing_oar = db.query(Order).filter(
+                    Order.part_id == part.id,
+                    func.lower(func.trim(Order.customer_po)) == clean_po.lower()
+                ).first()
+
+            if not existing_oar and raw_oar:
+                existing_oar = db.query(Order).filter(
+                    Order.customer_id == cust.id,
+                    or_(
+                        Order.oar_number == raw_oar,
+                        Order.oar_number == norm_oar,
+                    )
+                ).first()
+
+            oar = None
+            if existing_oar:
+                # CASE A — existing_oar found:
+                if raw_oar:
+                    norm_row_oar = _normalize_oar_code(raw_oar)
+                    norm_db_oar = _normalize_oar_code(existing_oar.oar_number)
+                    if norm_row_oar != norm_db_oar and raw_oar != existing_oar.oar_number:
+                        detail = f"WO {row.wo_id}: input says {row.oar_no}, DB has {existing_oar.oar_number}"
+                        _record_exception(db, "oar_mismatch", detail, row.wo_id)
+                        result.exceptions.append(LinkException(type="oar_mismatch", detail=detail, wo_id=row.wo_id))
+
+                existing_cust_name = existing_oar.customer.name.strip().lower() if existing_oar.customer else ""
+                existing_cust_code = existing_oar.customer.customer_code.strip().lower() if existing_oar.customer else ""
+                input_cust = row.customer.strip().lower()
+
+                cust_matched = (
+                    input_cust == existing_cust_name
+                    or input_cust == existing_cust_code
+                    or input_cust in existing_cust_name
+                    or existing_cust_name in input_cust
+                    or re.sub(r"[^a-zA-Z0-9]", "", input_cust) == re.sub(r"[^a-zA-Z0-9]", "", existing_cust_name)
+                )
+
+                if not cust_matched:
+                    detail = f"WO {row.wo_id}: OAR {existing_oar.oar_number} customer mismatch (input says '{row.customer}', DB has '{existing_oar.customer.name if existing_oar.customer else ''}')"
+                    _record_exception(db, "customer_mismatch", detail, row.wo_id)
+                    db.commit()
+                    result.exceptions.append(LinkException(type="customer_mismatch", detail=detail, wo_id=row.wo_id))
+                    result.items.append(LinkResultItem(wo_id=row.wo_id, oar_no=existing_oar.oar_number, status="exception", detail=detail))
+                    continue
+
+                oar = existing_oar
+            else:
+                # CASE B — no existing_oar (genuinely new order):
+                if raw_oar:
+                    if not db.query(Order).filter(Order.oar_number == raw_oar).first():
+                        oar_num = raw_oar
+                    elif norm_oar and not db.query(Order).filter(Order.oar_number == norm_oar).first():
+                        oar_num = norm_oar
+                    else:
+                        oar_num = next_oar_sequence(db)
+                else:
+                    oar_num = next_oar_sequence(db)
+
+                deliv_date = _parse_delivery_date(row.cust_delivery_date)
+                po_qty = row.po_quantity if (row.po_quantity and row.po_quantity > 0) else row.wo_quantity
+
+                oar = Order(
+                    oar_number=oar_num,
+                    customer_id=cust.id,
+                    part_id=part.id,
+                    customer_po=clean_po,
+                    po_qty=po_qty,
+                    max_batch_size=500,
+                    delivery_date=deliv_date or date.today(),
+                    order_type="Standard",
+                    status=OrderStatus.ACCEPT,
+                    source_type="schedule" if "SCH" in clean_po.upper() else "po"
+                )
+                db.add(oar)
+                db.flush()
+                result.created_oars.append(oar.oar_number)
+
+                db.add(AuditLog(
+                    user_name="system:wo-oar-link",
+                    action="OAR_CREATE",
+                    entity="Order",
+                    entity_id=oar.oar_number,
+                    new_value=f"PO: {clean_po}, Qty: {po_qty}",
+                    details=f"via WO-OAR link, WO {row.wo_id}"
+                ))
+
+            # 4. CREATE THE WO (team-assigned ID — never auto-generate it here; this input's WO IDs are authoritative)
+            wo = WorkOrder(
+                wo_number=row.wo_id.strip(),
+                order_id=oar.id,
+                physical_wo_qty=row.wo_quantity,
+                current_stage="F1",
+                projected_final_good=row.wo_quantity,
+                shortfall="No",
+                status=WOStatus.IN_PRODUCTION,
+                casting_process="CENTRIFUGAL"
+            )
+            db.add(wo)
+            db.flush()
+
+            # Initialize 7-stage routes and StageWIP
+            OMSIntegrationService.initialize_wo_stages(db, wo)
+
+            # Audit log
+            db.add(AuditLog(
+                user_name="system:wo-oar-link",
+                action="WO_CREATE",
+                entity="WorkOrder",
+                entity_id=wo.wo_number,
+                new_value=f"Qty: {row.wo_quantity}, OAR: {oar.oar_number}",
+                details=f"Linked to OAR {oar.oar_number} for PO {clean_po}"
+            ))
+
+            db.commit()
+            result.linked.append(wo.wo_number)
+            result.items.append(LinkResultItem(
+                wo_id=wo.wo_number,
+                oar_no=oar.oar_number,
+                status="linked",
+                detail=f"Linked to OAR {oar.oar_number}"
+            ))
+
+        except Exception as e:
+            db.rollback()
+            detail = f"WO {row.wo_id}: unexpected failure: {str(e)}"
+            _record_exception(db, "system_error", detail, row.wo_id)
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+            result.exceptions.append(LinkException(type="system_error", detail=detail, wo_id=row.wo_id))
+            result.items.append(LinkResultItem(wo_id=row.wo_id, oar_no=None, status="exception", detail=detail))
+
+    result.linked_count = len(result.linked)
+    result.already_linked_count = len(result.already_linked)
+    result.created_oars_count = len(result.created_oars)
+    result.exceptions_count = len(result.exceptions)
+    return result
+

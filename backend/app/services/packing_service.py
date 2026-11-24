@@ -6,14 +6,35 @@ from sqlalchemy.exc import IntegrityError
 from app.models.work_order import WorkOrder, WOStatus
 from app.models.production_movement import StageWIP
 from app.models.packing import PackingRecord, PackingTransaction
+from app.models.customer_part_mapping import CustomerPartMapping
 from app.models.audit import AuditLog
 from app.models.user import User
 from app.schemas.packing import PackingQueueItem, PackingUpdateRequest, PackingUpdateResponse
+
+
+def _get_next_packing_unit_code(db: Session) -> str:
+    """Assigned once per packing transaction, at creation -- unique and immutable.
+    Same parse-max-and-increment convention as every other generated code in this
+    codebase (movement_id, wo_number, nc_number, schedule_number)."""
+    max_num = 0
+    for (code,) in db.query(PackingTransaction.packing_unit_code).all():
+        if code and code.startswith("PKU-"):
+            try:
+                num = int(code.split("-")[1])
+                if num > max_num:
+                    max_num = num
+            except (IndexError, ValueError):
+                pass
+    return f"PKU-{max_num + 1:06d}"
+
 
 class PackingService:
     @staticmethod
     def get_packing_queue(db: Session) -> List[PackingQueueItem]:
         records = db.query(PackingRecord).join(WorkOrder).all()
+        cpms = db.query(CustomerPartMapping.customer_id, CustomerPartMapping.part_id, CustomerPartMapping.customer_part_number).all()
+        cpm_map = {(c.customer_id, c.part_id): c.customer_part_number for c in cpms}
+
         results = []
         for r in records:
             wo = r.work_order
@@ -25,6 +46,16 @@ class PackingService:
             order_qty = wo.physical_wo_qty if wo else 0
             oar_number = order.oar_number if order else None
 
+            cust_part_no = (
+                order.customer_part_number
+                if (order and order.customer_part_number)
+                else (order.po_line.customer_part_number if (order and order.po_line and order.po_line.customer_part_number) else None)
+            )
+            if not cust_part_no and order and order.customer_id and order.part_id:
+                cust_part_no = cpm_map.get((order.customer_id, order.part_id))
+            if not cust_part_no and order and order.part:
+                cust_part_no = order.part.description or None
+
             results.append(PackingQueueItem(
                 id=str(r.id),
                 work_order_id=str(wo.id),
@@ -32,6 +63,7 @@ class PackingService:
                 oar_number=oar_number,
                 customer_name=customer_name,
                 part_number=part_number,
+                customer_part_number=cust_part_no,
                 part_name=part_name,
                 grade=grade,
                 order_qty=order_qty,
@@ -61,6 +93,7 @@ class PackingService:
                     success=True,
                     wo_number=wo_existing.wo_number if wo_existing else req.wo_number,
                     client_request_id=existing_txn.client_request_id,
+                    packing_unit_code=existing_txn.packing_unit_code,
                     packed_this_batch=existing_txn.packed_quantity,
                     total_packed=pr_existing.packed_qty if pr_existing else existing_txn.packed_quantity,
                     remaining_pending=pr_existing.pending_qty if pr_existing else 0,
@@ -119,16 +152,57 @@ class PackingService:
         packing_rec.pending_qty -= req.packed_quantity
         packing_rec.ready_for_dispatch_qty += req.packed_quantity
 
+        # Synchronize PACKING StageWIP so packed goods are recorded on-hand for BSR movement
+        pack_wip_sync = db.query(StageWIP).filter(
+            StageWIP.work_order_id == wo.id,
+            StageWIP.stage.in_(["PACKING", "PACKING / BSR", "PACKING/BSR"])
+        ).first()
+        if pack_wip_sync:
+            pack_wip_sync.ok_qty = (pack_wip_sync.ok_qty or 0) + req.packed_quantity
+            pack_wip_sync.onhand_qty = (pack_wip_sync.onhand_qty or 0) + req.packed_quantity
+
         if packing_rec.pending_qty == 0:
             packing_rec.status = "Ready-for-Dispatch"
             wo.status = WOStatus.READY
+
+            # Automatic Excess Stock Banking into BSR Finished Goods Buffer
+            if wo.order and wo.order.part_id:
+                wo_excess = getattr(wo, "excess_qty", 0) or 0
+                if wo_excess > 0:
+                    from sqlalchemy import func
+                    from app.models.bsr_stock import BSRStock
+                    already_banked = db.query(func.coalesce(func.sum(BSRStock.available_qty + BSRStock.allocated_qty), 0)).filter(
+                        BSRStock.source_wo_id == wo.id
+                    ).scalar() or 0
+                    to_bank = max(0, wo_excess - already_banked)
+                    if to_bank > 0:
+                        bsr_item = BSRStock(
+                            part_id=wo.order.part_id,
+                            available_qty=to_bank,
+                            allocated_qty=0,
+                            source_wo_id=wo.id,
+                            heat_number=wo.heat_number,
+                            remarks=f"Excess finished pieces auto-banked from WO {wo.wo_number} (PO: {wo.order.customer_po}, OAR: {wo.order.oar_number})"
+                        )
+                        db.add(bsr_item)
+                        db.add(AuditLog(
+                            user_id=current_user.id if current_user else None,
+                            user_name=current_user.full_name if current_user else "System",
+                            action="BSR_EXCESS_STOCK_BANKED",
+                            entity="BSRStock",
+                            entity_id=wo.wo_number,
+                            details=f"Auto-banked {to_bank} excess pieces from {wo.wo_number} into BSR Finished Goods Stock."
+                        ))
         else:
             packing_rec.status = "In-Packing"
 
-        # Record immutable packing transaction ledger entry
+        # Record immutable packing transaction ledger entry, each with its own unique,
+        # immutable Packing Unit Code -- retains full context (part/qty/OAR/WO via the
+        # WO/order relationship, created_by, created_at, and the parent record's status).
         txn = PackingTransaction(
             work_order_id=wo.id,
             client_request_id=req.client_request_id.strip() if req.client_request_id else None,
+            packing_unit_code=_get_next_packing_unit_code(db),
             packed_quantity=req.packed_quantity,
             box_count=req.box_count,
             package_type=req.package_type,
@@ -136,6 +210,7 @@ class PackingService:
             created_by=current_user.id if current_user else None
         )
         db.add(txn)
+        db.flush()
 
         # Create audit log
         audit = AuditLog(
@@ -166,6 +241,7 @@ class PackingService:
                 success=True,
                 wo_number=wo_existing.wo_number if wo_existing else req.wo_number,
                 client_request_id=existing_txn.client_request_id,
+                packing_unit_code=existing_txn.packing_unit_code,
                 packed_this_batch=existing_txn.packed_quantity,
                 total_packed=pr_existing.packed_qty if pr_existing else existing_txn.packed_quantity,
                 remaining_pending=pr_existing.pending_qty if pr_existing else 0,
@@ -178,6 +254,7 @@ class PackingService:
             success=True,
             wo_number=wo.wo_number,
             client_request_id=req.client_request_id,
+            packing_unit_code=txn.packing_unit_code,
             packed_this_batch=req.packed_quantity,
             total_packed=packing_rec.packed_qty,
             remaining_pending=packing_rec.pending_qty,

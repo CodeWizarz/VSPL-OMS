@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useLayoutEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -33,14 +33,25 @@ import {
   Building2,
   CalendarClock,
   GitMerge,
-  ClipboardList,
+  Cog,
+  Clock,
+  UserCircle,
+  AlertOctagon,
+  Link2,
+  ClipboardCheck,
+  GraduationCap,
+  Eye,
+  CalendarCheck,
+  TrendingUp,
   Warehouse,
+  ClipboardList,
+  Timer,
   PencilLine,
   BarChart3,
-  Wallet
+  Wallet,
 } from "lucide-react";
-import { logout, getCurrentUserRole, getCurrentUser } from "@/lib/api";
-import { resolveWorkspace, type Workspace } from "@/lib/workspaces";
+import { logout, getCurrentUserRole, getCurrentUserRoles, getCurrentUser } from "@/lib/api";
+import { resolveWorkspace } from "@/lib/workspaces";
 
 // STORE is a physical material-handling role: it must see only the navigation it is
 // actually authorized to use (Move Parts, and Rejection Tracking for melting-entry
@@ -53,6 +64,26 @@ const STORE_ALLOWED_HREFS = new Set([
   "/production/tracking",
   "/production/history",
   "/quality/nc",
+  "/training/work-instructions",
+]);
+
+// DATA_ANALYST is a dedicated view-only / analytics role: "he can view but cant move and create anything".
+// They have visibility into dashboards, live WIP matrix, tracking timelines, stock inventory, and reports,
+// while all operational creation, material movement, machining entry, and master data editing actions are hidden.
+const DATA_ANALYST_DISALLOWED_HREFS = new Set([
+  "/production/entry",             // Cannot enter production
+  "/production/move",              // Cannot move material
+  "/orders/intake",                // Cannot create OAR orders
+  "/planning/wo-generation",       // Cannot generate WOs
+  "/orders/po-matching",           // Cannot edit PO matches
+  "/planning/wo-release",          // Cannot release WOs
+  "/planning/conversion",          // Cannot execute conversions
+  "/continuous-casting/inward",    // Cannot inward raw bars
+  "/continuous-casting/stores",    // Cannot execute stores transactions
+  "/continuous-casting/cutting",   // Cannot execute saw cutting
+  "/packing",                      // Cannot edit packing queue
+  "/dispatch",                     // Cannot execute dispatch
+  "/admin/users",                  // Cannot manage users
 ]);
 
 interface NavItem {
@@ -106,6 +137,19 @@ const NAV_GROUPS: NavGroup[] = [
         badge: "Floor",
       },
       {
+        name: "Vendor Tracking",
+        href: "/production/vendor",
+        icon: <Truck className="h-4 w-4 text-purple-500" />,
+        badge: "Vendor",
+      },
+      {
+        name: "MRB Review Board",
+        href: "/quality/mrb",
+        icon: <ClipboardCheck className="h-4 w-4 text-amber-500" />,
+        badge: "MRB",
+        roles: ["admin", "qa", "planner", "ceo"],
+      },
+      {
         name: "WO Tracking & Timeline",
         href: "/production/tracking",
         icon: <Route className="h-4 w-4 text-purple-500" />,
@@ -126,17 +170,17 @@ const NAV_GROUPS: NavGroup[] = [
     group: "PACKING & DISPATCH",
     items: [
       {
-        name: "Packing / BSR Queue",
+        name: "Stage 6: Packing Queue",
         href: "/packing",
         icon: <PackageCheck className="h-4 w-4 text-cyan-500" />,
       },
       {
-        name: "BSR Stock",
+        name: "Stage 7: BSR (Bonded Store)",
         href: "/bsr",
-        icon: <Warehouse className="h-4 w-4 text-cyan-500" />,
+        icon: <Warehouse className="h-4 w-4 text-purple-500" />,
       },
       {
-        name: "Dispatch Center",
+        name: "Stage 8: Dispatch Center",
         href: "/dispatch",
         icon: <Truck className="h-4 w-4 text-emerald-500" />,
       },
@@ -149,19 +193,44 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Customer Master",
         href: "/masters/customers",
         icon: <Building2 className="h-4 w-4 text-blue-500" />,
-        roles: ["admin", "planner"],
+        roles: ["admin", "planner", "sales", "ceo", "engineering"],
+      },
+      {
+        name: "Part Master",
+        href: "/masters/parts",
+        icon: <Layers className="h-4 w-4 text-indigo-500" />,
       },
       {
         name: "PO Master",
         href: "/masters/pos",
         icon: <FileSpreadsheet className="h-4 w-4 text-emerald-500" />,
-        roles: ["admin", "planner"],
+        roles: ["admin", "planner", "sales", "ceo"],
       },
       {
         name: "Schedule Master",
         href: "/masters/schedules",
         icon: <CalendarClock className="h-4 w-4 text-amber-500" />,
-        roles: ["admin", "planner"],
+        roles: ["admin", "planner", "sales", "ceo"],
+      },
+      {
+        name: "Machine Master",
+        href: "/masters/machines",
+        icon: <Cog className="h-4 w-4 text-indigo-500" />,
+      },
+      {
+        name: "Shift Master",
+        href: "/masters/shifts",
+        icon: <Clock className="h-4 w-4 text-indigo-500" />,
+      },
+      {
+        name: "Operator Master",
+        href: "/masters/operators",
+        icon: <UserCircle className="h-4 w-4 text-indigo-500" />,
+      },
+      {
+        name: "Rejection Type Master",
+        href: "/masters/rejection-types",
+        icon: <AlertOctagon className="h-4 w-4 text-indigo-500" />,
       },
     ],
   },
@@ -172,7 +241,13 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Order Intake (OAR)",
         href: "/orders/intake",
         icon: <FilePlus className="h-4 w-4" />,
-        roles: ["admin", "planner", "sales"],
+        roles: ["admin", "planner", "sales", "ceo"],
+      },
+      {
+        name: "Generate Work Orders",
+        href: "/planning/wo-generation",
+        icon: <Layers className="h-4 w-4 text-emerald-500" />,
+        roles: ["admin", "planner", "sales", "ceo", "engineering"],
       },
       {
         name: "OAR & WO List",
@@ -183,7 +258,7 @@ const NAV_GROUPS: NavGroup[] = [
         name: "PO Matching",
         href: "/orders/po-matching",
         icon: <GitMerge className="h-4 w-4 text-indigo-500" />,
-        roles: ["admin", "planner"],
+        roles: ["admin", "planner", "sales", "ceo"],
       },
       {
         name: "WO Release & Routing",
@@ -191,10 +266,28 @@ const NAV_GROUPS: NavGroup[] = [
         icon: <Factory className="h-4 w-4" />,
       },
       {
+        name: "WO Release Search",
+        href: "/planning/wo-release-search",
+        icon: <Search className="h-4 w-4 text-sky-500" />,
+        badge: "Search",
+      },
+      {
         name: "Edit Work Order",
         href: "/planning/wo-edit",
         icon: <PencilLine className="h-4 w-4 text-blue-500" />,
         roles: ["admin", "planner"],
+      },
+      {
+        name: "Stage Plan Dates",
+        href: "/planning/stage-plan",
+        icon: <CalendarClock className="h-4 w-4 text-blue-500" />,
+        roles: ["admin", "planner", "ceo", "f1_manager", "f2_manager", "f3_manager", "sp_manager", "fi_manager", "packing_manager", "dispatch_manager"],
+      },
+      {
+        name: "Stage Lead Times",
+        href: "/planning/lead-times",
+        icon: <Timer className="h-4 w-4 text-blue-500" />,
+        roles: ["admin", "planner", "ceo"],
       },
       {
         name: "Conversion Module",
@@ -210,21 +303,6 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Rejection Tracking",
         href: "/quality/nc",
         icon: <AlertTriangle className="h-4 w-4 text-rose-500" />,
-      },
-    ],
-  },
-  {
-    group: "INTELLIGENCE & REPORTS",
-    items: [
-      {
-        name: "OMS Engine Batch",
-        href: "/oms",
-        icon: <FileSpreadsheet className="h-4 w-4 text-emerald-600" />,
-      },
-      {
-        name: "Manufacturing Reports",
-        href: "/reports",
-        icon: <FileText className="h-4 w-4" />,
       },
     ],
   },
@@ -246,6 +324,50 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    group: "CONTINUOUS CASTING",
+    items: [
+      { name: "Materials", href: "/continuous-casting/materials", icon: <Layers className="h-4 w-4 text-amber-600" /> },
+      { name: "Inward & QA", href: "/continuous-casting/inward", icon: <PackageCheck className="h-4 w-4 text-amber-600" /> },
+      { name: "Stock", href: "/continuous-casting/stock", icon: <Boxes className="h-4 w-4 text-amber-600" /> },
+      { name: "Planning", href: "/continuous-casting/planning", icon: <CalendarClock className="h-4 w-4 text-amber-600" /> },
+      { name: "Stores Transactions", href: "/continuous-casting/stores", icon: <ArrowRightLeft className="h-4 w-4 text-amber-600" /> },
+      { name: "Cutting", href: "/continuous-casting/cutting", icon: <Cog className="h-4 w-4 text-amber-600" /> },
+      { name: "Traceability", href: "/continuous-casting/traceability", icon: <GitMerge className="h-4 w-4 text-amber-600" /> },
+    ],
+  },
+  {
+    group: "INTELLIGENCE & REPORTS",
+    items: [
+      {
+        name: "OMS Engine Batch",
+        href: "/oms",
+        icon: <FileSpreadsheet className="h-4 w-4 text-emerald-600" />,
+      },
+      {
+        name: "Sales-Ops Daily Report",
+        href: "/reports/sales-ops",
+        icon: <TrendingUp className="h-4 w-4 text-indigo-500" />,
+        badge: "Standup",
+      },
+      {
+        name: "Manufacturing Reports",
+        href: "/reports",
+        icon: <FileText className="h-4 w-4" />,
+      },
+    ],
+  },
+  {
+    group: "HELP & TRAINING",
+    items: [
+      {
+        name: "Work Instructions Guide",
+        href: "/training/work-instructions",
+        icon: <GraduationCap className="h-4 w-4 text-cyan-500" />,
+        badge: "Interactive",
+      },
+    ],
+  },
+  {
     group: "ADMINISTRATION",
     items: [
       {
@@ -254,9 +376,24 @@ const NAV_GROUPS: NavGroup[] = [
         icon: <UsersIcon className="h-4 w-4 text-zinc-500" />,
         roles: ["admin"],
       },
+      {
+        name: "Activity Log",
+        href: "/admin/activity",
+        icon: <History className="h-4 w-4 text-zinc-500" />,
+        roles: ["admin"],
+      },
+      {
+        name: "Roles & Responsibilities",
+        href: "/roles",
+        icon: <ShieldAlert className="h-4 w-4 text-zinc-500" />,
+      },
     ],
   },
 ];
+
+// Persist sidebar scroll position across page transitions and re-renders
+let globalSidebarScrollTop = 0;
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -264,17 +401,69 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [userRoles, setUserRoles] = useState<string[]>([]);
   const [currentUser, setCurrentUser] = useState<{ full_name: string; email: string } | null>(null);
-  const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [notificationCount, setNotificationCount] = useState(3);
   const [showNotifications, setShowNotifications] = useState(false);
+  const navScrollRef = useRef<HTMLDivElement>(null);
+
+  // Track user scroll position in sidebar in real time
+  const handleNavScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const top = e.currentTarget.scrollTop;
+    globalSidebarScrollTop = top;
+    try {
+      sessionStorage.setItem("smes_sidebar_scroll", String(top));
+    } catch {}
+  };
+
+  // Synchronously restore sidebar scroll position before browser paint on route changes
+  useIsomorphicLayoutEffect(() => {
+    const navEl = navScrollRef.current;
+    if (!navEl) return;
+
+    let targetTop = globalSidebarScrollTop;
+    try {
+      const saved = sessionStorage.getItem("smes_sidebar_scroll");
+      if (saved !== null) {
+        targetTop = Number(saved);
+      }
+    } catch {}
+
+    if (targetTop > 0) {
+      navEl.scrollTop = targetTop;
+    }
+
+    // Auto-scroll the active menu item into view if it was outside the visible viewport
+    const frameId = requestAnimationFrame(() => {
+      if (!navEl) return;
+      const activeEl = navEl.querySelector<HTMLElement>('[data-active="true"]');
+      if (activeEl) {
+        const containerRect = navEl.getBoundingClientRect();
+        const activeRect = activeEl.getBoundingClientRect();
+        if (activeRect.top < containerRect.top || activeRect.bottom > containerRect.bottom) {
+          activeEl.scrollIntoView({ block: "nearest", behavior: "auto" });
+        }
+      }
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [pathname]);
 
   useEffect(() => {
-    setUserRole(getCurrentUserRole());
+    const role = getCurrentUserRole();
+    const roles = getCurrentUserRoles();
+    setUserRole(role);
+    setUserRoles(roles);
+    if (role === "data_analyst" && DATA_ANALYST_DISALLOWED_HREFS.has(pathname)) {
+      router.replace("/dashboard");
+      return;
+    }
     getCurrentUser()
       .then((u) => {
         setCurrentUser({ full_name: u.full_name, email: u.email });
-        setWorkspace(resolveWorkspace(u.role, u.department));
+        if (u.roles && Array.isArray(u.roles)) {
+          setUserRoles(u.roles);
+        }
         // A password-change-pending account must set a permanent password before
         // reaching any other page -- the backend re-asserts this at every login too
         // (must_change_password is re-checked, not a one-time client flag).
@@ -285,17 +474,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .catch(() => setCurrentUser(null));
   }, [pathname, router]);
 
+  const workspace = resolveWorkspace(userRoles.length ? userRoles : [userRole]);
   const visibleNavGroups = NAV_GROUPS
     .map((grp) => ({
       ...grp,
       items: grp.items.filter((item) => {
-        if (userRole === "store" && !STORE_ALLOWED_HREFS.has(item.href)) return false;
-        if (item.roles && (!userRole || !item.roles.includes(userRole))) return false;
-        // Department workspace: show only the screens relevant to this department.
-        if (workspace && !workspace.hrefs.includes(item.href)) return false;
+        if (userRoles.includes("store") && !userRoles.some((r) => r !== "store") && !STORE_ALLOWED_HREFS.has(item.href)) return false;
+        if (userRole === "data_analyst" && DATA_ANALYST_DISALLOWED_HREFS.has(item.href)) return false;
+        // CEO has full Admin access, so any Admin item is a CEO item too.
+        if (item.roles && !item.roles.some((r) => userRoles.includes(r) || (r === "admin" && userRoles.includes("ceo")))) return false;
+        // New stage roles / Accounts get a focused menu; existing roles are unchanged.
+        if (workspace && !workspace.hrefs.includes(item.href) && !(workspace.groups || []).includes(grp.group)) return false;
         return true;
-      })
-      .map((item) => (workspace?.labels?.[item.href] ? { ...item, name: workspace.labels[item.href] } : item)),
+      }),
     }))
     .filter((grp) => grp.items.length > 0);
 
@@ -378,7 +569,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
         {/* Navigation Items */}
-        <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6">
+        <div
+          ref={navScrollRef}
+          onScroll={handleNavScroll}
+          className="flex-1 overflow-y-auto px-4 py-4 space-y-6"
+        >
           {visibleNavGroups.map((grp) => (
             <div key={grp.group}>
               <h4 className="px-3 text-[10px] font-bold tracking-wider text-zinc-400 uppercase">
@@ -391,7 +586,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     <Link
                       key={item.href}
                       href={item.href}
-                      onClick={() => setSidebarOpen(false)}
+                      data-active={isActive ? "true" : "false"}
+                      onClick={() => {
+                        if (navScrollRef.current) {
+                          const top = navScrollRef.current.scrollTop;
+                          globalSidebarScrollTop = top;
+                          try {
+                            sessionStorage.setItem("smes_sidebar_scroll", String(top));
+                          } catch {}
+                        }
+                        setSidebarOpen(false);
+                      }}
                       className={`flex items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-all ${
                         isActive
                           ? "bg-blue-50 text-blue-600 dark:bg-blue-950/50 dark:text-blue-400 font-semibold shadow-xs"
@@ -430,9 +635,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   : "?"}
               </div>
               <div className="overflow-hidden">
-                <p className="truncate text-xs font-bold text-zinc-900 dark:text-zinc-100">
-                  {currentUser ? currentUser.full_name : "..."}
-                </p>
+                <div className="flex items-center gap-1.5">
+                  <p className="truncate text-xs font-bold text-zinc-900 dark:text-zinc-100">
+                    {currentUser ? currentUser.full_name : "..."}
+                  </p>
+                  {userRole === "data_analyst" && (
+                    <span className="shrink-0 rounded bg-cyan-100 dark:bg-cyan-950/80 px-1.5 py-0.2 text-[9px] font-extrabold text-cyan-700 dark:text-cyan-300 border border-cyan-500/30">
+                      View Only
+                    </span>
+                  )}
+                </div>
                 <p className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
                   {currentUser ? currentUser.email : ""}
                 </p>
@@ -450,7 +662,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Main Content Area */}
-      <div className="flex flex-1 flex-col lg:pl-72">
+      <div className="flex flex-1 flex-col lg:pl-72 min-w-0 max-w-full">
         {/* Top Navbar */}
         <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-zinc-200 dark:border-zinc-800 bg-white/80 dark:bg-zinc-900/80 px-6 backdrop-blur">
           <div className="flex items-center gap-4">
@@ -463,14 +675,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="flex items-center gap-2 text-xs font-medium text-zinc-500">
               <Factory className="h-4 w-4 text-blue-600" />
               <span>Plant 1 (Foundry & CNC)</span>
-              {workspace && (
-                <>
-                  <span className="text-zinc-300 dark:text-zinc-700">•</span>
-                  <span className="rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2 py-0.5 text-[10px] font-bold">
-                    {workspace.label}
-                  </span>
-                </>
-              )}
               <span className="text-zinc-300 dark:text-zinc-700">•</span>
               <span className="rounded-full bg-emerald-500/10 text-emerald-600 px-2 py-0.5 text-[10px] font-bold">
                 OMS Engine v3.3
@@ -480,6 +684,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
           {/* Top Actions */}
           <div className="flex items-center gap-3">
+            {/* View-Only Indicator for DATA_ANALYST */}
+            {userRole === "data_analyst" && (
+              <div
+                className="hidden sm:flex items-center gap-1.5 rounded-full bg-cyan-50 dark:bg-cyan-950/60 border border-cyan-500/40 px-3 py-1 text-[11px] font-bold text-cyan-700 dark:text-cyan-300 shadow-sm"
+                title="View-Only Access: Viewing dashboards, live WIP matrix, and reports is enabled. Creation and movement actions are restricted."
+              >
+                <Eye className="h-3.5 w-3.5 text-cyan-600 dark:text-cyan-400" />
+                <span>VIEW-ONLY ACCESS (DATA ANALYST)</span>
+              </div>
+            )}
+
             {/* AI Assistant Button */}
             <Link
               href="/ai"
@@ -538,7 +753,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         {/* Dynamic Page Content */}
-        <main className="flex-1 p-6 md:p-8 max-w-7xl w-full mx-auto">{children}</main>
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto min-w-0">{children}</main>
       </div>
     </div>
   );

@@ -18,7 +18,7 @@ from app.models.production_movement import ProductionMovement, StageWIP
 from app.models.nc import NCRecord
 from app.analytics.math_engine import cycle_time_hours, rejection_rate, yield_pct, safe_div
 
-STANDARD_STAGES = ["F1", "F2", "F3", "SP", "FI", "PACKING", "DISPATCH"]
+STANDARD_STAGES = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
 
 # Alloy machinability & casting complexity index (1.0 = baseline PB2, higher = more complex)
 ALLOY_COMPLEXITY_INDEX: Dict[str, float] = {

@@ -14,9 +14,9 @@ from app.core.departments import normalize_stage
 from app.models.production_movement import StageWIP
 from app.models.work_order import WorkOrder, WORoute, WOStatus
 from app.services.oms_integration_service import calculate_delivery_risk
-from app.services.stage_plan_service import compute_stage_plan
+from app.services.stage_plan_service import compute_stage_plan, load_lead_days, order_due_date
 
-STANDARD_ROUTE = ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+STANDARD_ROUTE = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
 BUCKETS = ("overdue", "today", "next", "later", "no_date")
 
 
@@ -38,6 +38,7 @@ class WorkQueueService:
     def get_stage_queue(db: Session, stage: str, days: int = 2, today: Optional[date] = None) -> Dict:
         today = today or date.today()
         key = normalize_stage(stage)
+        lead_map = load_lead_days(db)
         items: List[Dict] = []
 
         active = (
@@ -55,7 +56,7 @@ class WorkQueueService:
                 continue
 
             order = wo.order
-            delivery = order.delivery_date if order else None
+            delivery = order_due_date(order)  # revised commitment > commitment > delivery
             routes = (
                 db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
             )
@@ -66,7 +67,7 @@ class WorkQueueService:
             planned_end = row.planned_end if row else None
             plan_source = "planned"
             if planned_end is None:
-                est = compute_stage_plan(route_stages, delivery_date=delivery) if delivery else {}
+                est = compute_stage_plan(route_stages, delivery_date=delivery, lead_days_map=lead_map) if delivery else {}
                 match = next((v for s, v in est.items() if normalize_stage(s) == key), None)
                 if match:
                     planned_start, planned_end = match
@@ -102,7 +103,7 @@ class WorkQueueService:
             counts[i["bucket"]]["qty"] += i["qty_at_stage"]
 
         return {
-            "stage": "PACKING / BSR" if key == "PACKING" else key,
+            "stage": key,
             "today": today.isoformat(),
             "days": days,
             "counts": counts,

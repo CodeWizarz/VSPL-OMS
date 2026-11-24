@@ -13,6 +13,11 @@ class MovePartsRequest(BaseModel):
     operator_name: Optional[str] = Field(None, max_length=200)
     shift: Optional[str] = "Shift A"
     defect_code: Optional[str] = Field(None, max_length=100)
+    production_type: Optional[str] = Field('IN_HOUSE', description='Production mode: IN_HOUSE | VENDOR')
+    vendor_name: Optional[str] = Field(None, max_length=200, description='Vendor name if processed at outside vendor')
+    dc_number: Optional[str] = Field(None, max_length=100, description='Delivery Challan number if processed at outside vendor')
+    target_return_stage: Optional[str] = Field("FI", description="Expected return stage if processed at outside vendor: 'FI' | 'F2'")
+    heat_number: Optional[str] = Field(None, max_length=100, description="Heat Number from which parts are being produced")
     remarks: Optional[str] = Field(None, max_length=2000)
     client_request_id: Optional[str] = Field(None, description="Unique client idempotency token to prevent double submissions")
     source_type: Optional[str] = Field("SMES_UI", description="Source: SMES_UI | EXCEL_IMPORT | API | SYSTEM")
@@ -26,8 +31,15 @@ class RecordStageProductionRequest(BaseModel):
     operator_name: Optional[str] = Field(None, max_length=200)
     shift: Optional[str] = "Shift A"
     defect_code: Optional[str] = Field(None, max_length=100)
+    production_type: Optional[str] = Field('IN_HOUSE', description='Production mode: IN_HOUSE | VENDOR')
+    vendor_name: Optional[str] = Field(None, max_length=200, description='Vendor name if processed at outside vendor')
+    dc_number: Optional[str] = Field(None, max_length=100, description='Delivery Challan number if processed at outside vendor')
+    target_return_stage: Optional[str] = Field("FI", description="Expected return stage if processed at outside vendor: 'FI' | 'F2'")
+    heat_number: Optional[str] = Field(None, max_length=100, description="Heat Number from which parts are being produced")
     remarks: Optional[str] = Field(None, max_length=2000)
     client_request_id: Optional[str] = Field(None, description="Idempotency token")
+    is_f1_shortfall_closure: Optional[bool] = Field(False, description="Whether to finalize F1 stage with less quantity (shortfall)")
+    shortfall_reason: Optional[str] = Field(None, description="Mandatory operator reason when closing F1 with shortfall")
 
 class ProductionEntryResponse(BaseModel):
     success: bool
@@ -41,6 +53,11 @@ class ProductionEntryResponse(BaseModel):
     stage_rejection_total: int
     stage_onhand_available: int
     stage_inproc_remaining: int
+    heat_number: Optional[str] = None
+    production_type: Optional[str] = 'IN_HOUSE'
+    vendor_name: Optional[str] = None
+    dc_number: Optional[str] = None
+    target_return_stage: Optional[str] = None
     timestamp: datetime
     message: str
 
@@ -57,6 +74,11 @@ class MovementResponse(BaseModel):
     available_wip_remaining: int
     to_stage_available_wip: int
     current_stage: str
+    heat_number: Optional[str] = None
+    production_type: Optional[str] = 'IN_HOUSE'
+    vendor_name: Optional[str] = None
+    dc_number: Optional[str] = None
+    target_return_stage: Optional[str] = None
     timestamp: datetime
     message: str
 
@@ -79,9 +101,40 @@ class MovementListItem(BaseModel):
     shift: Optional[str] = None
     movement_date: Optional[str] = None
     movement_time: Optional[str] = None
+    heat_number: Optional[str] = None
+    production_type: Optional[str] = 'IN_HOUSE'
+    vendor_name: Optional[str] = None
+    dc_number: Optional[str] = None
     remarks: Optional[str] = None
     created_by_name: Optional[str] = None
     created_at: datetime
+    # Deterministic, live-at-read-time context for the FROM stage -- reused directly
+    # from StageWIP/WORoute (no new quantity engine). Optional so existing consumers
+    # of this schema are unaffected.
+    good_qty: Optional[int] = None
+    target_qty: Optional[int] = None
+    wip_qty: Optional[int] = None
+    yet_to_produce: Optional[int] = None
+    available_to_move: Optional[int] = None
+
+class StageDashboard(BaseModel):
+    """Deterministic, single-source stage summary -- reused directly from
+    StageWIP/WORoute (the same authoritative tables Entry/Move/Tracking all read
+    from). Not a new quantity engine."""
+    wo_number: str
+    stage: str
+    target_qty: int
+    total_produced: int  # good + rejected actually processed at this stage
+    total_rejected: int
+    total_good: int
+    wip_qty: int  # inproc + onhand
+    yet_to_produce: int  # max(target - total_produced, 0) -- NOT part of WIP
+    remaining_movable_qty: int  # onhand_qty -- completed good available to move downstream
+    mrb_lock_status: str = "UNLOCKED"  # UNLOCKED, LOCKED, PARTIAL
+    mrb_approved_movable_qty: int = 0
+    mrb_pending_qty: int = 0
+    pending_mrb_tickets: List[str] = []
+
 
 class StageWIPDetail(BaseModel):
     stage: str
@@ -139,3 +192,23 @@ class PlantReconciliationResponse(BaseModel):
     total_dispatched_qty: int
     reconciliations: List[ReconciliationItem]
     is_plant_balanced: bool
+
+
+class DeclareShortfallRequest(BaseModel):
+    shortfall_qty: int = Field(..., ge=1, le=1_000_000, description="Quantity of shortfall to declare and close")
+    reason: str = Field(..., min_length=2, max_length=1000, description="Mandatory reason for shortfall")
+    create_patch_wo: bool = Field(True, description="Whether to automatically create a new Patch Work Order for the shortfall quantity")
+    heat_number: Optional[str] = Field(None, max_length=100)
+    remarks: Optional[str] = Field(None, max_length=2000)
+
+class DeclareShortfallResponse(BaseModel):
+    success: bool
+    wo_number: str
+    original_qty: int
+    new_physical_wo_qty: int
+    shortfall_qty: int
+    reason: str
+    patch_wo_id: Optional[str] = None
+    patch_wo_number: Optional[str] = None
+    patch_wo_qty: Optional[int] = None
+    message: str

@@ -1,0 +1,2272 @@
+"use client";
+import React, { useState, useEffect, Suspense, useCallback, useRef } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import {
+  Layers,
+  Search,
+  CheckCircle2,
+  AlertTriangle,
+  ArrowRight,
+  Clock,
+  RefreshCw,
+  Plus,
+  FileSpreadsheet,
+  Check,
+  Send,
+  Boxes,
+  Split,
+  ChevronRight,
+  Edit2,
+  Trash2,
+  X,
+  Pencil,
+  Calendar,
+  CalendarClock
+} from "lucide-react";
+import { AppShell } from "@/app/components/layout/AppShell";
+import { EditWorkOrderModal } from "@/app/components/planning/EditWorkOrderModal";
+import { EditOARModal } from "@/app/components/planning/EditOARModal";
+import {
+  getOarList,
+  OARListItem,
+  getWorkOrders,
+  deleteWorkOrder,
+  createMergedWorkOrder,
+  WorkOrderListItem,
+  getNextSequences,
+  createWorkOrder,
+  WorkOrderCreatePayload,
+  WorkOrderCreateResult,
+  updateWorkOrder,
+  WorkOrderUpdatePayload,
+  updateOAR,
+  getBSRStockForPart,
+  allocateBSRStock,
+  BSRStockSummary
+} from "@/lib/api";
+
+function formatDate(dateStr?: string | null): string {
+  if (!dateStr) return "—";
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    return d.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+const DEFAULT_STAGES = ["F1", "F2", "F3", "SP", "FI", "PACKING", "DISPATCH"];
+
+export default function WOGenerationPage() {
+  return (
+    <Suspense
+      fallback={
+        <AppShell>
+          <div className="max-w-7xl mx-auto py-12 text-center text-xs text-zinc-500 font-mono">
+            Loading Work Order Generation...
+          </div>
+        </AppShell>
+      }
+    >
+      <WOGenerationContent />
+    </Suspense>
+  );
+}
+
+function WOGenerationContent() {
+  const searchParams = useSearchParams();
+  const urlOar = searchParams.get("oar") || "";
+
+  // Data states
+  const [oars, setOars] = useState<OARListItem[]>([]);
+  const [recentWOs, setRecentWOs] = useState<WorkOrderListItem[]>([]);
+  const [loadingOars, setLoadingOars] = useState(false);
+  const [loadingWOs, setLoadingWOs] = useState(false);
+
+  // Filters
+  const [searchOar, setSearchOar] = useState(urlOar);
+  const [filterPendingOnly, setFilterPendingOnly] = useState(true);
+  const [woTableTab, setWoTableTab] = useState<"all" | "unreleased">("all");
+
+  // Form states
+  const [selectedOar, setSelectedOar] = useState<OARListItem | null>(null);
+  const [woNumber, setWoNumber] = useState("");
+  const [woQty, setWoQty] = useState<number | "">("");
+  const [woDate, setWoDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [targetDate, setTargetDate] = useState("");
+  const [castingProcess, setCastingProcess] = useState<"CENTRIFUGAL" | "CONTINUOUS">("CENTRIFUGAL");
+  const [routeStages, setRouteStages] = useState<string[]>(DEFAULT_STAGES);
+  const [remarks, setRemarks] = useState("Planned by Production Planning department.");
+
+  // Divide Quantity State
+  const [generationMode, setGenerationMode] = useState<"single" | "merge">("single");
+  const [mergeSelections, setMergeSelections] = useState<Record<string, number>>({});
+  const [splitMode, setSplitMode] = useState<"single" | "auto" | "manual">("single");
+  const [batchSize, setBatchSize] = useState<number | "">(10);
+  const [manualQtys, setManualQtys] = useState<string[]>(["", ""]);
+  const [allowOverrun, setAllowOverrun] = useState(false);
+
+  // Submit states
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [editingWO, setEditingWO] = useState<WorkOrderListItem | null>(null);
+  const [editSuccessMsg, setEditSuccessMsg] = useState("");
+  const [deletingWoNumber, setDeletingWoNumber] = useState<string | null>(null);
+  const [editingCommitmentOar, setEditingCommitmentOar] = useState<OARListItem | null>(null);
+  const [editingOarModal, setEditingOarModal] = useState<OARListItem | null>(null);
+  const [commitmentSuccessMsg, setCommitmentSuccessMsg] = useState("");
+  const [bsrStock, setBsrStock] = useState<BSRStockSummary | null>(null);
+  const [stockAllocQty, setStockAllocQty] = useState<number | "">("");
+  const [allocatingStock, setAllocatingStock] = useState(false);
+  const [stockSuccessMsg, setStockSuccessMsg] = useState("");
+  const [successResult, setSuccessResult] = useState<WorkOrderCreateResult | null>(null);
+
+  const handleOarModalSuccess = (updatedOar: OARListItem) => {
+    setOars((prev) =>
+      prev.map((o) => (o.order_id === updatedOar.order_id || o.oar_number === updatedOar.oar_number ? { ...o, ...updatedOar } : o))
+    );
+    if (selectedOar && (selectedOar.order_id === updatedOar.order_id || selectedOar.oar_number === updatedOar.oar_number)) {
+      setSelectedOar((prev) => (prev ? { ...prev, ...updatedOar } : prev));
+      if (updatedOar.remaining_qty !== undefined && updatedOar.remaining_qty > 0) {
+        setWoQty(updatedOar.remaining_qty);
+        setManualQtys([String(updatedOar.remaining_qty)]);
+      }
+    }
+    setEditingOarModal(null);
+    setCommitmentSuccessMsg(`OAR ${updatedOar.oar_number} & linked Customer PO updated successfully.`);
+    setTimeout(() => setCommitmentSuccessMsg(""), 5000);
+  };
+
+  // Load next WO number sequence
+  const loadNextWoSequence = async () => {
+    try {
+      const seq = await getNextSequences();
+      setWoNumber(seq.next_wo_number);
+    } catch {
+      // ignore
+    }
+  };
+
+  const searchOarRef = useRef(searchOar);
+  useEffect(() => {
+    searchOarRef.current = searchOar;
+  }, [searchOar]);
+
+  // Load OARs
+  const loadOars = useCallback(async (queryText?: string) => {
+    setLoadingOars(true);
+    try {
+      const q = typeof queryText === "string" ? queryText.trim() : (searchOarRef.current ? searchOarRef.current.trim() : (urlOar ? urlOar.trim() : ""));
+      const data = await getOarList({
+        search: q || undefined,
+        limit: 1000,
+      });
+      setOars(data);
+      if (urlOar) {
+        const found = data.find((o) => o.oar_number.toLowerCase() === urlOar.toLowerCase());
+        if (found) {
+          handleSelectOar(found);
+        }
+      }
+    } catch {
+      setOars([]);
+    } finally {
+      setLoadingOars(false);
+    }
+  }, [urlOar]);
+
+  // Load Created Work Orders
+  const loadRecentWOs = async () => {
+    setLoadingWOs(true);
+    try {
+      const data = await getWorkOrders({ limit: 50, sort_by: "created_at_desc" });
+      setRecentWOs(data);
+    } catch {
+      setRecentWOs([]);
+    } finally {
+      setLoadingWOs(false);
+    }
+  };
+
+  const handleDeleteWO = async (wo: WorkOrderListItem) => {
+    const confirmed = window.confirm(
+      `Delete unreleased Work Order ${wo.wo_number} (${wo.physical_wo_qty} pcs)?\n\n` +
+        `Parent OAR (${wo.oar_number || "N/A"}) will remain intact and ${wo.physical_wo_qty} pcs will return to unallocated OAR quantity.`
+    );
+    if (!confirmed) return;
+
+    setDeletingWoNumber(wo.wo_number);
+    setError("");
+    try {
+      const res = await deleteWorkOrder(wo.wo_number);
+      setEditSuccessMsg(res.message || `Work Order ${wo.wo_number} deleted.`);
+      await Promise.all([loadRecentWOs(), loadOars(), loadNextWoSequence()]);
+      setTimeout(() => setEditSuccessMsg(""), 5000);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.message || `Failed to delete ${wo.wo_number}.`;
+      setError(String(detail));
+    } finally {
+      setDeletingWoNumber(null);
+    }
+  };
+
+  // Initial load
+  useEffect(() => {
+    loadOars(urlOar || undefined);
+    loadRecentWOs();
+    loadNextWoSequence();
+  }, [loadOars, urlOar]);
+
+  // Debounced search when user types in the search box
+  const isInitialMount = useRef(true);
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      loadOars(searchOar);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [searchOar, loadOars]);
+
+  const handleSelectOar = (oar: OARListItem) => {
+    setSelectedOar(oar);
+    const initialQty = oar.remaining_qty > 0 ? oar.remaining_qty : 0;
+    setWoQty(initialQty || "");
+    setManualQtys([String(Math.ceil((initialQty || 10) / 2)), String(Math.floor((initialQty || 10) / 2))]);
+    // Rule: Same OAR should NOT repeat WO generation. Never auto-enable overrun.
+    setAllowOverrun(false);
+    const effDate = oar.effective_commitment_date || oar.revised_commitment_date || oar.commitment_date || oar.delivery_date;
+    if (effDate) {
+      setTargetDate(effDate.slice(0, 10));
+    }
+    setError("");
+    setSuccessResult(null);
+    loadNextWoSequence();
+    if (oar.part_id) {
+      getBSRStockForPart(oar.part_id)
+        .then((stock) => {
+          setBsrStock(stock);
+          if (stock.total_available > 0) {
+            setStockAllocQty(Math.min(stock.total_available, oar.remaining_qty));
+          } else {
+            setStockAllocQty("");
+          }
+        })
+        .catch(() => setBsrStock(null));
+    } else {
+      setBsrStock(null);
+    }
+    document.getElementById("wo-generator-card")?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const handleCommitmentDateSuccess = (updatedOar: OARListItem) => {
+    setEditingCommitmentOar(null);
+    const eff = updatedOar.effective_commitment_date || updatedOar.revised_commitment_date || updatedOar.commitment_date;
+    setCommitmentSuccessMsg(`Commitment Date for ${updatedOar.oar_number} updated to ${formatDate(eff)}!`);
+    setOars((prev) => prev.map((o) => (o.oar_number === updatedOar.oar_number ? { ...o, ...updatedOar } : o)));
+    if (selectedOar?.oar_number === updatedOar.oar_number) {
+      setSelectedOar((prev) => (prev ? { ...prev, ...updatedOar } : updatedOar));
+      const effDate = updatedOar.effective_commitment_date || updatedOar.revised_commitment_date || updatedOar.commitment_date || updatedOar.delivery_date;
+      if (effDate) {
+        setTargetDate(effDate.slice(0, 10));
+      }
+    }
+    setTimeout(() => setCommitmentSuccessMsg(""), 5000);
+  };
+
+  const handleAllocateStock = async () => {
+    if (!selectedOar || !stockAllocQty || Number(stockAllocQty) <= 0) return;
+    setAllocatingStock(true);
+    setError("");
+    try {
+      const qtyNum = Number(stockAllocQty);
+      const res = await allocateBSRStock({
+        oar_id: selectedOar.order_id,
+        quantity: qtyNum
+      });
+      setStockSuccessMsg(res.message);
+      setTimeout(() => setStockSuccessMsg(""), 6000);
+      await loadOars();
+      setSelectedOar((prev) =>
+        prev
+          ? {
+              ...prev,
+              allocated_qty: prev.allocated_qty + qtyNum,
+              remaining_qty: res.remaining_to_plan,
+              fulfilled_from_stock_qty: res.total_fulfilled_from_stock
+            }
+          : null
+      );
+      setWoQty(res.remaining_to_plan > 0 ? res.remaining_to_plan : "");
+      if (res.remaining_to_plan > 0) {
+        setManualQtys([
+          String(Math.ceil(res.remaining_to_plan / 2)),
+          String(Math.floor(res.remaining_to_plan / 2))
+        ]);
+      } else {
+        setManualQtys([]);
+      }
+      if (selectedOar.part_id) {
+        getBSRStockForPart(selectedOar.part_id)
+          .then((s) => {
+            setBsrStock(s);
+            if (s.total_available > 0 && res.remaining_to_plan > 0) {
+              setStockAllocQty(Math.min(s.total_available, res.remaining_to_plan));
+            } else {
+              setStockAllocQty("");
+            }
+          })
+          .catch(() => {});
+      }
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to allocate BSR stock.");
+    } finally {
+      setAllocatingStock(false);
+    }
+  };
+
+  const handleToggleStage = (stage: string) => {
+    if (routeStages.includes(stage)) {
+      if (routeStages.length === 1) return;
+      setRouteStages(routeStages.filter((s) => s !== stage));
+    } else {
+      setRouteStages([...routeStages, stage]);
+    }
+  };
+
+  // Rules: Same WO ID and Same OAR must never repeat
+  const isDuplicateWoNumber = React.useMemo(() => {
+    if (!woNumber.trim()) return false;
+    const clean = woNumber.trim().toUpperCase().replace(/\s+/g, "-");
+    return recentWOs.some((w) => w.wo_number.toUpperCase().replace(/\s+/g, "-") === clean);
+  }, [woNumber, recentWOs]);
+
+  const isOarFullyPlanned = selectedOar ? selectedOar.remaining_qty <= 0 : false;
+
+  const mergedOarList = oars.filter((o) => mergeSelections[o.order_id] !== undefined);
+  const mergeAnchor = mergedOarList[0] || null;
+  const mergeTotalQty = mergedOarList.reduce((sum, o) => sum + (Number(mergeSelections[o.order_id]) || 0), 0);
+  const compatibleUnselectedOars = mergeAnchor
+    ? oars.filter(
+        (o) =>
+          mergeSelections[o.order_id] === undefined &&
+          (allowOverrun || o.remaining_qty > 0) &&
+          o.customer_code === mergeAnchor.customer_code &&
+          o.part_number === mergeAnchor.part_number
+      )
+    : [];
+
+  const toggleMergeOar = (oar: OARListItem) => {
+    setError("");
+    setSuccessResult(null);
+    setMergeSelections((prev) => {
+      if (prev[oar.order_id] !== undefined) {
+        const next = { ...prev };
+        delete next[oar.order_id];
+        return next;
+      }
+      if (mergeAnchor) {
+        if (oar.customer_code !== mergeAnchor.customer_code) {
+          setError(`Cannot merge ${oar.oar_number}: Customer (${oar.customer_code}) does not match ${mergeAnchor.customer_code}.`);
+          return prev;
+        }
+        if (oar.part_number !== mergeAnchor.part_number) {
+          setError(`Cannot merge ${oar.oar_number}: Part (${oar.part_number}) does not match ${mergeAnchor.part_number}.`);
+          return prev;
+        }
+      }
+      if (!allowOverrun && oar.remaining_qty <= 0) {
+        setError(`OAR ${oar.oar_number} has 0 remaining quantity to plan. Check "Allow Overrun" to include it.`);
+        return prev;
+      }
+      return { ...prev, [oar.order_id]: oar.remaining_qty > 0 ? oar.remaining_qty : 1 };
+    });
+  };
+
+  const handleMergeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (mergedOarList.length < 2) {
+      setError("Please select at least 2 OARs with the same Customer & Part Number to merge.");
+      return;
+    }
+    for (const o of mergedOarList) {
+      const q = Number(mergeSelections[o.order_id]);
+      if (!q || q <= 0) {
+        setError(`Please enter a valid positive quantity for ${o.oar_number}.`);
+        return;
+      }
+      if (!allowOverrun && q > o.remaining_qty) {
+        setError(`Requested qty (${q}) for ${o.oar_number} exceeds remaining balance (${o.remaining_qty} pcs).`);
+        return;
+      }
+    }
+    if (isDuplicateWoNumber) {
+      setError(`Work Order ID "${woNumber.trim()}" already exists in the system.`);
+      return;
+    }
+
+    setSubmitting(true);
+    setError("");
+    try {
+      const res = await createMergedWorkOrder({
+        oar_allocations: mergedOarList.map((o) => ({
+          oar_number: o.oar_number,
+          qty: Number(mergeSelections[o.order_id]),
+        })),
+        wo_number: woNumber.trim() || undefined,
+        allow_overrun: allowOverrun,
+        wo_date: woDate || undefined,
+        target_date: targetDate || undefined,
+        casting_process: castingProcess,
+        route_stages: routeStages,
+        remarks: remarks.trim() || undefined,
+      });
+      setSuccessResult(res);
+      setMergeSelections({});
+      loadOars();
+      loadRecentWOs();
+      loadNextWoSequence();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to create merged Work Order.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Manual split helpers
+  const updateManualQty = (idx: number, val: string) => {
+    const updated = [...manualQtys];
+    updated[idx] = val;
+    setManualQtys(updated);
+  };
+
+  const addManualRow = () => {
+    setManualQtys([...manualQtys, ""]);
+  };
+
+  const removeManualRow = (idx: number) => {
+    if (manualQtys.length <= 1) return;
+    setManualQtys(manualQtys.filter((_, i) => i !== idx));
+  };
+
+  // Calculations for auto & manual split
+  const parsedManualQtys = manualQtys.map((v) => Number(v) || 0);
+  const manualAllocated = parsedManualQtys.reduce((sum, v) => sum + v, 0);
+  const totalBaseQty = Number(woQty) || 0;
+  const manualRemaining = totalBaseQty - manualAllocated;
+  const manualComplete = parsedManualQtys.length > 0 && parsedManualQtys.every((v) => v > 0) && manualRemaining === 0;
+
+  // Auto split calculation
+  const autoSplitBatches: number[] = [];
+  if (splitMode === "auto" && totalBaseQty > 0 && Number(batchSize) > 0) {
+    let rem = totalBaseQty;
+    const bSize = Number(batchSize);
+    while (rem > 0) {
+      const take = Math.min(rem, bSize);
+      autoSplitBatches.push(take);
+      rem -= take;
+    }
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedOar) {
+      setError("Please select a parent OAR first.");
+      return;
+    }
+
+    let quantitiesToSubmit: number[] | undefined = undefined;
+    let totalQtyToSubmit = 0;
+
+    if (splitMode === "single") {
+      const q = Number(woQty);
+      if (!q || q <= 0) {
+        setError("Please enter a valid positive Work Order quantity.");
+        return;
+      }
+      totalQtyToSubmit = q;
+    } else if (splitMode === "auto") {
+      if (!autoSplitBatches || autoSplitBatches.length === 0) {
+        setError("Please enter a valid total quantity and batch size.");
+        return;
+      }
+      quantitiesToSubmit = autoSplitBatches;
+      totalQtyToSubmit = autoSplitBatches.reduce((sum, v) => sum + v, 0);
+    } else if (splitMode === "manual") {
+      if (!manualComplete) {
+        setError(`Manual split is incomplete: Allocated (${manualAllocated}) must equal target quantity (${totalBaseQty}).`);
+        return;
+      }
+      quantitiesToSubmit = parsedManualQtys;
+      totalQtyToSubmit = manualAllocated;
+    }
+
+    if (isDuplicateWoNumber) {
+      setError(`Work Order ID "${woNumber.trim()}" already exists in the system. The same WO ID cannot be repeated.`);
+      return;
+    }
+
+    if (isOarFullyPlanned && !allowOverrun) {
+      setError(`OAR ${selectedOar.oar_number} is already fully planned (${selectedOar.allocated_qty}/${selectedOar.oar_qty} pcs). The same OAR cannot repeat Work Order generation without explicit overrun authorization.`);
+      return;
+    }
+
+    // Check remaining unless allowOverrun is checked
+    if (!allowOverrun && selectedOar.remaining_qty < totalQtyToSubmit) {
+      setError(
+        `Requested quantity (${totalQtyToSubmit} pcs) exceeds the remaining unallocated OAR balance (${selectedOar.remaining_qty} pcs). Check "Allow Overrun / Additional Batch" below if creating extra or rework WOs.`
+      );
+      return;
+    }
+
+    setSubmitting(true);
+    setError("");
+    try {
+      const payload: WorkOrderCreatePayload = {
+        oar_number: selectedOar.oar_number,
+        wo_number: woNumber.trim() || undefined,
+        physical_wo_qty: totalQtyToSubmit,
+        wo_quantities: quantitiesToSubmit,
+        allow_overrun: allowOverrun,
+        wo_date: woDate || undefined,
+        target_date: targetDate || undefined,
+        casting_process: castingProcess,
+        route_stages: routeStages,
+        remarks: remarks.trim() || undefined,
+      };
+
+      const res = await createWorkOrder(payload);
+      setSuccessResult(res);
+      loadOars();
+      loadRecentWOs();
+      loadNextWoSequence();
+      // Adjust remaining on selected OAR in memory
+      setSelectedOar((prev) =>
+        prev
+          ? {
+              ...prev,
+              allocated_qty: prev.allocated_qty + totalQtyToSubmit,
+              remaining_qty: Math.max(0, prev.remaining_qty - totalQtyToSubmit),
+            }
+          : null
+      );
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to generate Work Order(s).");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Filtered OARs
+  const filteredOars = oars.filter((o) => {
+    if (filterPendingOnly && !searchOar.trim() && o.remaining_qty <= 0) return false;
+    if (!searchOar.trim()) return true;
+    const q = searchOar.toLowerCase().trim();
+    return (
+      o.oar_number?.toLowerCase().includes(q) ||
+      o.customer_name?.toLowerCase().includes(q) ||
+      o.customer_code?.toLowerCase().includes(q) ||
+      (o.customer_po && o.customer_po.toLowerCase().includes(q)) ||
+      o.part_number?.toLowerCase().includes(q) ||
+      (o.customer_part_number && o.customer_part_number.toLowerCase().includes(q)) ||
+      (o.part_name && o.part_name.toLowerCase().includes(q)) ||
+      o.work_orders?.some((w) => w.wo_number?.toLowerCase().includes(q))
+    );
+  });
+
+  const displayedWOs = recentWOs.filter((wo) => {
+    if (woTableTab === "unreleased") return !wo.is_released;
+    return true;
+  });
+
+  return (
+    <AppShell>
+      <div className="max-w-7xl mx-auto space-y-6">
+        {/* Page Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="rounded-md bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
+                Planning Department
+              </span>
+              <span className="text-xs text-zinc-400">Step 1: WO ID Generation → Step 2: WO ID Release</span>
+            </div>
+            <h1 className="text-2xl font-extrabold tracking-tight text-zinc-900 dark:text-zinc-50 mt-1">
+              Work Order ID Generation &amp; Quantity Split
+            </h1>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+              Select created Sales OARs, divide quantities across sequential Work Order IDs, and proceed to Step 2 (WO ID Release).
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Link
+              href="/orders/intake"
+              className="px-3 py-2 text-xs font-semibold rounded-xl border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition"
+            >
+              Sales OAR Intake
+            </Link>
+            <Link
+              href="/planning/wo-release"
+              className="px-3.5 py-2 text-xs font-bold rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition flex items-center gap-1.5 shadow-sm"
+            >
+              <span>Step 2: WO ID Release</span>
+              <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
+          </div>
+        </div>
+
+        {/* Section 1: Created OARs Queue */}
+        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                <FileSpreadsheet className="h-4 w-4 text-emerald-600" />
+                Created OARs (Sales Order Acceptance Receipts)
+              </h2>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Confirmed OARs created by Sales. Select an OAR below to divide quantity and generate Work Order IDs.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden text-xs">
+                <button
+                  type="button"
+                  onClick={() => setFilterPendingOnly(true)}
+                  className={`px-3 py-1.5 font-bold transition ${
+                    filterPendingOnly
+                      ? "bg-emerald-600 text-white"
+                      : "bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                  }`}
+                >
+                  Awaiting Work Orders
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilterPendingOnly(false)}
+                  className={`px-3 py-1.5 font-bold transition ${
+                    !filterPendingOnly
+                      ? "bg-emerald-600 text-white"
+                      : "bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                  }`}
+                >
+                  All OARs
+                </button>
+              </div>
+
+              <div className="relative">
+                <Search className="h-3.5 w-3.5 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={searchOar}
+                  onChange={(e) => setSearchOar(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      loadOars(searchOar);
+                    }
+                  }}
+                  placeholder="Filter OAR, customer, part..."
+                  className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 focus:outline-none w-48 sm:w-60"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => loadOars(searchOar)}
+                disabled={loadingOars}
+                className="p-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                title="Refresh OARs"
+              >
+                <RefreshCw className={`h-4 w-4 ${loadingOars ? "animate-spin" : ""}`} />
+              </button>
+            </div>
+          </div>
+
+          {loadingOars ? (
+            <p className="text-xs text-zinc-400 py-4 text-center">Loading OAR records...</p>
+          ) : filteredOars.length === 0 ? (
+            <div className="py-6 text-center text-xs text-zinc-400 bg-zinc-50 dark:bg-zinc-950 rounded-xl border border-dashed border-zinc-200 dark:border-zinc-800">
+              No OARs match your criteria. You can create an OAR in{" "}
+              <Link href="/orders/intake" className="text-blue-600 font-bold hover:underline">
+                Order Intake
+              </Link>
+              .
+            </div>
+          ) : (
+            <div className="overflow-x-auto max-h-72 overflow-y-auto border border-zinc-200 dark:border-zinc-800 rounded-xl">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 uppercase text-[10px] tracking-wider sticky top-0">
+                  <tr>
+                    <th className="p-3">OAR Reference</th>
+                    <th className="p-3">Customer &amp; PO</th>
+                    <th className="p-3">Part Number</th>
+                    <th className="p-3 text-right">OAR Qty</th>
+                    <th className="p-3 text-right">Allocated</th>
+                    <th className="p-3 text-right">Remaining to Plan</th>
+                    <th className="p-3">Delivery Date</th>
+                    <th className="p-3">Commitment Date</th>
+                    <th className="p-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                  {filteredOars.map((o) => {
+                    const isSelected = selectedOar?.order_id === o.order_id;
+                    const isMergeChecked = mergeSelections[o.order_id] !== undefined;
+                    const mergeIncompatible =
+                      generationMode === "merge" &&
+                      !isMergeChecked &&
+                      ((!allowOverrun && o.remaining_qty <= 0) ||
+                        (mergeAnchor !== null &&
+                          (o.customer_code !== mergeAnchor.customer_code || o.part_number !== mergeAnchor.part_number)));
+                    return (
+                      <tr
+                        key={o.order_id || o.oar_number}
+                        className={`transition-colors ${
+                          isSelected
+                            ? "bg-emerald-50 dark:bg-emerald-950/40 border-l-4 border-l-emerald-600"
+                            : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                        }`}
+                      >
+                        <td className="p-3">
+                          <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400 block">
+                            {o.oar_number}
+                          </span>
+                          <span className="text-[10px] text-zinc-400 font-mono">
+                            {formatDate(o.oar_date || o.created_at)}
+                          </span>
+                        </td>
+                        <td className="p-3">
+                          <span className="font-semibold text-zinc-800 dark:text-zinc-200 block">
+                            {o.customer_name}
+                          </span>
+                          <span className="text-[10px] text-zinc-400 font-mono">
+                            PO: {o.customer_po || "—"}
+                          </span>
+                        </td>
+                        <td className="p-3">
+                          <span className="font-mono font-bold text-zinc-900 dark:text-zinc-100 block">
+                            {o.customer_part_number || o.part_number}
+                          </span>
+                          {o.customer_part_number && o.customer_part_number !== o.part_number && (
+                            <span className="text-[10px] text-zinc-400 font-mono">
+                              Internal: {o.part_number}
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-3 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <span className="font-mono font-bold text-zinc-900 dark:text-zinc-100">{o.oar_qty}</span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingOarModal(o);
+                              }}
+                              className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-400 hover:text-blue-600 dark:hover:text-blue-400 transition cursor-pointer"
+                              title="Edit OAR Quantity (syncs with Customer PO)"
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </td>
+                        <td className="p-3 text-right font-mono text-zinc-500">{o.allocated_qty}</td>
+                        <td className="p-3 text-right font-mono">
+                          {o.remaining_qty > 0 ? (
+                            <span className="inline-block px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-bold">
+                              {o.remaining_qty} pcs
+                            </span>
+                          ) : (
+                            <span className="text-zinc-400">0 (Fully Planned)</span>
+                          )}
+                        </td>
+                        <td className="p-3 text-zinc-500">{formatDate(o.delivery_date)}</td>
+                        <td className="p-3">
+                          <div className="flex items-center gap-1.5">
+                            {o.revised_commitment_date ? (
+                              <div>
+                                <div className="flex items-center gap-1">
+                                  <span className="font-bold text-amber-600 dark:text-amber-400 font-mono">
+                                    {formatDate(o.revised_commitment_date)}
+                                  </span>
+                                  <span className="px-1.5 py-0.2 text-[9px] font-bold rounded bg-amber-100 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                                    Rev #{o.commitment_date_revision_count || 1}
+                                  </span>
+                                </div>
+                                {o.commitment_date && (
+                                  <span className="text-[10px] text-zinc-400 line-through block font-mono">
+                                    Orig: {formatDate(o.commitment_date)}
+                                  </span>
+                                )}
+                              </div>
+                            ) : o.commitment_date ? (
+                              <span className="font-bold text-blue-600 dark:text-blue-400 font-mono">
+                                {formatDate(o.commitment_date)}
+                              </span>
+                            ) : (
+                              <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
+                                Not Set
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingCommitmentOar(o);
+                              }}
+                              className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition"
+                              title={o.commitment_date || o.revised_commitment_date ? "Change / Revise Commitment Date" : "Set Commitment Date"}
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </td>
+                        <td className="p-3 text-right">
+                          {generationMode === "merge" ? (
+                            <button
+                              type="button"
+                              onClick={() => toggleMergeOar(o)}
+                              disabled={mergeIncompatible}
+                              title={
+                                mergeIncompatible
+                                  ? "Must have remaining qty and match Customer & Part of selected OARs"
+                                  : isMergeChecked
+                                  ? "Remove from merge"
+                                  : "Add to merge"
+                              }
+                              className={`px-3 py-1.5 text-xs font-bold rounded-lg transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                                isMergeChecked
+                                  ? "bg-purple-700 text-white"
+                                  : "bg-purple-600 text-white hover:bg-purple-700"
+                              }`}
+                            >
+                              {isMergeChecked ? "✓ In Merge" : "+ Add to Merge"}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleSelectOar(o)}
+                              className={`px-3 py-1.5 text-xs font-bold rounded-lg transition cursor-pointer ${
+                                isSelected
+                                  ? "bg-emerald-700 text-white"
+                                  : "bg-emerald-600 text-white hover:bg-emerald-700"
+                              }`}
+                            >
+                              {isSelected ? "Selected" : "Select & Divide Qty"}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Section 2: Work Order Creation Form */}
+        <div
+          id="wo-generator-card"
+          className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm space-y-5"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-zinc-100 dark:border-zinc-800">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="rounded-md bg-blue-600 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
+                  Step 1: WO ID Generation
+                </span>
+                <span className="text-xs text-zinc-400">→ Step 2: WO ID Release</span>
+              </div>
+              <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-50 mt-1">
+                Generate Work Order IDs
+              </h3>
+              <p className="text-xs text-zinc-400">
+                Divide the quantity into one or multiple Work Orders, assign IDs, and proceed to Step 2 (Release).
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+              <div className="inline-flex rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 p-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGenerationMode("single");
+                    setError("");
+                  }}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition cursor-pointer ${
+                    generationMode === "single"
+                      ? "bg-white dark:bg-zinc-900 text-emerald-700 dark:text-emerald-400 shadow-xs"
+                      : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                  }`}
+                >
+                  Single OAR
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGenerationMode("merge");
+                    setError("");
+                  }}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition cursor-pointer ${
+                    generationMode === "merge"
+                      ? "bg-purple-600 text-white shadow-xs"
+                      : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                  }`}
+                >
+                  Merge OARs ({mergedOarList.length})
+                </button>
+              </div>
+              {generationMode === "single" && selectedOar && (
+                <span className="px-3 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-xs font-bold font-mono">
+                  Parent: {selectedOar.oar_number}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {error && (
+            <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-xs text-rose-500 font-semibold">
+              {error}
+            </div>
+          )}
+
+          {/* Success Banner: Step 1 Complete -> Go to Step 2 Release */}
+          {successResult && (
+            <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-5 space-y-4">
+              <div className="flex items-start gap-3">
+                <CheckCircle2 className="h-6 w-6 text-emerald-500 shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="text-base font-bold text-emerald-800 dark:text-emerald-300">
+                    Step 1 Complete: {successResult.wos_created?.length || 1} Work Order ID(s) Generated!
+                  </h4>
+                  <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-0.5">
+                    Parent OAR: <strong>{successResult.oar_number}</strong> | Part: {successResult.part_number} | Total Qty: {successResult.physical_wo_qty} pcs | Status: <strong>AWAITING RELEASE (UNRELEASED)</strong>
+                  </p>
+                </div>
+              </div>
+
+              {/* List of Generated WO IDs */}
+              <div className="rounded-xl bg-white dark:bg-zinc-900 p-4 border border-zinc-200 dark:border-zinc-800 space-y-2">
+                <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200 block">
+                  Generated Work Orders (Created &amp; Unreleased):
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {(successResult.wos_created || [successResult.wo_number]).map((wo, idx) => (
+                    <div
+                      key={wo}
+                      className="inline-flex items-center gap-2 rounded-lg bg-blue-50 dark:bg-blue-950/60 px-3 py-1.5 font-mono text-xs font-bold text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800"
+                    >
+                      <span>{wo}</span>
+                      {successResult.wo_quantities && successResult.wo_quantities[idx] && (
+                        <span className="text-zinc-500 font-semibold">
+                          ({successResult.wo_quantities[idx]} pcs)
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const found = recentWOs.find((w) => w.wo_number === wo);
+                          if (found) {
+                            setEditingWO(found);
+                          } else {
+                            loadRecentWOs().then(() => {
+                              const f = recentWOs.find((w) => w.wo_number === wo);
+                              if (f) setEditingWO(f);
+                            });
+                          }
+                        }}
+                        className="ml-1 px-2 py-0.5 rounded border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 text-[10px] font-bold hover:bg-blue-100 dark:hover:bg-blue-900 transition flex items-center gap-1"
+                      >
+                        <Edit2 className="h-2.5 w-2.5" />
+                        <span>Edit</span>
+                      </button>
+                      <Link
+                        href={`/planning/wo-release?wo=${encodeURIComponent(wo)}`}
+                        className="ml-1 px-2 py-0.5 rounded bg-blue-600 text-white text-[10px] font-bold hover:bg-blue-700 transition"
+                      >
+                        Release Now
+                      </Link>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Step 2 CTA */}
+              <div className="rounded-xl bg-blue-50/70 dark:bg-blue-950/40 p-4 border border-blue-200 dark:border-blue-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <span className="font-bold text-blue-900 dark:text-blue-200 text-xs block">
+                    Step 2 in Sequence: Release Work Order IDs
+                  </span>
+                  <p className="text-blue-700 dark:text-blue-300 text-[11px] mt-0.5">
+                    Work Order IDs are generated but held in unreleased status. Click below to proceed to WO ID Release.
+                  </p>
+                </div>
+                <Link
+                  href={`/planning/wo-release?wo=${encodeURIComponent(successResult.wo_number)}`}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 text-white font-bold text-xs hover:bg-blue-700 transition shadow-sm shrink-0"
+                >
+                  <span>Proceed to Step 2: Release WO #{successResult.wo_number}</span>
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+              </div>
+            </div>
+          )}
+
+          {generationMode === "merge" ? (
+            mergedOarList.length === 0 ? (
+              <div className="py-12 text-center border-2 border-dashed border-purple-200 dark:border-purple-900/50 rounded-xl bg-purple-50/30 dark:bg-purple-950/10">
+                <Layers className="h-9 w-9 text-purple-400 mx-auto mb-2" />
+                <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+                  Merge Multiple OARs into 1 Work Order ID
+                </p>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Click <strong>+ Add to Merge</strong> on 2 or more OARs above that share the same <strong>Customer &amp; Part Number</strong>.
+                </p>
+              </div>
+            ) : (
+              <form onSubmit={handleMergeSubmit} className="space-y-5">
+                <div className="rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50/40 dark:bg-purple-950/20 p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs">
+                      <span className="font-bold text-purple-800 dark:text-purple-300">
+                        Selected OARs to Merge ({mergedOarList.length})
+                      </span>
+                      {mergeAnchor && (
+                        <span className="ml-2 text-zinc-500 font-mono">
+                          {mergeAnchor.customer_code} • {mergeAnchor.customer_part_number || mergeAnchor.part_number}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-1 rounded-lg bg-purple-600 text-white text-xs font-bold font-mono">
+                        Combined WO Qty: {mergeTotalQty} pcs
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setMergeSelections({})}
+                        className="text-xs font-semibold text-zinc-500 hover:text-rose-600 cursor-pointer"
+                      >
+                        Clear All
+                      </button>
+                    </div>
+                  </div>
+                  <div className="divide-y divide-purple-200/70 dark:divide-purple-900/60 rounded-lg border border-purple-200 dark:border-purple-900 bg-white dark:bg-zinc-900">
+                    {mergedOarList.map((o) => (
+                      <div key={o.order_id} className="p-3.5 flex flex-wrap items-center justify-between gap-4 text-xs">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400 text-sm">{o.oar_number}</span>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+                              PO: {o.customer_po || "—"}
+                            </span>
+                          </div>
+                          <p className="text-zinc-600 dark:text-zinc-300 text-[11px]">
+                            <strong>{o.customer_code}</strong> ({o.customer_name}) • Part: <strong className="font-mono">{o.customer_part_number || o.part_number}</strong>
+                          </p>
+                          <div className="flex flex-wrap items-center gap-3 text-[10px] text-zinc-500 font-mono">
+                            <span>Total Ordered: <strong>{o.oar_qty} pcs</strong></span>
+                            <span>Remaining: <strong className="text-emerald-600">{o.remaining_qty} pcs</strong></span>
+                            {o.commitment_date && (
+                              <span>Commit: {formatDate(o.revised_commitment_date || o.commitment_date)}</span>
+                            )}
+                            {o.delivery_date && (
+                              <span>Delivery: {formatDate(o.delivery_date)}</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[11px] font-semibold text-zinc-500 whitespace-nowrap">Qty from OAR:</label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={allowOverrun ? undefined : o.remaining_qty}
+                            value={mergeSelections[o.order_id] ?? ""}
+                            onChange={(e) =>
+                              setMergeSelections((prev) => ({
+                                ...prev,
+                                [o.order_id]: Math.max(0, Number(e.target.value) || 0),
+                              }))
+                            }
+                            className="w-24 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-2.5 py-1.5 font-mono font-bold text-right"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => toggleMergeOar(o)}
+                            className="p-1.5 text-zinc-400 hover:text-rose-600 cursor-pointer rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/40 transition"
+                            title="Remove OAR"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Matching OARs Available to Add Directly */}
+                  {compatibleUnselectedOars.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-purple-200 dark:border-purple-800">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-bold text-purple-900 dark:text-purple-200 flex items-center gap-1.5">
+                          <Layers className="h-3.5 w-3.5 text-purple-600" />
+                          <span>Matching OARs Available to Add ({compatibleUnselectedOars.length})</span>
+                        </span>
+                        <span className="text-[10px] text-zinc-500">
+                          Same Customer ({mergeAnchor?.customer_code}) &amp; Part ({mergeAnchor?.customer_part_number || mergeAnchor?.part_number})
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {compatibleUnselectedOars.map((o) => (
+                          <div
+                            key={o.order_id}
+                            className="p-2.5 rounded-lg border border-purple-200 dark:border-purple-800 bg-white dark:bg-zinc-900 flex items-center justify-between gap-2 shadow-2xs"
+                          >
+                            <div>
+                              <span className="font-mono font-bold text-emerald-600 text-xs block">{o.oar_number}</span>
+                              <span className="text-[10px] text-zinc-500 block">
+                                PO: {o.customer_po || "—"} | Remaining: <strong>{o.remaining_qty} pcs</strong>
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => toggleMergeOar(o)}
+                              className="px-2.5 py-1 text-xs font-bold rounded-lg bg-purple-600 hover:bg-purple-700 text-white transition flex items-center gap-1 cursor-pointer shrink-0"
+                            >
+                              <Plus className="h-3 w-3" />
+                              <span>Add</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Notice if only 1 OAR is selected and no other matching OAR exists in the system */}
+                  {mergedOarList.length === 1 && compatibleUnselectedOars.length === 0 && mergeAnchor && (
+                    <div className="mt-3 p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-start gap-2.5">
+                        <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-bold text-amber-900 dark:text-amber-200">
+                            Only 1 OAR exists for {mergeAnchor.customer_code} • {mergeAnchor.customer_part_number || mergeAnchor.part_number}
+                          </p>
+                          <p className="text-amber-800 dark:text-amber-300 text-[11px] mt-0.5">
+                            There are no other pending OARs for this Customer &amp; Part Number in the system to merge with. To generate a Work Order for <strong>{mergeAnchor.oar_number}</strong> ({mergeAnchor.remaining_qty} pcs), please switch to <strong>Single OAR</strong> mode.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGenerationMode("single");
+                          setSelectedOar(mergeAnchor);
+                        }}
+                        className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs whitespace-nowrap self-start sm:self-auto transition cursor-pointer shadow-xs"
+                      >
+                        Switch to Single OAR &rarr;
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Overrun Toggle for Merged WOs */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl bg-purple-50 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      id="mergeAllowOverrunCheckbox"
+                      checked={allowOverrun}
+                      onChange={(e) => setAllowOverrun(e.target.checked)}
+                      className="rounded border-zinc-300 text-purple-600 focus:ring-purple-500 h-4 w-4 cursor-pointer"
+                    />
+                    <span className="text-xs text-purple-950 dark:text-purple-200 font-bold">
+                      Allow Overrun / Additional Batch
+                    </span>
+                  </label>
+                  <span className="text-[11px] text-purple-800 dark:text-purple-300">
+                    {allowOverrun
+                      ? "✓ Overrun enabled: You may enter quantities above the remaining OAR balance."
+                      : "Quantities are capped by remaining unallocated OAR balances."}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+                  <div>
+                    <label className="block font-bold text-zinc-700 dark:text-zinc-300 mb-1">
+                      Single Merged Work Order ID *
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={woNumber}
+                        onChange={(e) => setWoNumber(e.target.value)}
+                        placeholder="e.g. WO-17921"
+                        className="flex-1 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 font-mono font-bold"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={loadNextWoSequence}
+                        className="px-2.5 py-2 rounded-xl border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 font-semibold cursor-pointer"
+                        title="Auto-fill Next WO ID"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block font-bold text-zinc-700 dark:text-zinc-300 mb-1">WO Date</label>
+                    <input
+                      type="date"
+                      value={woDate}
+                      onChange={(e) => setWoDate(e.target.value)}
+                      className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-zinc-700 dark:text-zinc-300 mb-1">Target / Delivery Date</label>
+                    <input
+                      type="date"
+                      value={targetDate}
+                      onChange={(e) => setTargetDate(e.target.value)}
+                      className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-zinc-700 dark:text-zinc-300 mb-1">Casting Process</label>
+                    <select
+                      value={castingProcess}
+                      onChange={(e) => {
+                        const val = e.target.value as "CENTRIFUGAL" | "CONTINUOUS";
+                        setCastingProcess(val);
+                        if (val === "CONTINUOUS") {
+                          setRouteStages((prev) => prev.filter((s) => s !== "F1"));
+                        } else {
+                          setRouteStages((prev) => (prev.includes("F1") ? prev : ["F1", ...prev]));
+                        }
+                      }}
+                      className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 font-semibold"
+                    >
+                      <option value="CENTRIFUGAL">CENTRIFUGAL (Starts F1)</option>
+                      <option value="CONTINUOUS">CONTINUOUS (Starts F2)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Production Route Stages Checklist */}
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex flex-wrap items-center justify-between gap-1">
+                    <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                      Production Route Stages (Click to toggle stages this merged WO will move through):
+                    </label>
+                    <span className="text-[11px] font-mono text-purple-700 dark:text-purple-300 font-bold">
+                      Route: {routeStages.join(" → ")}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {DEFAULT_STAGES.map((stg) => {
+                      const active = routeStages.includes(stg);
+                      return (
+                        <button
+                          key={stg}
+                          type="button"
+                          onClick={() => handleToggleStage(stg)}
+                          className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition cursor-pointer flex items-center gap-1.5 ${
+                            active
+                              ? "bg-purple-600 border-purple-600 text-white shadow-xs"
+                              : "bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-400 hover:border-zinc-400"
+                          }`}
+                        >
+                          <span>{stg}</span>
+                          {active && <Check className="h-3 w-3" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1">Remarks</label>
+                  <input
+                    type="text"
+                    value={remarks}
+                    onChange={(e) => setRemarks(e.target.value)}
+                    className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-2 border-t border-zinc-200 dark:border-zinc-800">
+                  <span className="text-xs text-zinc-400">
+                    {mergedOarList.length < 2
+                      ? "Add at least 1 more OAR of the same Customer & Part to merge."
+                      : `Will create 1 WO (${woNumber || "Auto"}) combining ${mergedOarList.length} OARs = ${mergeTotalQty} pcs.`}
+                  </span>
+                  <button
+                    type="submit"
+                    disabled={submitting || mergedOarList.length < 2 || mergeTotalQty <= 0 || isDuplicateWoNumber}
+                    className="px-6 py-2.5 text-xs font-bold rounded-xl bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 transition flex items-center gap-2 shadow-sm cursor-pointer"
+                  >
+                    <Plus className="h-4 w-4" />
+                    <span>
+                      {submitting
+                        ? "Generating Merged WO..."
+                        : `Step 1: Generate Merged WO (${mergeTotalQty} pcs)`}
+                    </span>
+                  </button>
+                </div>
+              </form>
+            )
+          ) : !selectedOar ? (
+            <div className="py-8 text-center text-xs text-zinc-400 bg-zinc-50 dark:bg-zinc-950 rounded-xl border border-dashed border-zinc-200 dark:border-zinc-800">
+              Please click <strong>"Select &amp; Divide Qty"</strong> on an OAR from the table above to start.
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-5">
+              {/* Parent OAR Summary Card */}
+              <div className="rounded-xl bg-zinc-50 dark:bg-zinc-950 p-4 border border-zinc-200 dark:border-zinc-800 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+                <div>
+                  <span className="text-[10px] text-zinc-400 uppercase font-semibold block">Parent OAR</span>
+                  <span className="font-mono font-bold text-emerald-600 text-sm">{selectedOar.oar_number}</span>
+                  <span className="text-[10px] text-zinc-400 block font-mono">PO: {selectedOar.customer_po || "—"}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-zinc-400 uppercase font-semibold block">Customer</span>
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-200 block truncate">{selectedOar.customer_name}</span>
+                  <span className="text-[10px] text-zinc-400 font-mono">{selectedOar.customer_code}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-zinc-400 uppercase font-semibold block">Customer Part</span>
+                  <span className="font-mono font-bold text-zinc-900 dark:text-zinc-100 block">
+                    {selectedOar.customer_part_number || selectedOar.part_number}
+                  </span>
+                  {selectedOar.customer_part_number && selectedOar.customer_part_number !== selectedOar.part_number && (
+                    <span className="text-[10px] text-zinc-400 font-mono">
+                      Internal: {selectedOar.part_number}
+                    </span>
+                  )}
+                </div>
+                <div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-zinc-400 uppercase font-semibold block">Quantities</span>
+                    <button
+                      type="button"
+                      onClick={() => setEditingOarModal(selectedOar)}
+                      className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline font-bold flex items-center gap-0.5 cursor-pointer"
+                      title="Edit OAR Quantity (syncs with Customer PO)"
+                    >
+                      <Pencil className="h-2.5 w-2.5" /> Edit
+                    </button>
+                  </div>
+                  <span className="text-zinc-600 dark:text-zinc-300 block">
+                    OAR: <strong>{selectedOar.oar_qty}</strong> | Planned: {selectedOar.allocated_qty}
+                  </span>
+                  {Boolean(selectedOar.fulfilled_from_stock_qty && selectedOar.fulfilled_from_stock_qty > 0) && (
+                    <span className="text-[10px] text-emerald-700 dark:text-emerald-400 font-bold block">
+                      From BSR Stock: {selectedOar.fulfilled_from_stock_qty} pcs
+                    </span>
+                  )}
+                  <span className="font-bold text-emerald-600 font-mono">
+                    Remaining: {selectedOar.remaining_qty} pcs
+                  </span>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-zinc-400 uppercase font-semibold block">Commitment Date</span>
+                    <button
+                      type="button"
+                      onClick={() => setEditingCommitmentOar(selectedOar)}
+                      className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline font-bold flex items-center gap-0.5 cursor-pointer"
+                    >
+                      <Pencil className="h-2.5 w-2.5" /> Edit
+                    </button>
+                  </div>
+                  {selectedOar.revised_commitment_date ? (
+                    <div>
+                      <span className="font-mono font-bold text-amber-600 dark:text-amber-400 block text-sm">
+                        {formatDate(selectedOar.revised_commitment_date)}
+                      </span>
+                      <span className="text-[10px] text-zinc-400 font-mono block">
+                        Rev #{selectedOar.commitment_date_revision_count || 1}
+                      </span>
+                    </div>
+                  ) : selectedOar.commitment_date ? (
+                    <div>
+                      <span className="font-mono font-bold text-blue-600 dark:text-blue-400 block text-sm">
+                        {formatDate(selectedOar.commitment_date)}
+                      </span>
+                      <span className="text-[10px] text-zinc-400 block font-mono">
+                        PO: {formatDate(selectedOar.delivery_date)}
+                      </span>
+                    </div>
+                  ) : (
+                    <div>
+                      <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 mb-0.5">
+                        Not Set
+                      </span>
+                      <span className="text-[10px] text-zinc-400 block font-mono">
+                        PO: {formatDate(selectedOar.delivery_date)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* BSR Finished Goods Stock Available Banner & Action */}
+              {bsrStock && bsrStock.total_available > 0 && selectedOar.remaining_qty > 0 && (
+                <div className="rounded-xl border border-emerald-300 dark:border-emerald-800 bg-emerald-50/90 dark:bg-emerald-950/40 p-4 shadow-sm">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                        <span className="text-xs font-bold text-emerald-900 dark:text-emerald-200">
+                          🟢 BSR Finished Stock Available: {bsrStock.total_available} pcs
+                        </span>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-200 dark:bg-emerald-800/60 text-emerald-800 dark:text-emerald-200">
+                          Part: {selectedOar.part_number}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-emerald-700 dark:text-emerald-300">
+                        Stock is already inspected & ready in BSR. Fulfill demand directly from buffer stock without releasing new casting WOs.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">Allocate:</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={Math.min(bsrStock.total_available, selectedOar.remaining_qty)}
+                          value={stockAllocQty}
+                          onChange={(e) => setStockAllocQty(e.target.value === "" ? "" : Number(e.target.value))}
+                          className="w-20 px-2.5 py-1 text-xs font-mono font-bold rounded-lg border border-emerald-300 dark:border-emerald-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 text-center"
+                          placeholder="Qty"
+                        />
+                        <span className="text-xs text-zinc-400">pcs</span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleAllocateStock}
+                        disabled={allocatingStock || !stockAllocQty || Number(stockAllocQty) <= 0}
+                        className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+                      >
+                        {allocatingStock ? "Allocating..." : "Fulfill from Stock"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {stockSuccessMsg && (
+                <div className="rounded-xl border border-emerald-400 bg-emerald-100 dark:bg-emerald-950/60 p-3 text-xs text-emerald-900 dark:text-emerald-200 font-bold flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                  <span>{stockSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* Overrun / 0-Remaining Warning Banner */}
+              {selectedOar.remaining_qty <= 0 && (
+                <div className="rounded-xl border border-amber-200 dark:border-amber-900/50 bg-amber-50/70 dark:bg-amber-950/30 p-3.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300 font-medium">
+                    <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+                    <span>
+                      This OAR is already fully planned (0 pcs remaining). Enable overrun to generate an additional/re-work batch.
+                    </span>
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer shrink-0 font-bold text-amber-900 dark:text-amber-200">
+                    <input
+                      type="checkbox"
+                      checked={allowOverrun}
+                      onChange={(e) => setAllowOverrun(e.target.checked)}
+                      className="rounded border-amber-400 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>Allow Overrun / Extra Batch</span>
+                  </label>
+                </div>
+              )}
+
+              {/* Work Order Starting ID, Date & Target Date */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                      Work Order ID (Starting ID) *
+                    </label>
+                    <button
+                      type="button"
+                      onClick={loadNextWoSequence}
+                      className="text-[10px] text-blue-600 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <RefreshCw className="h-2.5 w-2.5" /> Next Auto
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    required
+                    value={woNumber}
+                    onChange={(e) => setWoNumber(e.target.value)}
+                    placeholder="e.g. WO-17618 or custom/dumped ID"
+                    className={`mt-1.5 w-full rounded-xl border ${
+                      isDuplicateWoNumber
+                        ? "border-red-500 bg-red-50/50 dark:bg-red-950/20 text-red-700 dark:text-red-400"
+                        : "border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100"
+                    } px-3 py-2 text-xs font-mono font-bold focus:outline-none`}
+                  />
+                  {isDuplicateWoNumber ? (
+                    <p className="mt-1 text-[11px] font-bold text-red-600 dark:text-red-400 flex items-center gap-1">
+                      <AlertTriangle className="h-3 w-3 shrink-0" />
+                      Work Order ID &quot;{woNumber.trim()}&quot; already exists! Same WO ID cannot repeat.
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-[10px] text-zinc-400">
+                      Auto-sequenced or enter custom/dumped WO ID.
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                    Work Order Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={woDate}
+                    onChange={(e) => setWoDate(e.target.value)}
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                    Target / Delivery Date
+                  </label>
+                  <input
+                    type="date"
+                    value={targetDate}
+                    onChange={(e) => setTargetDate(e.target.value)}
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* DIVIDE QUANTITY CONTROLS */}
+              <div className="pt-3 border-t border-zinc-100 dark:border-zinc-800 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                      <Split className="h-3.5 w-3.5 text-blue-600" />
+                      Divide Quantity Across Work Orders
+                    </h4>
+                    <p className="text-[11px] text-zinc-500">
+                      Choose how to divide the quantity: single Work Order, auto-split by batch size, or custom manual split.
+                    </p>
+                  </div>
+
+                  {/* Mode Selector */}
+                  <div className="flex rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden text-xs self-start sm:self-auto">
+                    <button
+                      type="button"
+                      onClick={() => setSplitMode("single")}
+                      className={`px-3 py-1.5 font-bold transition cursor-pointer ${
+                        splitMode === "single"
+                          ? "bg-blue-600 text-white"
+                          : "bg-white dark:bg-zinc-900 text-zinc-600 hover:bg-zinc-50"
+                      }`}
+                    >
+                      Single WO
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSplitMode("auto")}
+                      className={`px-3 py-1.5 font-bold transition cursor-pointer ${
+                        splitMode === "auto"
+                          ? "bg-blue-600 text-white"
+                          : "bg-white dark:bg-zinc-900 text-zinc-600 hover:bg-zinc-50"
+                      }`}
+                    >
+                      Auto Batch Split
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSplitMode("manual")}
+                      className={`px-3 py-1.5 font-bold transition cursor-pointer ${
+                        splitMode === "manual"
+                          ? "bg-blue-600 text-white"
+                          : "bg-white dark:bg-zinc-900 text-zinc-600 hover:bg-zinc-50"
+                      }`}
+                    >
+                      Manual Split
+                    </button>
+                  </div>
+                </div>
+
+                {/* Single WO Mode */}
+                {splitMode === "single" && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+                    <div>
+                      <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                        Physical WO Quantity (pcs) *
+                      </label>
+                      <input
+                        type="number"
+                        required
+                        min={1}
+                        value={woQty}
+                        onChange={(e) => setWoQty(e.target.value === "" ? "" : Number(e.target.value))}
+                        className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                      />
+                      <p className="mt-1 text-[10px] text-zinc-400">
+                        Available in OAR: {selectedOar.remaining_qty} pcs
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col justify-center">
+                      <label className="flex items-center gap-2 cursor-pointer mt-2 text-xs text-zinc-700 dark:text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={allowOverrun}
+                          onChange={(e) => setAllowOverrun(e.target.checked)}
+                          className="rounded border-zinc-300 text-blue-600"
+                        />
+                        <span>
+                          <strong>Allow Overrun / Additional Batch</strong> (Permits quantity above remaining OAR balance)
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                {/* Auto Split Mode */}
+                {splitMode === "auto" && (
+                  <div className="space-y-3 pt-1">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                          Total Quantity to Divide (pcs) *
+                        </label>
+                        <input
+                          type="number"
+                          required
+                          min={1}
+                          value={woQty}
+                          onChange={(e) => setWoQty(e.target.value === "" ? "" : Number(e.target.value))}
+                          className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                          Max Batch Size per Work Order (pcs) *
+                        </label>
+                        <input
+                          type="number"
+                          required
+                          min={1}
+                          value={batchSize}
+                          onChange={(e) => setBatchSize(e.target.value === "" ? "" : Number(e.target.value))}
+                          className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    {autoSplitBatches.length > 0 && (
+                      <div className="rounded-xl bg-blue-50/60 dark:bg-blue-950/30 p-3.5 border border-blue-200 dark:border-blue-900/40 text-xs space-y-2">
+                        <div className="flex items-center justify-between font-semibold text-blue-900 dark:text-blue-300">
+                          <span>
+                            Quantity will be divided into: <strong>{autoSplitBatches.length} Work Orders</strong>
+                          </span>
+                          <span className="font-mono">
+                            {totalBaseQty} pcs total
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          {autoSplitBatches.map((bQty, bIdx) => (
+                            <span
+                              key={bIdx}
+                              className="px-2.5 py-1 rounded-lg bg-white dark:bg-zinc-900 border border-blue-200 dark:border-blue-800 font-mono text-[11px] font-bold text-blue-700 dark:text-blue-300"
+                            >
+                              WO #{bIdx + 1}: {bQty} pcs
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Manual Split Mode */}
+                {splitMode === "manual" && (
+                  <div className="space-y-3 pt-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-zinc-500">
+                        Target Total: <strong className="text-zinc-800 dark:text-zinc-200 font-mono">{totalBaseQty} pcs</strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={addManualRow}
+                        className="text-xs font-bold text-blue-600 hover:underline cursor-pointer"
+                      >
+                        + Add Work Order Row
+                      </button>
+                    </div>
+
+                    <div className="space-y-2">
+                      {manualQtys.map((v, idx) => (
+                        <div key={idx} className="flex items-center gap-2">
+                          <span className="w-16 text-[11px] font-mono font-bold text-zinc-400">WO #{idx + 1}</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={v}
+                            onChange={(e) => updateManualQty(idx, e.target.value)}
+                            placeholder="Quantity (pcs)"
+                            className="flex-1 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-1.5 text-xs font-bold font-mono text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeManualRow(idx)}
+                            disabled={manualQtys.length <= 1}
+                            className="text-[11px] font-bold text-rose-500 disabled:opacity-30 disabled:cursor-not-allowed px-2 cursor-pointer"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div
+                      className={`rounded-xl p-3 border text-xs flex items-center justify-between ${
+                        manualComplete
+                          ? "bg-emerald-50/50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/40"
+                          : "bg-amber-50/50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/40"
+                      }`}
+                    >
+                      <span className="text-zinc-600 dark:text-zinc-400">
+                        Allocated: <strong className="font-mono">{manualAllocated}</strong> / {totalBaseQty} pcs
+                        {" · "}
+                        Remaining: <strong className="font-mono">{manualRemaining}</strong>
+                      </span>
+                      <span className={`font-bold ${manualComplete ? "text-emerald-600" : "text-amber-600"}`}>
+                        {manualComplete ? "Allocation Complete" : "Allocation Incomplete"}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Casting Process */}
+              <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800">
+                <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                  Casting Process
+                </label>
+                <select
+                  value={castingProcess}
+                  onChange={(e) => setCastingProcess(e.target.value as any)}
+                  className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                >
+                  <option value="CENTRIFUGAL">CENTRIFUGAL (Foundry Melt)</option>
+                  <option value="CONTINUOUS">CONTINUOUS (Continuous Casting)</option>
+                </select>
+              </div>
+
+              {/* Route Stages */}
+              <div className="pt-2">
+                <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300 block mb-1.5">
+                  Production Route Stages
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {DEFAULT_STAGES.map((stg) => {
+                    const active = routeStages.includes(stg);
+                    return (
+                      <button
+                        key={stg}
+                        type="button"
+                        onClick={() => handleToggleStage(stg)}
+                        className={`px-3 py-1 text-xs font-bold rounded-lg border transition cursor-pointer ${
+                          active
+                            ? "bg-blue-600 border-blue-600 text-white"
+                            : "bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-400"
+                        }`}
+                      >
+                        {stg}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Remarks */}
+              <div>
+                <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                  Planning Remarks
+                </label>
+                <input
+                  type="text"
+                  value={remarks}
+                  onChange={(e) => setRemarks(e.target.value)}
+                  className="mt-1.5 w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-900 dark:text-zinc-100 focus:outline-none"
+                />
+              </div>
+
+              {/* Action Buttons: Step 1 Submit -> Proceed to Step 2 */}
+              <div className="pt-3 border-t border-zinc-100 dark:border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <span className="text-xs text-zinc-400">
+                  Step 1 will generate the Work Order IDs in unreleased status. You will then release them in Step 2.
+                </span>
+
+                <div className="flex items-center gap-3 self-end sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOar(null)}
+                    className="px-4 py-2.5 text-xs font-semibold rounded-xl border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={
+                      submitting ||
+                      !woNumber ||
+                      isDuplicateWoNumber ||
+                      (isOarFullyPlanned && !allowOverrun) ||
+                      (splitMode === "single" && (!woQty || Number(woQty) <= 0)) ||
+                      (splitMode === "auto" && autoSplitBatches.length === 0) ||
+                      (splitMode === "manual" && !manualComplete)
+                    }
+                    className="px-6 py-2.5 text-xs font-bold rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 transition flex items-center gap-2 shadow-sm cursor-pointer"
+                  >
+                    <Plus className="h-4 w-4" />
+                    <span>
+                      {submitting
+                        ? "Generating Work Order IDs..."
+                        : isDuplicateWoNumber
+                        ? "Duplicate WO ID — Click Next Auto"
+                        : isOarFullyPlanned && !allowOverrun
+                        ? "OAR Already Planned (Repeat Prohibited)"
+                        : splitMode === "auto"
+                        ? `Step 1: Generate ${autoSplitBatches.length} Work Order IDs`
+                        : splitMode === "manual"
+                        ? `Step 1: Generate ${parsedManualQtys.length} Work Order IDs`
+                        : "Step 1: Generate Work Order ID"}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          )}
+        </div>
+
+        {/* Section 3: Created Work Orders & Release Handoff */}
+        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                <Layers className="h-4 w-4 text-blue-600" />
+                Work Orders Queue &amp; Release Status (Step 2 Handoff)
+              </h2>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Generated Work Orders linked to parent OARs. Unreleased Work Orders must be released in Step 2 before floor execution.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <div className="flex items-center rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden text-xs">
+                <button
+                  type="button"
+                  onClick={() => setWoTableTab("all")}
+                  className={`px-3 py-1.5 font-bold transition cursor-pointer ${
+                    woTableTab === "all"
+                      ? "bg-blue-600 text-white"
+                      : "bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                  }`}
+                >
+                  All ({recentWOs.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setWoTableTab("unreleased")}
+                  className={`px-3 py-1.5 font-bold transition cursor-pointer ${
+                    woTableTab === "unreleased"
+                      ? "bg-amber-600 text-white"
+                      : "bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
+                  }`}
+                >
+                  Awaiting Release ({recentWOs.filter((w) => !w.is_released).length})
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={loadRecentWOs}
+                disabled={loadingWOs}
+                className="p-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                title="Refresh Work Orders"
+              >
+                <RefreshCw className={`h-4 w-4 ${loadingWOs ? "animate-spin" : ""}`} />
+              </button>
+            </div>
+          </div>
+
+          {loadingWOs ? (
+            <p className="text-xs text-zinc-400 py-4 text-center">Loading Work Orders...</p>
+          ) : displayedWOs.length === 0 ? (
+            <p className="text-xs text-zinc-400 py-4 text-center">
+              {woTableTab === "unreleased" ? "No Work Orders awaiting release." : "No Work Orders created yet."}
+            </p>
+          ) : (
+            <div className="overflow-x-auto max-h-80 overflow-y-auto border border-zinc-200 dark:border-zinc-800 rounded-xl">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 uppercase text-[10px] tracking-wider sticky top-0">
+                  <tr>
+                    <th className="p-3">Work Order ID</th>
+                    <th className="p-3">Parent OAR</th>
+                    <th className="p-3">Customer &amp; PO</th>
+                    <th className="p-3">Part Number</th>
+                    <th className="p-3 text-right">WO Qty</th>
+                    <th className="p-3">Current Stage</th>
+                    <th className="p-3">Step 2: Release Status</th>
+                    <th className="p-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                  {displayedWOs.map((wo) => (
+                    <tr key={wo.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                      <td className="p-3">
+                        <span className="font-mono font-bold text-blue-600 block">
+                          {wo.wo_number}
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-mono">
+                          {formatDate(wo.wo_date || wo.created_at)}
+                        </span>
+                      </td>
+                      <td className="p-3">
+                        <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400 block">
+                          {wo.oar_number || "—"}
+                        </span>
+                      </td>
+                      <td className="p-3">
+                        <span className="font-semibold text-zinc-800 dark:text-zinc-200 block truncate max-w-xs">
+                          {wo.customer_name}
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-mono">
+                          PO: {wo.customer_po || "—"}
+                        </span>
+                      </td>
+                      <td className="p-3 font-mono text-zinc-900 dark:text-zinc-100">
+                        {wo.part_number}
+                      </td>
+                      <td className="p-3 text-right font-mono font-bold">
+                        {wo.physical_wo_qty} pcs
+                      </td>
+                      <td className="p-3 font-mono">
+                        <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-bold text-[11px]">
+                          {wo.current_stage || "F1"}
+                        </span>
+                      </td>
+                      <td className="p-3">
+                        {wo.is_released ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 font-bold text-[11px]">
+                            <Check className="h-3 w-3" /> Step 2: Released
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-bold text-[11px]">
+                            <Clock className="h-3 w-3" /> Step 1: Generated (Unreleased)
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-3 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setEditingWO(wo)}
+                            className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-200 transition flex items-center gap-1 shadow-sm"
+                            title="Edit Work Order"
+                          >
+                            <Edit2 className="h-3 w-3" />
+                            <span>Edit</span>
+                          </button>
+                          {!wo.is_released && !wo.release_date && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteWO(wo)}
+                              disabled={deletingWoNumber === wo.wo_number}
+                              className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 transition flex items-center gap-1 shadow-sm cursor-pointer disabled:opacity-50"
+                              title="Temporary: Delete unreleased Work Order"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                              <span>{deletingWoNumber === wo.wo_number ? "Deleting..." : "Delete"}</span>
+                            </button>
+                          )}
+                          {!wo.is_released ? (
+                            <Link
+                              href={`/planning/wo-release?wo=${encodeURIComponent(wo.wo_number)}`}
+                              className="px-3 py-1.5 text-xs font-bold rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition flex items-center gap-1 shadow-sm"
+                            >
+                              <span>Step 2: Release WO</span>
+                              <ArrowRight className="h-3 w-3" />
+                            </Link>
+                          ) : (
+                            <Link
+                              href={`/production/tracking?wo=${encodeURIComponent(wo.wo_number)}`}
+                              className="px-2.5 py-1 text-[11px] font-semibold rounded-lg border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition"
+                            >
+                              Track Floor
+                            </Link>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Edit Commitment Date Modal */}
+      {editingCommitmentOar && (
+        <EditCommitmentDateModal
+          oar={editingCommitmentOar}
+          onClose={() => setEditingCommitmentOar(null)}
+          onSuccess={handleCommitmentDateSuccess}
+        />
+      )}
+
+      {/* Toast alert for commitment date success */}
+      {commitmentSuccessMsg && (
+        <div className="fixed bottom-6 right-6 z-50 rounded-xl bg-blue-600 text-white px-4 py-3 shadow-xl flex items-center gap-2 text-xs font-bold animate-in fade-in slide-in-from-bottom-4">
+          <CheckCircle2 className="h-4 w-4" />
+          <span>{commitmentSuccessMsg}</span>
+        </div>
+      )}
+
+      {/* Edit Work Order Modal */}
+      {editingWO && (
+        <EditWorkOrderModal
+          wo={editingWO}
+          onClose={() => setEditingWO(null)}
+          onSuccess={async (updatedWO) => {
+            setEditingWO(null);
+            setEditSuccessMsg(`Work Order ${updatedWO.wo_number} updated successfully!`);
+            await loadRecentWOs();
+            await loadOars();
+            setTimeout(() => setEditSuccessMsg(""), 5000);
+          }}
+        />
+      )}
+
+      {/* Edit OAR & Customer PO Quantity Modal */}
+      {editingOarModal && (
+        <EditOARModal
+          oar={editingOarModal}
+          onClose={() => setEditingOarModal(null)}
+          onSuccess={handleOarModalSuccess}
+          onDelete={(delOar) => {
+            setOars((prev) => prev.filter((o) => o.oar_number !== delOar));
+            if (selectedOar?.oar_number === delOar) {
+              setSelectedOar(null);
+            }
+            setEditingOarModal(null);
+            setCommitmentSuccessMsg(`OAR ${delOar} deleted successfully.`);
+            setTimeout(() => setCommitmentSuccessMsg(""), 5000);
+          }}
+        />
+      )}
+
+      {/* Toast alert for edit success */}
+      {editSuccessMsg && (
+        <div className="fixed bottom-6 right-6 z-50 rounded-xl bg-emerald-600 text-white px-4 py-3 shadow-xl flex items-center gap-2 text-xs font-bold animate-in fade-in slide-in-from-bottom-4">
+          <CheckCircle2 className="h-4 w-4" />
+          <span>{editSuccessMsg}</span>
+        </div>
+      )}
+    </AppShell>
+  );
+}
+
+interface EditCommitmentDateModalProps {
+  oar: OARListItem;
+  onClose: () => void;
+  onSuccess: (updatedOar: OARListItem) => void;
+}
+
+function EditCommitmentDateModal({ oar, onClose, onSuccess }: EditCommitmentDateModalProps) {
+  const isAlreadyCommitted = Boolean(oar.commitment_date || oar.revised_commitment_date);
+  const currentEffDate = oar.effective_commitment_date || oar.revised_commitment_date || oar.commitment_date;
+  const initialDate = currentEffDate
+    ? currentEffDate.slice(0, 10)
+    : oar.delivery_date
+    ? oar.delivery_date.slice(0, 10)
+    : "";
+
+  const [commitmentDate, setCommitmentDate] = useState(initialDate);
+  const [revisionReason, setRevisionReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!commitmentDate) {
+      setError("Please select a commitment date.");
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setError("");
+
+      const payload: {
+        commitment_date?: string;
+        revised_commitment_date?: string;
+        revision_reason?: string;
+      } = {};
+
+      if (isAlreadyCommitted) {
+        payload.revised_commitment_date = commitmentDate;
+        payload.revision_reason = revisionReason.trim() || undefined;
+      } else {
+        payload.commitment_date = commitmentDate;
+        if (revisionReason.trim()) {
+          payload.revision_reason = revisionReason.trim();
+        }
+      }
+
+      const updated = await updateOAR(oar.oar_number, payload);
+      onSuccess(updated);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to update commitment date.";
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in">
+      <div className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/50">
+          <div className="flex items-center gap-2">
+            <div className="p-2 rounded-lg bg-blue-100 dark:bg-blue-950/70 text-blue-600 dark:text-blue-400">
+              <CalendarClock className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-zinc-900 dark:text-zinc-50">
+                {isAlreadyCommitted ? "Revise Commitment Date" : "Set Initial Commitment Date"}
+              </h3>
+              <p className="text-[11px] text-zinc-500 font-mono">OAR: {oar.oar_number}</p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition cursor-pointer"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={handleSubmit} className="p-5 space-y-4 text-xs">
+          {error && (
+            <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 text-red-600 dark:text-red-300 text-xs">
+              {error}
+            </div>
+          )}
+
+          {/* Context details */}
+          <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800/40 p-3 border border-zinc-200 dark:border-zinc-800 space-y-1.5">
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Customer:</span>
+              <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate max-w-[200px]">{oar.customer_name}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Part:</span>
+              <span className="font-mono font-bold text-zinc-800 dark:text-zinc-200">{oar.customer_part_number || oar.part_number}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">PO Delivery Date:</span>
+              <span className="font-mono text-zinc-700 dark:text-zinc-300">{formatDate(oar.delivery_date)}</span>
+            </div>
+            {isAlreadyCommitted ? (
+              <div className="flex justify-between pt-1 border-t border-zinc-200 dark:border-zinc-700">
+                <span className="text-amber-600 dark:text-amber-400 font-medium">Current Committed:</span>
+                <span className="font-mono font-bold text-amber-600 dark:text-amber-400">
+                  {formatDate(currentEffDate)} {oar.commitment_date_revision_count ? `(Rev #${oar.commitment_date_revision_count})` : ""}
+                </span>
+              </div>
+            ) : (
+              <div className="flex justify-between pt-1 border-t border-zinc-200 dark:border-zinc-700">
+                <span className="text-zinc-500 font-medium">Current Status:</span>
+                <span className="font-semibold text-zinc-500">Not Set</span>
+              </div>
+            )}
+          </div>
+
+          {/* Commitment Date Input */}
+          <div>
+            <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1">
+              {isAlreadyCommitted ? "New Revised Commitment Date *" : "Commitment Date *"}
+            </label>
+            <input
+              type="date"
+              required
+              value={commitmentDate}
+              onChange={(e) => setCommitmentDate(e.target.value)}
+              className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3.5 py-2 text-xs text-zinc-900 dark:text-zinc-50 focus:border-blue-500 focus:outline-none font-mono"
+            />
+          </div>
+
+          {/* Revision Reason */}
+          <div>
+            <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1">
+              Revision Reason {isAlreadyCommitted ? "(Recommended)" : "(Optional)"}
+            </label>
+            <input
+              type="text"
+              placeholder={isAlreadyCommitted ? "e.g., Customer requested rescheduling, material delay..." : "Optional notes for commitment"}
+              value={revisionReason}
+              onChange={(e) => setRevisionReason(e.target.value)}
+              className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3.5 py-2 text-xs text-zinc-900 dark:text-zinc-50 focus:border-blue-500 focus:outline-none"
+            />
+            {isAlreadyCommitted && (
+              <p className="text-[10px] text-zinc-400 mt-1">
+                Updating this date will increment the revision count to Rev #{(oar.commitment_date_revision_count || 0) + 1} and record the audit timestamp.
+              </p>
+            )}
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              className="px-3.5 py-2 rounded-xl border border-zinc-300 dark:border-zinc-700 text-xs font-bold text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving}
+              className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition shadow-sm flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
+            >
+              {saving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+              <span>{saving ? "Updating..." : isAlreadyCommitted ? "Save Revision" : "Set Commitment Date"}</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

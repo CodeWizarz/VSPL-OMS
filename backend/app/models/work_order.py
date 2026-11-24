@@ -16,6 +16,7 @@ class StageCode(str, enum.Enum):
     DISPATCH = "DISPATCH"
 
 class WOStatus(str, enum.Enum):
+    OPEN = "open"
     PLANNED = "planned"
     RELEASED = "released"
     IN_PRODUCTION = "in_production"
@@ -36,13 +37,43 @@ class WorkOrder(Base):
     current_stage = Column(String, default="F1")
     projected_final_good = Column(Integer, default=0)
     shortfall = Column(String, default="No")  # "YES" | "No"
+    shortfall_qty = Column(Integer, default=0, nullable=False)
+    shortfall_reason = Column(String, nullable=True)
+    excess_qty = Column(Integer, default=0, nullable=False)
     status = Column(Enum(WOStatus), nullable=False, default=WOStatus.IN_PRODUCTION)
+    # Release chain: OAR -> WO Created -> Engineering Release -> Manufacturing
+    # Release -> WO Released (released_by/release_date below, unchanged) -> Production.
+    # Each is set exactly once, by its own dedicated endpoint -- never inferred from
+    # any other field, and never set automatically by WO creation.
+    engineering_released_by = Column(String, nullable=True)
+    engineering_released_at = Column(DateTime(timezone=True), nullable=True)
+    engineering_document_name = Column(String(255), nullable=True)
+    engineering_document_url = Column(String(1000), nullable=True)
+    engineering_document_revision = Column(String(50), nullable=True)
+    engineering_remarks = Column(String, nullable=True)
+    manufacturing_released_by = Column(String, nullable=True)
+    manufacturing_released_at = Column(DateTime(timezone=True), nullable=True)
+    manufacturing_document_name = Column(String(255), nullable=True)
+    manufacturing_document_url = Column(String(1000), nullable=True)
+    manufacturing_document_revision = Column(String(50), nullable=True)
+    manufacturing_remarks = Column(String, nullable=True)
     released_by = Column(String, nullable=True)
     release_date = Column(DateTime(timezone=True), nullable=True)
+    casting_process = Column(String(50), nullable=True)  # 'CENTRIFUGAL' | 'CONTINUOUS' (for F1 casting route)
+    heat_number = Column(String(100), nullable=True, index=True)  # Heat Number / Melt Batch from which parts are produced
+    classification = Column(String(50), nullable=True, default="Production")  # 'Production' | 'NPD'
+    # Rejection-replacement WO linkage. A replacement WO is a normal WO in every other
+    # respect (own route/release/production lifecycle) -- these three fields only
+    # record where it came from. The original WO's own history/target is never
+    # modified when a replacement is created.
+    source_wo_id = Column(GUID, ForeignKey("work_orders.id"), nullable=True)
+    is_replacement = Column(Boolean, nullable=False, default=False)
+    replacement_reason = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
     order = relationship("Order", back_populates="work_orders")
+    source_wo = relationship("WorkOrder", remote_side=[id], foreign_keys=[source_wo_id])
     routes = relationship("WORoute", back_populates="work_order", cascade="all, delete-orphan", order_by="WORoute.sequence")
     stage_wips = relationship("StageWIP", back_populates="work_order", cascade="all, delete-orphan")
     movements = relationship("ProductionMovement", back_populates="work_order", cascade="all, delete-orphan")
@@ -50,6 +81,21 @@ class WorkOrder(Base):
     production_updates = relationship("ProductionUpdate", back_populates="work_order")
     nc_records = relationship("NCRecord", back_populates="work_order")
     dispatches = relationship("Dispatch", back_populates="work_order")
+    oar_allocations = relationship("WorkOrderOARAllocation", back_populates="work_order", cascade="all, delete-orphan")
+
+
+class WorkOrderOARAllocation(Base):
+    """Links a clubbed/merged Work Order to multiple OARs (same customer & part) with per-OAR qty."""
+    __tablename__ = "work_order_oar_allocations"
+
+    id = Column(GUID, primary_key=True, default=uuid.uuid4)
+    work_order_id = Column(GUID, ForeignKey("work_orders.id"), nullable=False, index=True)
+    order_id = Column(GUID, ForeignKey("orders.id"), nullable=False, index=True)
+    allocated_qty = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    work_order = relationship("WorkOrder", back_populates="oar_allocations")
+    order = relationship("Order", back_populates="wo_allocations")
 
 class WORoute(Base):
     """Ordered stage sequence + per-stage target for a WO (back-calculated from yield)."""
@@ -67,8 +113,8 @@ class WORoute(Base):
     cumulative_inproc_qty = Column(Integer, default=0)
     cumulative_onhand_qty = Column(Integer, default=0)
     stage_status = Column(String, default="Pending")  # "Pending", "In-Progress", "Green", "Amber", "Red", "Skip", "Completed"
-    # Stage plan dates (planning only -- see services/stage_plan_service.py). Filled on
-    # release, editable by PPC; drive the shop-floor work queue.
+    # Stage plan dates (planning only -- services/stage_plan_service.py). Filled on WO
+    # release, editable by PPC / own-stage managers; drive the shop-floor work queue.
     planned_start = Column(Date, nullable=True)
     planned_end = Column(Date, nullable=True)
 

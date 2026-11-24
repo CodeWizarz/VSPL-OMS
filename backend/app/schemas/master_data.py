@@ -45,8 +45,18 @@ class CustomerOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 class POLineCreate(BaseModel):
-    part_number: str = Field(..., max_length=100)
+    # The authoritative, user-facing input -- the Internal Part Number is NEVER
+    # typed or chosen by the PO operator; it is resolved (or, for a genuinely new
+    # part, generated) server-side from this value. See
+    # MasterDataService.resolve_customer_part / POMasterService.create_po.
+    customer_part_number: Optional[str] = Field(None, max_length=200)
+    # Legacy/direct-API path only -- preserved so any existing caller that already
+    # supplies the literal internal part_number keeps working unchanged. The PO
+    # Master UI no longer sends this field.
+    part_number: Optional[str] = Field(None, max_length=100)
     po_qty: int = Field(..., gt=0, le=1_000_000)
+    unit_price: Optional[float] = Field(0.0, ge=0)
+    line_total: Optional[float] = Field(0.0, ge=0)
     required_date: Optional[date] = None
 
 
@@ -55,16 +65,62 @@ class POMasterCreate(BaseModel):
     customer_code: str = Field(..., max_length=100)
     po_date: Optional[date] = None
     validity_date: Optional[date] = None
+    total_value: Optional[float] = Field(None, ge=0)
     lines: List[POLineCreate] = Field(..., min_length=1)
+
+
+class POLineWorkOrderSummary(BaseModel):
+    """A single Work Order created under an OAR linked to this PO line."""
+    wo_id: str
+    wo_number: str
+    wo_status: str
+    release_status: str  # AWAITING_ENG_RELEASE | AWAITING_MFG_RELEASE | AWAITING_WO_RELEASE | RELEASED
+
+
+class POLineOrderSummary(BaseModel):
+    """A single OAR (Order) linked to this PO line, with its own WO(s). A PO line can have
+    zero, one, or multiple linked OARs -- the caller must not assume a single OAR per line."""
+    oar_id: str
+    oar_number: Optional[str] = None
+    order_status: str
+    po_coverage_status: str  # PO_MATCHED | SCHEDULED_AWAITING_PO | COMMERCIAL_PO_PENDING | UNCONFIRMED
+    work_orders: List["POLineWorkOrderSummary"] = []
 
 
 class POLineOut(BaseModel):
     id: str
     part_number: str
+    customer_part_number: Optional[str] = None
     po_qty: int
+    unit_price: Optional[float] = 0.0
+    line_total: Optional[float] = 0.0
     allocated_qty: int
     available_qty: int
     required_date: Optional[date] = None
+    # PO -> OAR -> WO traceability (Section 3): every OAR raised against this line, and
+    # every WO created under each of those OARs. Empty list means no OAR has been raised
+    # yet -- the caller renders "OAR not created", never an arbitrary/guessed record.
+    orders: List["POLineOrderSummary"] = []
+
+
+class CustomerPartOut(BaseModel):
+    customer_part_number: str
+    part_number: str
+    description: Optional[str] = None
+    grade: Optional[str] = None
+
+
+class ResolveCustomerPartRequest(BaseModel):
+    customer_code: str = Field(..., max_length=100)
+    customer_part_number: str = Field(..., max_length=200)
+
+
+class ResolveCustomerPartResponse(BaseModel):
+    customer_part_number: str
+    resolved: bool
+    part_number: Optional[str] = None
+    is_new: bool
+    message: str
 
 
 class POMasterOut(BaseModel):
@@ -75,7 +131,36 @@ class POMasterOut(BaseModel):
     po_date: Optional[date] = None
     validity_date: Optional[date] = None
     status: str
+    total_value: Optional[float] = 0.0
+    total_qty: Optional[int] = 0
     lines: List[POLineOut] = []
+
+
+class POLineUpdate(BaseModel):
+    id: Optional[str] = None
+    customer_part_number: Optional[str] = Field(None, max_length=200)
+    part_number: Optional[str] = Field(None, max_length=100)
+    po_qty: int = Field(..., gt=0, le=1_000_000)
+    unit_price: Optional[float] = Field(None, ge=0)
+    line_total: Optional[float] = Field(None, ge=0)
+    required_date: Optional[date] = None
+
+
+class POMasterUpdate(BaseModel):
+    po_number: Optional[str] = Field(None, max_length=200)
+    customer_code: Optional[str] = Field(None, max_length=100)
+    po_date: Optional[date] = None
+    validity_date: Optional[date] = None
+    status: Optional[str] = Field(None, max_length=50)
+    total_value: Optional[float] = Field(None, ge=0)
+    lines: Optional[List[POLineUpdate]] = None
+
+
+class POMergeRequest(BaseModel):
+    source_po_id: str = Field(..., min_length=1, max_length=100)
+    target_po_id: str = Field(..., min_length=1, max_length=100)
+    update_validity_date: Optional[bool] = True
+
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +169,25 @@ class POMasterOut(BaseModel):
 
 class ScheduleCreate(BaseModel):
     customer_code: str = Field(..., max_length=100)
-    part_number: str = Field(..., max_length=100)
+    part_number: Optional[str] = Field(None, max_length=100)
+    customer_part_number: Optional[str] = Field(None, max_length=100)
     scheduled_qty: int = Field(..., gt=0, le=1_000_000)
+    unit_price: Optional[float] = Field(0.0, ge=0)
+    total_value: Optional[float] = Field(0.0, ge=0)
     required_date: Optional[date] = None
     customer_schedule_ref: Optional[str] = Field(None, max_length=200)
+
+
+class ScheduleUpdate(BaseModel):
+    customer_code: Optional[str] = Field(None, max_length=100)
+    part_number: Optional[str] = Field(None, max_length=100)
+    customer_part_number: Optional[str] = Field(None, max_length=100)
+    scheduled_qty: Optional[int] = Field(None, gt=0, le=1_000_000)
+    unit_price: Optional[float] = Field(None, ge=0)
+    total_value: Optional[float] = Field(None, ge=0)
+    required_date: Optional[date] = None
+    customer_schedule_ref: Optional[str] = Field(None, max_length=200)
+    po_status: Optional[str] = Field(None, max_length=50)
 
 
 class ScheduleOut(BaseModel):
@@ -96,11 +196,98 @@ class ScheduleOut(BaseModel):
     customer_code: str
     customer_name: str
     part_number: str
+    customer_part_number: Optional[str] = None
+    part_description: Optional[str] = None
     scheduled_qty: int
+    allocated_qty: int = 0
+    available_qty: int = 0
+    unit_price: Optional[float] = 0.0
+    total_value: Optional[float] = 0.0
     required_date: Optional[date] = None
     customer_schedule_ref: Optional[str] = None
     po_status: str
     linked_oar_number: Optional[str] = None
+    linked_oar_numbers: List[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Machine Master
+# ---------------------------------------------------------------------------
+
+class MachineCreate(BaseModel):
+    machine_code: str = Field(..., max_length=100)
+    machine_name: str = Field(..., max_length=300)
+    department: Optional[str] = Field(None, max_length=200)
+
+
+class MachineUpdate(BaseModel):
+    id: str
+    machine_code: Optional[str] = Field(None, max_length=100)
+    machine_name: Optional[str] = Field(None, max_length=300)
+    department: Optional[str] = Field(None, max_length=200)
+    is_active: Optional[bool] = None
+
+
+class MachineOut(BaseModel):
+    id: str
+    machine_code: str
+    machine_name: str
+    department: Optional[str] = None
+    is_active: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Shift Master
+# ---------------------------------------------------------------------------
+
+class ShiftCreate(BaseModel):
+    shift_code: str = Field(..., max_length=100)
+    shift_name: str = Field(..., max_length=300)
+    start_time: Optional[str] = Field(None, max_length=20)
+    end_time: Optional[str] = Field(None, max_length=20)
+
+
+class ShiftUpdate(BaseModel):
+    id: str
+    shift_code: Optional[str] = Field(None, max_length=100)
+    shift_name: Optional[str] = Field(None, max_length=300)
+    start_time: Optional[str] = Field(None, max_length=20)
+    end_time: Optional[str] = Field(None, max_length=20)
+    is_active: Optional[bool] = None
+
+
+class ShiftOut(BaseModel):
+    id: str
+    shift_code: str
+    shift_name: str
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    is_active: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Operator Master
+# ---------------------------------------------------------------------------
+
+class OperatorCreate(BaseModel):
+    user_id: Optional[str] = Field(None, description="Link to an existing authenticated User, if one exists")
+    employee_code: Optional[str] = Field(None, max_length=100)
+    display_name: str = Field(..., max_length=300)
+
+
+class OperatorUpdate(BaseModel):
+    id: str
+    employee_code: Optional[str] = Field(None, max_length=100)
+    display_name: Optional[str] = Field(None, max_length=300)
+    is_active: Optional[bool] = None
+
+
+class OperatorOut(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    employee_code: Optional[str] = None
+    display_name: str
+    is_active: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -140,3 +327,55 @@ class MatchConfirmResponse(BaseModel):
     po_number: str
     quantity_match: str
     message: str
+
+
+# ---------------------------------------------------------------------------
+# Part Master
+# ---------------------------------------------------------------------------
+
+class PartMasterCreate(BaseModel):
+    # Customer identifier -- user selects an existing customer
+    customer_code: str = Field(..., max_length=100)
+    # The actual Customer Part Number (Column G from Excel) -- preserved verbatim
+    customer_part_number: str = Field(..., max_length=200)
+    status: str = Field("Active", max_length=50)
+    description: Optional[str] = Field(None, max_length=500)
+
+
+class PartMasterUpdate(BaseModel):
+    part_number: Optional[str] = Field(None, max_length=100)
+    customer_part_number: Optional[str] = Field(None, max_length=200)
+    status: Optional[str] = Field(None, max_length=50)
+    description: Optional[str] = Field(None, max_length=500)
+
+
+class PartMasterOut(BaseModel):
+    id: str
+    part_number: str  # Unique Internal Code (e.g. APE1, APE2)
+    customer_id: str
+    customer_code: str
+    customer_name: str
+    customer_part_number: str
+    status: str
+    description: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    @field_validator("id", "customer_id", mode="before")
+    @classmethod
+    def _coerce_uuid(cls, v):
+        return str(v) if v is not None else ""
+
+
+class PartMasterKPIs(BaseModel):
+    total_parts: int
+    active_parts: int
+    total_customers: int
+    new_parts_this_month: int
+
+
+class PartMasterListResponse(BaseModel):
+    items: List[PartMasterOut]
+    total: int
+    page: int
+    limit: int
+

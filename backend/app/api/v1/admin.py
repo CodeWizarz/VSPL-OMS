@@ -7,6 +7,7 @@ from app.api.deps import get_current_user, require_roles
 from app.core.roles import QUALITY_OVERSIGHT_ROLES
 from app.models.user import User
 from app.models.order import Customer, Part
+from app.models.customer_part_mapping import CustomerPartMapping
 from app.models.audit import AuditLog
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -31,6 +32,9 @@ class PartOut(BaseModel):
     # import_part_master.py) -- these are not invented defaults, so both stay optional.
     grade: Optional[str] = None
     description: Optional[str] = None
+    customer_part_number: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_code: Optional[str] = None
     class Config:
         from_attributes = True
 
@@ -63,10 +67,92 @@ def list_customers(db: Session = Depends(get_db), user: User = Depends(get_curre
     return db.query(Customer).order_by(Customer.customer_code).limit(5000).all()
 
 @router.get("/parts", response_model=List[PartOut])
-def list_parts(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_parts(
+    customer_code: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
     # Cap raised past the real, imported VSPL Part Master count (~6,200) -- 5000 was
     # silently truncating the list before every part existed in this table.
-    return db.query(Part).order_by(Part.part_number).limit(20000).all()
+    clean_code = customer_code.strip().upper() if customer_code else None
+    parts_query = db.query(Part).order_by(Part.part_number)
+    if clean_code:
+        parts_query = (
+            parts_query
+            .outerjoin(CustomerPartMapping, Part.id == CustomerPartMapping.part_id)
+            .outerjoin(Customer, CustomerPartMapping.customer_id == Customer.id)
+            .filter(
+                or_(
+                    Customer.customer_code == clean_code,
+                    Part.part_number.like(f"{clean_code}%")
+                )
+            )
+            .distinct()
+        )
+    parts = parts_query.limit(20000).all()
+
+    cpm_query = (
+        db.query(
+            CustomerPartMapping.part_id,
+            CustomerPartMapping.customer_part_number,
+            Customer.name,
+            Customer.customer_code,
+        )
+        .outerjoin(Customer, CustomerPartMapping.customer_id == Customer.id)
+    )
+    if clean_code:
+        cpm_query = cpm_query.filter(Customer.customer_code == clean_code)
+    cpms = cpm_query.all()
+    cpm_map = {str(p_id): (cust_part_no, cust_name, cust_code) for p_id, cust_part_no, cust_name, cust_code in cpms if p_id}
+
+    try:
+        from app.models.customer_part_cross_reference import CustomerPartCrossReference
+        xrefs = (
+            db.query(
+                CustomerPartCrossReference.part_id,
+                CustomerPartCrossReference.customer_part_no,
+                Customer.name,
+                Customer.customer_code,
+            )
+            .join(Customer, CustomerPartCrossReference.customer_id == Customer.id)
+            .filter(CustomerPartCrossReference.is_active == True)
+            .all()
+        )
+        for p_id, cust_part_no, cust_name, cust_code in xrefs:
+            if p_id and str(p_id) not in cpm_map:
+                cpm_map[str(p_id)] = (cust_part_no, cust_name, cust_code)
+    except Exception:
+        pass
+
+    all_custs = db.query(Customer.customer_code, Customer.name).all()
+    cust_prefix_map = {c.customer_code.strip().upper(): c.name.strip() for c in all_custs if c.customer_code}
+
+    res = []
+    for p in parts:
+        p_id_str = str(p.id)
+        c_info = cpm_map.get(p_id_str)
+        cust_part_no = c_info[0] if c_info and c_info[0] else (p.description or p.part_number)
+        cust_name = c_info[1] if c_info else None
+        cust_code = c_info[2] if c_info else None
+        if not cust_code:
+            p_upper = (p.part_number or "").strip().upper()
+            for c_code, c_name in cust_prefix_map.items():
+                if len(c_code) >= 2 and p_upper.startswith(c_code):
+                    cust_code = c_code
+                    cust_name = c_name
+                    break
+        res.append(
+            PartOut(
+                id=p_id_str,
+                part_number=p.part_number,
+                grade=p.grade,
+                description=p.description,
+                customer_part_number=cust_part_no,
+                customer_name=cust_name,
+                customer_code=cust_code,
+            )
+        )
+    return res
 
 @router.get("/machines", response_model=List[MachineOut])
 def list_machines(user: User = Depends(get_current_user)):

@@ -2,18 +2,21 @@ import math
 import uuid
 from typing import List, Optional
 from datetime import datetime, date
-from sqlalchemy.orm import Session
-from sqlalchemy import or_
-from app.models.work_order import WorkOrder, WORoute, WOStatus
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import or_, cast, String, nullslast
+from app.models.work_order import WorkOrder, WORoute, WOStatus, WorkOrderOARAllocation
 from app.models.production_movement import ProductionMovement, StageWIP
 from app.models.production import ProductionUpdate
 from app.models.order import Order, Customer, Part
+from app.models.master_data import POMaster, POLine
 from app.models.packing import PackingRecord
 from app.models.dispatch import Dispatch
+from app.models.nc import NCRecord
 from app.schemas.work_order import (
     WorkOrderListItem, WorkOrderTrackingDetail, StageTimelineStep,
     WorkOrderRouteResponse, TransactionHistoryItem,
-    OARListItem, OARWorkOrderSummary
+    OARListItem, OARWorkOrderSummary, OARGenealogyResponse,
+    PlanningSummaryResponse, MovableWorkOrderItem, MergedOARAllocationOut
 )
 from app.schemas.production import WIPMatrixResponse, WOWIPRow
 from app.services.oms_integration_service import (
@@ -24,7 +27,250 @@ from app.services.oms_integration_service import (
     DEFAULT_YIELDS
 )
 
-STANDARD_STAGES = ["F1", "F2", "F3", "SP", "FI", "PACKING / BSR", "DISPATCH"]
+import re
+
+SCHEDULE_KEYWORDS_REGEX = re.compile(
+    r'^(SCH|SCHDULE|SCHEDULE|FORECAST|PLANNED)([\s\-_/]|$)|'
+    r'(\b(JAN|FEB|MAR|APR|MAY|JUN|JULY|AUG|SEP|OCT|NOV|DEC)\s+(SCH|SCHEDULE|SCHDULE)\b)|'
+    r'^(AWAITING[-_ ]PO)',
+    re.IGNORECASE
+)
+
+STANDARD_STAGES = ["F1", "F2", "F3", "SP", "FI", "PACKING", "BSR", "DISPATCH"]
+
+
+def get_wo_oar_allocations(db: Session, wo: WorkOrder) -> List[WorkOrderOARAllocation]:
+    """Return ordered OAR allocations for a Work Order (empty for single-OAR WOs)."""
+    allocs = (
+        db.query(WorkOrderOARAllocation)
+        .filter(WorkOrderOARAllocation.work_order_id == wo.id)
+        .all()
+    )
+    if len(allocs) > 1:
+        allocs.sort(
+            key=lambda a: (
+                (a.order.delivery_date if (a.order and a.order.delivery_date) else date.max),
+                (a.order.created_at if (a.order and a.order.created_at) else datetime.min),
+                str(a.order_id),
+            )
+        )
+    return allocs
+
+
+def get_order_wo_links(db: Session, order: Order, exclude_closed: bool = False) -> List[tuple[WorkOrder, int]]:
+    """Return deduplicated [(WorkOrder, allocated_qty_for_this_order)] for an OAR,
+    accounting for both direct single-OAR WOs and merged multi-OAR WOs."""
+    links_by_wo_id: dict = {}
+
+    # 1. Explicit allocation rows targeting this OAR
+    alloc_rows = (
+        db.query(WorkOrderOARAllocation)
+        .filter(WorkOrderOARAllocation.order_id == order.id)
+        .all()
+    )
+    for a in alloc_rows:
+        wo = a.work_order
+        if not wo:
+            continue
+        if exclude_closed and getattr(wo, "status", None) == WOStatus.CLOSED:
+            continue
+        links_by_wo_id[wo.id] = (wo, a.allocated_qty)
+
+    # 2. Direct WOs whose primary order_id is this OAR (and have no explicit allocation table rows)
+    for wo in (order.work_orders or []):
+        if exclude_closed and getattr(wo, "status", None) == WOStatus.CLOSED:
+            continue
+        if wo.id in links_by_wo_id:
+            continue
+        has_any_alloc = (
+            db.query(WorkOrderOARAllocation.id)
+            .filter(WorkOrderOARAllocation.work_order_id == wo.id)
+            .first()
+            is not None
+        )
+        if not has_any_alloc:
+            links_by_wo_id[wo.id] = (wo, wo.physical_wo_qty)
+
+    result = list(links_by_wo_id.values())
+    result.sort(key=lambda pair: (pair[0].created_at or datetime.min, pair[0].wo_number))
+    return result
+
+
+def get_order_allocated_wo_qty(db: Session, order: Order, exclude_closed: bool = False) -> int:
+    """Total WO quantity allocated to this OAR across single and merged Work Orders."""
+    return sum(qty for _, qty in get_order_wo_links(db, order, exclude_closed=exclude_closed))
+
+
+def get_wo_qty_share_for_order(
+    db: Session,
+    wo: WorkOrder,
+    order_id,
+    total_wo_output: int,
+    prefetch_ctx: Optional[dict] = None
+) -> int:
+    """Attribute a Work Order's output (final_good or dispatched_qty) to a specific OAR
+    in deterministic FIFO order when the WO merges multiple OARs."""
+    if total_wo_output <= 0:
+        return 0
+    if prefetch_ctx and "allocs_by_wo" in prefetch_ctx:
+        allocs = prefetch_ctx["allocs_by_wo"].get(wo.id, [])
+    else:
+        allocs = get_wo_oar_allocations(db, wo)
+    if not allocs:
+        return total_wo_output if wo.order_id == order_id else 0
+
+    remaining = total_wo_output
+    for idx, alloc in enumerate(allocs):
+        if idx == len(allocs) - 1:
+            take = remaining
+        else:
+            take = min(remaining, max(alloc.allocated_qty, 0))
+        remaining -= take
+        if alloc.order_id == order_id:
+            return take
+    return 0
+
+def compute_po_coverage_status(order: Optional[Order]) -> str:
+    """Determines authoritative PO coverage status for an Order (OAR):
+    - PO_MATCHED: Authoritative PO Master line is validly linked (po_line exists, po exists and is not cancelled,
+      and customer/part IDs match).
+    - SCHEDULED_AWAITING_PO: Sourced from a schedule / forecast reference awaiting formal PO creation
+      (authoritative source_type/schedule_id/oar_po_status or heuristic schedule indicator).
+    - COMMERCIAL_PO_PENDING: Commercial PO reference recorded, awaiting PO Master entry / linking.
+    - UNCONFIRMED: Missing, placeholder, or conflicting reference data.
+    """
+    if not order:
+        return "UNCONFIRMED"
+
+    # 1. Authoritative PO Master match validation
+    if (
+        order.po_line_id is not None
+        and order.po_line is not None
+        and getattr(order.po_line, "po", None) is not None
+        and getattr(order.po_line.po, "status", None) != "cancelled"
+        and (order.customer_id is None or getattr(order.po_line.po, "customer_id", None) == order.customer_id)
+        and (order.part_id is None or getattr(order.po_line, "part_id", None) == order.part_id)
+    ):
+        return "PO_MATCHED"
+
+    # 2. Authoritative Schedule intake (takes precedence over heuristic strings)
+    if (
+        getattr(order, "source_type", None) == "schedule"
+        or getattr(order, "schedule_id", None) is not None
+        or getattr(order, "oar_po_status", None) == "awaiting_po"
+    ):
+        return "SCHEDULED_AWAITING_PO"
+
+    raw_po = (order.customer_po or "").strip()
+
+    # 3. Heuristic Schedule fallback (for legacy orders where source_type was default 'po')
+    if raw_po and SCHEDULE_KEYWORDS_REGEX.search(raw_po):
+        return "SCHEDULED_AWAITING_PO"
+
+    # 4. Commercial PO reference recorded
+    if raw_po and raw_po.upper() not in ("N/A", "NONE", "—", "-", ""):
+        return "COMMERCIAL_PO_PENDING"
+
+    # 5. Unconfirmed / missing
+    return "UNCONFIRMED"
+
+
+def compute_wo_release_status(wo: WorkOrder) -> str:
+    """The WO's position in the release chain (OAR -> WO Created -> Engineering Release ->
+    Manufacturing Release -> WO Released -> Production), derived only from its own
+    timestamp/actor pairs -- never a separate stored flag, never inferred from any other
+    field. Shared by OAR genealogy and PO traceability views so the same WO always shows
+    the same release label everywhere."""
+    if wo.released_by or wo.release_date:
+        return "RELEASED"
+    if wo.manufacturing_released_by or wo.manufacturing_released_at:
+        return "AWAITING_WO_RELEASE"
+    if wo.engineering_released_by or wo.engineering_released_at:
+        return "AWAITING_MFG_RELEASE"
+    return "AWAITING_ENG_RELEASE"
+
+
+def resolve_order_customer_part_number(
+    db: Session,
+    order: Optional[Order],
+    prefetch_ctx: Optional[dict] = None
+) -> Optional[str]:
+    """Authoritative Customer Part Number resolution for an Order (OAR) or linked Part.
+    
+    Checks in priority order:
+    1. Direct customer_part_number recorded on the Order itself.
+    2. Linked POLine customer_part_number.
+    3. Authoritative CustomerPartMapping (customer_id, part_id).
+    4. CustomerPartCrossReference (customer_id, part_id, is_active=True).
+    5. CustomerPartCrossReference fallback by part_id.
+    6. CustomerPartMapping fallback by part_id.
+    """
+    if not order:
+        return None
+
+    # 1. Direct on Order
+    cpn = getattr(order, "customer_part_number", None)
+    if cpn and str(cpn).strip():
+        return str(cpn).strip()
+
+    # 2. Linked POLine
+    if getattr(order, "po_line", None) and getattr(order.po_line, "customer_part_number", None):
+        po_cpn = str(order.po_line.customer_part_number).strip()
+        if po_cpn:
+            return po_cpn
+
+    if prefetch_ctx:
+        if order.customer_id and order.part_id:
+            val_cpm = prefetch_ctx.get("cpm_map", {}).get((order.customer_id, order.part_id))
+            if val_cpm:
+                return val_cpm
+            val_cpcr = prefetch_ctx.get("cpcr_map", {}).get((order.customer_id, order.part_id))
+            if val_cpcr:
+                return val_cpcr
+        return None
+
+    # 3. CustomerPartMapping by (customer_id, part_id)
+    if order.customer_id and order.part_id:
+        from app.models.customer_part_mapping import CustomerPartMapping
+        mapping = db.query(CustomerPartMapping).filter(
+            CustomerPartMapping.customer_id == order.customer_id,
+            CustomerPartMapping.part_id == order.part_id
+        ).first()
+        if mapping and mapping.customer_part_number and str(mapping.customer_part_number).strip():
+            return str(mapping.customer_part_number).strip()
+
+    # 4. CustomerPartCrossReference by (customer_id, part_id)
+    if order.customer_id and order.part_id:
+        from app.models.customer_part_cross_reference import CustomerPartCrossReference
+        xref = db.query(CustomerPartCrossReference).filter(
+            CustomerPartCrossReference.customer_id == order.customer_id,
+            CustomerPartCrossReference.part_id == order.part_id,
+            CustomerPartCrossReference.is_active == True
+        ).first()
+        if xref and xref.customer_part_no and str(xref.customer_part_no).strip():
+            return str(xref.customer_part_no).strip()
+
+    # 5. CustomerPartCrossReference fallback by part_id
+    if order.part_id:
+        from app.models.customer_part_cross_reference import CustomerPartCrossReference
+        xref = db.query(CustomerPartCrossReference).filter(
+            CustomerPartCrossReference.part_id == order.part_id,
+            CustomerPartCrossReference.is_active == True
+        ).first()
+        if xref and xref.customer_part_no and str(xref.customer_part_no).strip():
+            return str(xref.customer_part_no).strip()
+
+    # 6. CustomerPartMapping fallback by part_id
+    if order.part_id:
+        from app.models.customer_part_mapping import CustomerPartMapping
+        m = db.query(CustomerPartMapping).filter(
+            CustomerPartMapping.part_id == order.part_id
+        ).first()
+        if m and m.customer_part_number and str(m.customer_part_number).strip():
+            return str(m.customer_part_number).strip()
+
+    return None
+
 
 class WorkOrderService:
     @staticmethod
@@ -34,20 +280,57 @@ class WorkOrderService:
         stage: Optional[str] = None,
         customer_code: Optional[str] = None,
         status_filter: Optional[str] = None,
-        limit: int = 100,
+        casting_process: Optional[str] = None,
+        release_filter: Optional[str] = None,
+        sort_by: Optional[str] = None,
+        exclude_dispatched: bool = False,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        date_type: Optional[str] = "wo_date",
+        classification: Optional[str] = None,
+        limit: int = 1000,
         offset: int = 0
     ) -> List[WorkOrderListItem]:
         query = db.query(WorkOrder).join(Order).join(Customer).join(Part)
 
+        if classification:
+            c = classification.strip()
+            if c.upper() != "ALL":
+                query = query.filter(
+                    or_(
+                        WorkOrder.classification.ilike(c),
+                        Order.order_type.ilike(c)
+                    )
+                )
+
         if search:
-            s = f"%{search.strip()}%"
+            s_raw = search.strip()
+            # Normalize WO formats: "WO 18056", "wo18056", "18056", "WO-18056" -> match all variants
+            m = re.match(r'^(?:wo[\s\-]*)?(\d+)$', s_raw, re.IGNORECASE)
+            wo_variants = [f"%{s_raw}%"]
+            if m:
+                digits = m.group(1)
+                wo_variants.append(f"%WO-{digits}%")
+                wo_variants.append(f"%{digits}%")
+
+            wo_conds = [WorkOrder.wo_number.ilike(v) for v in set(wo_variants)]
+
             query = query.filter(
                 or_(
-                    WorkOrder.wo_number.ilike(s),
-                    Customer.customer_code.ilike(s),
-                    Customer.name.ilike(s),
-                    Part.part_number.ilike(s),
-                    Order.customer_po.ilike(s)
+                    *wo_conds,
+                    Order.oar_number.ilike(f"%{s_raw}%"),
+                    Customer.customer_code.ilike(f"%{s_raw}%"),
+                    Customer.name.ilike(f"%{s_raw}%"),
+                    Part.part_number.ilike(f"%{s_raw}%"),
+                    Order.customer_po.ilike(f"%{s_raw}%"),
+                    cast(WorkOrder.created_at, String).ilike(f"%{s_raw}%"),
+                    cast(WorkOrder.release_date, String).ilike(f"%{s_raw}%"),
+                    cast(Order.delivery_date, String).ilike(f"%{s_raw}%"),
+                    WorkOrder.oar_allocations.any(
+                        WorkOrderOARAllocation.order.has(
+                            or_(Order.oar_number.ilike(f"%{s_raw}%"), Order.customer_po.ilike(f"%{s_raw}%"))
+                        )
+                    ),
                 )
             )
 
@@ -60,7 +343,143 @@ class WorkOrderService:
         if status_filter:
             query = query.filter(WorkOrder.status == status_filter)
 
-        wos = query.order_by(WorkOrder.created_at.desc()).offset(offset).limit(limit).all()
+        if casting_process:
+            query = query.filter(WorkOrder.casting_process == casting_process.strip().upper())
+
+        if exclude_dispatched:
+            query = query.filter(
+                WorkOrder.status != WOStatus.DISPATCHED,
+                WorkOrder.status != WOStatus.CLOSED,
+                WorkOrder.current_stage != "Completed"
+            )
+
+        # Release filter for production planners
+        if release_filter:
+            rf = release_filter.strip().lower()
+            if rf == "unreleased":
+                query = query.filter(
+                    WorkOrder.release_date.is_(None),
+                    WorkOrder.released_by.is_(None),
+                    ~WorkOrder.status.in_([WOStatus.RELEASED, WOStatus.IN_PRODUCTION, WOStatus.DISPATCHED, WOStatus.CLOSED]),
+                    WorkOrder.current_stage != "Completed"
+                )
+            elif rf == "released":
+                query = query.filter(
+                    or_(
+                        WorkOrder.release_date.isnot(None),
+                        WorkOrder.released_by.isnot(None),
+                        WorkOrder.status.in_([WOStatus.RELEASED, WOStatus.IN_PRODUCTION, WOStatus.READY])
+                    ),
+                    WorkOrder.status != WOStatus.DISPATCHED,
+                    WorkOrder.status != WOStatus.CLOSED,
+                    WorkOrder.current_stage != "Completed"
+                )
+            elif rf == "ready_for_production":
+                query = query.filter(
+                    or_(
+                        WorkOrder.release_date.isnot(None),
+                        WorkOrder.manufacturing_released_at.isnot(None),
+                        WorkOrder.status.in_([WOStatus.RELEASED, WOStatus.IN_PRODUCTION, WOStatus.OPEN, WOStatus.PLANNED, WOStatus.READY])
+                    ),
+                    WorkOrder.status != WOStatus.DISPATCHED,
+                    WorkOrder.status != WOStatus.CLOSED,
+                    WorkOrder.current_stage != "Completed"
+                )
+
+        # Date-wise filtering
+        if from_date or to_date:
+            dtype = (date_type or "wo_date").strip().lower()
+            f_dt = None
+            if from_date:
+                try:
+                    f_dt = datetime.strptime(from_date.strip()[:10], "%Y-%m-%d")
+                except Exception:
+                    f_dt = None
+
+            t_dt = None
+            if to_date:
+                try:
+                    t_dt = datetime.strptime(to_date.strip()[:10], "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                except Exception:
+                    t_dt = None
+
+            if dtype == "release_date":
+                if f_dt:
+                    query = query.filter(WorkOrder.release_date >= f_dt)
+                if t_dt:
+                    query = query.filter(WorkOrder.release_date <= t_dt)
+            elif dtype == "delivery_date":
+                if f_dt:
+                    query = query.filter(Order.delivery_date >= f_dt.date())
+                if t_dt:
+                    query = query.filter(Order.delivery_date <= t_dt.date())
+            else:  # "wo_date" (creation/generation date)
+                if f_dt:
+                    query = query.filter(WorkOrder.created_at >= f_dt)
+                if t_dt:
+                    query = query.filter(WorkOrder.created_at <= t_dt)
+
+        # Date-wise sorting for production planning
+        if sort_by == "wo_date_asc":
+            query = query.order_by(WorkOrder.created_at.asc())
+        elif sort_by == "release_date_desc":
+            query = query.order_by(WorkOrder.release_date.desc().nullslast(), WorkOrder.created_at.desc())
+        elif sort_by == "release_date_asc":
+            query = query.order_by(WorkOrder.release_date.asc().nullslast(), WorkOrder.created_at.desc())
+        elif sort_by == "delivery_date_asc":
+            query = query.order_by(Order.delivery_date.asc().nullslast(), WorkOrder.created_at.desc())
+        elif sort_by == "delivery_date_desc":
+            query = query.order_by(Order.delivery_date.desc().nullslast(), WorkOrder.created_at.desc())
+        elif sort_by == "wo_number_asc":
+            query = query.order_by(WorkOrder.wo_number.asc())
+        elif sort_by == "wo_number_desc":
+            query = query.order_by(WorkOrder.wo_number.desc())
+        else:
+            query = query.order_by(WorkOrder.created_at.desc())
+
+        wos = query.offset(offset).limit(limit).all()
+
+        # Batch lookup PO dates from POMaster
+        po_keys = set()
+        for wo in wos:
+            if wo.order and wo.order.customer_id and wo.order.customer_po:
+                po_keys.add((wo.order.customer_id, wo.order.customer_po.strip()))
+
+        po_map = {}
+        if po_keys:
+            from app.models.master_data import POMaster
+            cust_ids = {k[0] for k in po_keys}
+            po_nums = {k[1] for k in po_keys}
+            po_records = db.query(POMaster).filter(
+                POMaster.customer_id.in_(cust_ids),
+                POMaster.po_number.in_(po_nums)
+            ).all()
+            for p in po_records:
+                po_map[(p.customer_id, p.po_number.strip())] = p.po_date or (p.created_at.date() if p.created_at else None)
+
+        from app.models.vendor import VendorDispatch
+        active_vendor_dispatches = db.query(VendorDispatch).filter(
+            VendorDispatch.status.in_(["AT_VENDOR", "PARTIALLY_RECEIVED"])
+        ).order_by(VendorDispatch.created_at.desc()).all()
+        
+        vendor_info_map = {}
+        for vd in active_vendor_dispatches:
+            if not vd.work_order_id:
+                continue
+            wid = vd.work_order_id
+            pend = max(vd.dispatched_qty - (vd.received_qty or 0) - (vd.scrap_qty or 0), 0)
+            if wid not in vendor_info_map:
+                vendor_info_map[wid] = {
+                    "is_at_vendor": True,
+                    "vendor_name": vd.vendor_name,
+                    "vendor_dc": vd.dc_number,
+                    "vendor_qty": pend,
+                    "vendor_dispatch_stage": vd.dispatch_stage,
+                    "vendor_target_return_stage": vd.target_return_stage,
+                }
+            else:
+                vendor_info_map[wid]["vendor_qty"] += pend
+
         results = []
 
         for wo in wos:
@@ -83,18 +502,75 @@ class WorkOrderService:
             avail_wip = cur_wip_rec.available_wip if cur_wip_rec else (wo.physical_wo_qty if cur_stage == route_stages[0] else 0)
 
             risk = calculate_delivery_risk(order.delivery_date if order else None, cur_stage, wo.status.value, route_stages)
+            po_cov_status = compute_po_coverage_status(order) if order else "UNCONFIRMED"
+            src_type = order.source_type if (order and getattr(order, "source_type", None)) else ("schedule" if (order and "SCH" in (order.customer_po or "").upper()) else "po")
+            cust_po = order.customer_po if order else None
+
+            # Determine PO creation date
+            po_dt = None
+            if order:
+                if order.po_line and getattr(order.po_line, "po", None):
+                    po_dt = order.po_line.po.po_date or (order.po_line.po.created_at.date() if order.po_line.po.created_at else None)
+                elif order.customer_id and order.customer_po:
+                    po_dt = po_map.get((order.customer_id, order.customer_po.strip()))
+
+            oar_dt = order.created_at if order else None
+            wo_dt = wo.created_at or datetime.now()
+            oar_commit_date = order.commitment_date if order else None
+            oar_revised_commit_date = getattr(order, "revised_commitment_date", None) if order else None
+            oar_commit_rev_count = getattr(order, "commitment_date_revision_count", 0) or 0 if order else 0
+            oar_effective_commit_date = oar_revised_commit_date or oar_commit_date
+
+            rel_status = compute_wo_release_status(wo)
+            is_rel = bool(wo.released_by or wo.release_date or wo.status in (WOStatus.RELEASED, WOStatus.IN_PRODUCTION, WOStatus.DISPATCHED, WOStatus.CLOSED))
+            ready_prod = bool(is_rel or rel_status in ("RELEASED", "AWAITING_WO_RELEASE") or wo.status in (WOStatus.OPEN, WOStatus.PLANNED))
+
+            allocs = get_wo_oar_allocations(db, wo)
+            is_merged_wo = len(allocs) > 1
+            merged_oar_items = [
+                MergedOARAllocationOut(
+                    oar_number=a.order.oar_number,
+                    order_id=str(a.order_id),
+                    customer_po=a.order.customer_po,
+                    allocated_qty=a.allocated_qty,
+                )
+                for a in allocs
+                if a.order
+            ]
+            display_oar_number = (
+                " + ".join(item.oar_number for item in merged_oar_items)
+                if is_merged_wo and merged_oar_items
+                else (order.oar_number if order else None)
+            )
+            display_cust_po = (
+                ", ".join(dict.fromkeys(item.customer_po for item in merged_oar_items if item.customer_po))
+                if is_merged_wo and merged_oar_items
+                else cust_po
+            )
+            display_order_qty = (
+                sum(a.order.po_qty for a in allocs if a.order)
+                if is_merged_wo
+                else (order.po_qty if order else wo.physical_wo_qty)
+            )
+
+            v_info = vendor_info_map.get(wo.id)
 
             results.append(WorkOrderListItem(
                 id=str(wo.id),
                 wo_number=wo.wo_number,
-                oar_number=order.oar_number if order else None,
+                oar_number=display_oar_number,
                 customer_code=order.customer.customer_code if (order and order.customer) else "N/A",
                 customer_name=order.customer.name if (order and order.customer) else "VSPL Internal",
+                customer_po=display_cust_po or cust_po,
+                source_type=src_type,
+                po_coverage_status=po_cov_status,
                 part_number=order.part.part_number if (order and order.part) else "N/A",
+                customer_part_number=resolve_order_customer_part_number(db, order),
                 part_name=order.part.description if (order and order.part) else None,
                 grade=order.part.grade if (order and order.part) else None,
-                order_qty=order.po_qty if order else wo.physical_wo_qty,
+                order_qty=display_order_qty,
                 physical_wo_qty=wo.physical_wo_qty,
+                casting_process=getattr(wo, "casting_process", None),
                 match_size=order.max_batch_size if order else None,
                 current_stage=cur_stage,
                 next_allowed_stage=next_stage,
@@ -102,8 +578,33 @@ class WorkOrderService:
                 status=wo.status.value,
                 delivery_risk=risk,
                 shortfall=wo.shortfall or "No",
+                excess_qty=getattr(wo, "excess_qty", 0) or 0,
+                shortfall_qty=getattr(wo, "shortfall_qty", 0) or 0,
+                shortfall_reason=getattr(wo, "shortfall_reason", None),
                 delivery_date=order.delivery_date if order else None,
-                created_at=wo.created_at or datetime.now()
+                created_at=wo_dt,
+                po_date=po_dt,
+                oar_date=oar_dt,
+                wo_date=wo_dt,
+                release_date=wo.release_date,
+                release_status=rel_status,
+                is_released=is_rel,
+                ready_for_production=ready_prod,
+                heat_number=getattr(wo, "heat_number", None),
+                classification=getattr(wo, "classification", None) or getattr(order, "order_type", None) or "Production",
+                commitment_date=oar_commit_date,
+                revised_commitment_date=oar_revised_commit_date,
+                effective_commitment_date=oar_effective_commit_date,
+                commitment_date_revision_count=oar_commit_rev_count,
+                route_stages=route_stages,
+                is_at_vendor=bool(v_info and v_info.get("is_at_vendor")),
+                vendor_name=v_info.get("vendor_name") if v_info else None,
+                vendor_dc=v_info.get("vendor_dc") if v_info else None,
+                vendor_qty=v_info.get("vendor_qty") if v_info else 0,
+                vendor_dispatch_stage=v_info.get("vendor_dispatch_stage") if v_info else None,
+                vendor_target_return_stage=v_info.get("vendor_target_return_stage") if v_info else None,
+                is_merged=is_merged_wo,
+                merged_oars=merged_oar_items,
             ))
 
         return results
@@ -146,10 +647,20 @@ class WorkOrderService:
         movements = db.query(ProductionMovement).filter(ProductionMovement.work_order_id == wo.id).order_by(ProductionMovement.created_at.asc()).all()
 
         # Movement-eligible stage: the earliest stage (by route sequence) that still has
-        # available_wip > 0 and has a next stage to move into. This can legitimately be
-        # behind `cur_stage` -- e.g. F1 still has 10 available while F2 has already begun
-        # receiving material, which advances cur_stage to F2 for reporting purposes but
-        # must not hide F1's still-movable quantity from the Move Parts screen.
+        # onhand_qty > 0 (completed good parts awaiting transfer) and has a next stage to move into.
+        # Note: parts MUST be produced (via Production Entry) before they can be moved downstream.
+        # Unproduced material (inproc_qty) requires production entry first!
+        from app.models.vendor import VendorDispatch
+        v_dispatches = db.query(VendorDispatch).filter(
+            VendorDispatch.work_order_id == wo.id,
+            VendorDispatch.status.in_(["AT_VENDOR", "PARTIALLY_RECEIVED"])
+        ).all()
+        is_at_vendor = len(v_dispatches) > 0
+        active_vendor_name = v_dispatches[0].vendor_name if is_at_vendor else None
+        active_vendor_dc = v_dispatches[0].dc_number if is_at_vendor else None
+        active_vendor_qty = sum(max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0) for d in v_dispatches) if is_at_vendor else None
+        active_vendor_stage = v_dispatches[0].dispatch_stage if is_at_vendor else None
+
         movable_from_stage = None
         movable_to_stage = None
         movable_wip_qty = 0
@@ -158,10 +669,16 @@ class WorkOrderService:
                 if idx2 + 1 >= len(route_stages):
                     break
                 wr = wip_records.get(stg2)
-                av = wr.available_wip if wr else (wo.physical_wo_qty if idx2 == 0 and not wip_records else 0)
-                if av > 0:
+                onhand = wr.onhand_qty if wr else 0
+                at_vendor = sum(
+                    max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0)
+                    for d in v_dispatches
+                    if d.dispatch_stage == stg2
+                )
+                effective_onhand = max(onhand - at_vendor, 0)
+                if effective_onhand > 0:
                     movable_from_stage = stg2
-                    movable_wip_qty = av
+                    movable_wip_qty = effective_onhand
                     movable_to_stage = route_stages[idx2 + 1]
                     break
 
@@ -178,6 +695,12 @@ class WorkOrderService:
             onhand = wip_rec.onhand_qty if wip_rec else 0
             rej = (wip_rec.rejected_qty if wip_rec else 0)
             ok_qty = wip_rec.ok_qty if wip_rec else r.cumulative_ok_qty
+
+            # Terminal stage (DISPATCH): subtract dispatched parts from onhand
+            if (wo.status in (WOStatus.DISPATCHED, WOStatus.CLOSED) or str(cur_stage).lower() == "completed") and (idx == len(routes) - 1 or stg.upper() == "DISPATCH"):
+                dispatched_total = sum(d.dispatched_qty or 0 for d in db.query(Dispatch).filter(Dispatch.work_order_id == wo.id).all())
+                onhand = max(ok_qty - dispatched_total, 0)
+                avail = inproc + onhand
 
             total_wip_held += avail
             total_rejected += rej
@@ -211,7 +734,10 @@ class WorkOrderService:
 
         yield_pct = round(100.0 * max(wo.physical_wo_qty - total_rejected, 0) / wo.physical_wo_qty, 1) if wo.physical_wo_qty > 0 else 100.0
         risk = calculate_delivery_risk(order.delivery_date if order else None, cur_stage, wo.status.value, route_stages)
-        cur_wip_val = wip_records.get(cur_stage).available_wip if wip_records.get(cur_stage) else (wo.physical_wo_qty if cur_idx == 0 else 0)
+        if wo.status in (WOStatus.DISPATCHED, WOStatus.CLOSED) or str(cur_stage).lower() == "completed":
+            cur_wip_val = 0
+        else:
+            cur_wip_val = wip_records.get(cur_stage).available_wip if wip_records.get(cur_stage) else (wo.physical_wo_qty if (cur_idx == 0 and not wip_records) else 0)
 
         prod_updates = db.query(ProductionUpdate).filter(ProductionUpdate.work_order_id == wo.id).order_by(ProductionUpdate.created_at.desc()).all()
         
@@ -230,6 +756,7 @@ class WorkOrderService:
                 operator_name=m.operator_name,
                 shift=m.shift,
                 remarks=m.remarks,
+                heat_number=(getattr(m, "heat_number", None) or getattr(wo, "heat_number", None)),
                 client_request_id=m.client_request_id
             ))
         for p in prod_updates:
@@ -246,9 +773,13 @@ class WorkOrderService:
                 operator_name=p.operator_name,
                 shift=p.shift,
                 remarks=p.remarks,
+                heat_number=(getattr(p, "heat_number", None) or getattr(wo, "heat_number", None)),
                 client_request_id=p.client_request_id
             ))
         tx_list.sort(key=lambda x: x.timestamp, reverse=True)
+
+        po_cov_status = compute_po_coverage_status(order) if order else "UNCONFIRMED"
+        src_type = order.source_type if (order and getattr(order, "source_type", None)) else ("schedule" if (order and "SCH" in (order.customer_po or "").upper()) else "po")
 
         return WorkOrderTrackingDetail(
             id=str(wo.id),
@@ -257,11 +788,15 @@ class WorkOrderService:
             customer_code=order.customer.customer_code if (order and order.customer) else "CUST-001",
             customer_name=order.customer.name if (order and order.customer) else "VSPL Internal",
             customer_po=order.customer_po if order else "PO-GEN",
+            source_type=src_type,
+            po_coverage_status=po_cov_status,
             part_number=order.part.part_number if (order and order.part) else "N/A",
+            customer_part_number=resolve_order_customer_part_number(db, order),
             part_name=order.part.description if (order and order.part) else None,
             grade=order.part.grade if (order and order.part) else None,
             order_qty=order.po_qty if order else wo.physical_wo_qty,
             physical_wo_qty=wo.physical_wo_qty,
+            casting_process=getattr(wo, "casting_process", None),
             match_size=order.max_batch_size if order else None,
             current_stage=cur_stage,
             next_allowed_stage=next_stage,
@@ -280,7 +815,17 @@ class WorkOrderService:
             total_wip_on_hand=total_wip_held,
             total_rejected=total_rejected,
             yield_pct=yield_pct,
-            created_at=wo.created_at or datetime.now()
+            created_at=wo.created_at or datetime.now(),
+            heat_number=getattr(wo, "heat_number", None),
+            classification=getattr(wo, "classification", None) or getattr(order, "order_type", None) or "Production",
+            excess_qty=getattr(wo, "excess_qty", 0) or 0,
+            shortfall_qty=getattr(wo, "shortfall_qty", 0) or 0,
+            shortfall_reason=getattr(wo, "shortfall_reason", None),
+            is_at_vendor=is_at_vendor,
+            active_vendor_name=active_vendor_name,
+            active_vendor_dc=active_vendor_dc,
+            active_vendor_qty=active_vendor_qty,
+            active_vendor_stage=active_vendor_stage
         )
 
     @staticmethod
@@ -333,12 +878,231 @@ class WorkOrderService:
         return OMSIntegrationService.get_current_stage_state(db, wo, stage_name)
 
     @staticmethod
+    def build_oar_prefetch_context(db: Session, orders: List[Order]) -> dict:
+        """Batch-prefetch all related records across candidate orders in single grouped queries,
+        eliminating the N+1 DB query overhead during OAR list and genealogy rendering."""
+        if not orders:
+            return {
+                "order_wo_links": {},
+                "allocs_by_wo": {},
+                "routes_by_wo": {},
+                "wips_by_wo": {},
+                "prod_by_wo": {},
+                "moves_by_wo": {},
+                "packing_by_wo": {},
+                "dispatches_by_wo": {},
+                "nc_by_wo": {},
+                "po_master_map": {},
+                "cpm_map": {},
+                "cpcr_map": {},
+            }
+
+        order_ids = [o.id for o in orders]
+
+        # 1. Allocations targeting these orders
+        alloc_rows = (
+            db.query(WorkOrderOARAllocation)
+            .options(joinedload(WorkOrderOARAllocation.work_order))
+            .filter(WorkOrderOARAllocation.order_id.in_(order_ids))
+            .all()
+        )
+        alloc_rows_by_order: dict = {}
+        for a in alloc_rows:
+            alloc_rows_by_order.setdefault(a.order_id, []).append(a)
+
+        # 2. Direct WOs whose primary order_id is in order_ids
+        direct_wos = (
+            db.query(WorkOrder)
+            .options(joinedload(WorkOrder.source_wo))
+            .filter(WorkOrder.order_id.in_(order_ids))
+            .all()
+        )
+        direct_wos_by_order: dict = {}
+        for wo in direct_wos:
+            direct_wos_by_order.setdefault(wo.order_id, []).append(wo)
+
+        candidate_wos_by_id: dict = {}
+        for a in alloc_rows:
+            if a.work_order:
+                candidate_wos_by_id[a.work_order.id] = a.work_order
+        for wo in direct_wos:
+            candidate_wos_by_id[wo.id] = wo
+
+        candidate_wo_ids = list(candidate_wos_by_id.keys())
+
+        # 3. All allocations for all candidate WOs
+        all_cand_allocs = (
+            db.query(WorkOrderOARAllocation)
+            .options(joinedload(WorkOrderOARAllocation.order))
+            .filter(WorkOrderOARAllocation.work_order_id.in_(candidate_wo_ids))
+            .all()
+        ) if candidate_wo_ids else []
+
+        allocs_by_wo: dict = {}
+        for a in all_cand_allocs:
+            allocs_by_wo.setdefault(a.work_order_id, []).append(a)
+        for wo_id, a_list in allocs_by_wo.items():
+            if len(a_list) > 1:
+                a_list.sort(
+                    key=lambda a: (
+                        (a.order.delivery_date if (a.order and a.order.delivery_date) else date.max),
+                        (a.order.created_at if (a.order and a.order.created_at) else datetime.min),
+                        str(a.order_id),
+                    )
+                )
+
+        wos_with_alloc_set = set(allocs_by_wo.keys())
+
+        # Precompute links for every order
+        order_wo_links_map: dict = {}
+        for order in orders:
+            links_by_wo_id: dict = {}
+            for a in alloc_rows_by_order.get(order.id, []):
+                wo = a.work_order
+                if not wo:
+                    continue
+                links_by_wo_id[wo.id] = (wo, a.allocated_qty)
+
+            for wo in direct_wos_by_order.get(order.id, []):
+                if wo.id in links_by_wo_id:
+                    continue
+                if wo.id not in wos_with_alloc_set:
+                    links_by_wo_id[wo.id] = (wo, wo.physical_wo_qty)
+
+            res = list(links_by_wo_id.values())
+            res.sort(key=lambda pair: (pair[0].created_at or datetime.min, pair[0].wo_number))
+            order_wo_links_map[order.id] = res
+
+        # 4. Routes
+        routes = (
+            db.query(WORoute)
+            .filter(WORoute.work_order_id.in_(candidate_wo_ids))
+            .order_by(WORoute.sequence)
+            .all()
+        ) if candidate_wo_ids else []
+        routes_by_wo: dict = {}
+        for r in routes:
+            routes_by_wo.setdefault(r.work_order_id, []).append(r)
+
+        # 5. Stage WIPs
+        wips = (
+            db.query(StageWIP)
+            .filter(StageWIP.work_order_id.in_(candidate_wo_ids))
+            .all()
+        ) if candidate_wo_ids else []
+        wips_by_wo: dict = {}
+        for w in wips:
+            wips_by_wo.setdefault(w.work_order_id, []).append(w)
+
+        # 6. Production Updates
+        prods = (
+            db.query(ProductionUpdate)
+            .filter(ProductionUpdate.work_order_id.in_(candidate_wo_ids))
+            .all()
+        ) if candidate_wo_ids else []
+        prod_by_wo: dict = {}
+        for p in prods:
+            prod_by_wo.setdefault(p.work_order_id, []).append(p)
+
+        # 7. Production Movements
+        moves = (
+            db.query(ProductionMovement)
+            .filter(ProductionMovement.work_order_id.in_(candidate_wo_ids))
+            .all()
+        ) if candidate_wo_ids else []
+        moves_by_wo: dict = {}
+        for m in moves:
+            moves_by_wo.setdefault(m.work_order_id, []).append(m)
+
+        # 8. Packing Records
+        packings = (
+            db.query(PackingRecord)
+            .filter(PackingRecord.work_order_id.in_(candidate_wo_ids))
+            .all()
+        ) if candidate_wo_ids else []
+        packing_by_wo: dict = {}
+        for pr in packings:
+            packing_by_wo[pr.work_order_id] = pr
+
+        # 9. Dispatches
+        dispatches = (
+            db.query(Dispatch)
+            .filter(Dispatch.work_order_id.in_(candidate_wo_ids))
+            .all()
+        ) if candidate_wo_ids else []
+        dispatches_by_wo: dict = {}
+        for d in dispatches:
+            dispatches_by_wo.setdefault(d.work_order_id, []).append(d)
+
+        # 10. NC Records
+        nc_recs = (
+            db.query(NCRecord)
+            .filter(NCRecord.work_order_id.in_(candidate_wo_ids))
+            .all()
+        ) if candidate_wo_ids else []
+        nc_by_wo: dict = {}
+        for nc in nc_recs:
+            nc_by_wo.setdefault(nc.work_order_id, []).append(nc)
+
+        # 11. POMaster
+        customer_ids = list({o.customer_id for o in orders if o.customer_id})
+        po_masters = (
+            db.query(POMaster)
+            .filter(POMaster.customer_id.in_(customer_ids))
+            .all()
+        ) if customer_ids else []
+        po_master_map: dict = {}
+        for p in po_masters:
+            if p.customer_id and p.po_number:
+                po_master_map[(p.customer_id, p.po_number.strip().upper())] = p
+
+        # 12. Customer Part Mapping & Cross Reference
+        from app.models.customer_part_mapping import CustomerPartMapping
+        from app.models.customer_part_cross_reference import CustomerPartCrossReference
+
+        cpms = (
+            db.query(CustomerPartMapping)
+            .filter(CustomerPartMapping.customer_id.in_(customer_ids))
+            .all()
+        ) if customer_ids else []
+        cpm_map: dict = {}
+        for m in cpms:
+            if m.customer_id and m.part_id and m.customer_part_number:
+                cpm_map[(m.customer_id, m.part_id)] = str(m.customer_part_number).strip()
+
+        cpcrs = (
+            db.query(CustomerPartCrossReference)
+            .filter(CustomerPartCrossReference.customer_id.in_(customer_ids), CustomerPartCrossReference.is_active == True)
+            .all()
+        ) if customer_ids else []
+        cpcr_map: dict = {}
+        for x in cpcrs:
+            if x.customer_id and x.part_id and x.customer_part_no:
+                cpcr_map[(x.customer_id, x.part_id)] = str(x.customer_part_no).strip()
+
+        return {
+            "order_wo_links": order_wo_links_map,
+            "allocs_by_wo": allocs_by_wo,
+            "routes_by_wo": routes_by_wo,
+            "wips_by_wo": wips_by_wo,
+            "prod_by_wo": prod_by_wo,
+            "moves_by_wo": moves_by_wo,
+            "packing_by_wo": packing_by_wo,
+            "dispatches_by_wo": dispatches_by_wo,
+            "nc_by_wo": nc_by_wo,
+            "po_master_map": po_master_map,
+            "cpm_map": cpm_map,
+            "cpcr_map": cpcr_map,
+        }
+
+    @staticmethod
     def list_oars(
         db: Session,
         search: Optional[str] = None,
         status_filter: Optional[str] = None,
         customer_code: Optional[str] = None,
-        limit: int = 100,
+        classification: Optional[str] = None,
+        limit: int = 1000,
         offset: int = 0
     ) -> List[OARListItem]:
         """Read-only OAR + WO roll-up over existing Order/WorkOrder records. Computes no
@@ -349,13 +1113,18 @@ class WorkOrderService:
 
         if search:
             s = f"%{search.strip()}%"
-            query = query.filter(
+            query = query.outerjoin(POLine, Order.po_line_id == POLine.id).filter(
                 or_(
                     Order.oar_number.ilike(s),
                     Order.customer_po.ilike(s),
+                    Order.customer_part_number.ilike(s),
                     Customer.customer_code.ilike(s),
                     Customer.name.ilike(s),
-                    Part.part_number.ilike(s)
+                    Part.part_number.ilike(s),
+                    Part.description.ilike(s),
+                    POLine.customer_part_number.ilike(s),
+                    Order.work_orders.any(WorkOrder.wo_number.ilike(s)),
+                    Order.wo_allocations.any(WorkOrderOARAllocation.work_order.has(WorkOrder.wo_number.ilike(s)))
                 )
             )
 
@@ -365,67 +1134,305 @@ class WorkOrderService:
         if status_filter:
             query = query.filter(Order.status == status_filter)
 
-        orders = query.order_by(Order.created_at.desc()).offset(offset).limit(limit).all()
-        results = []
+        if classification:
+            c = classification.strip()
+            query = query.filter(Order.order_type.ilike(f"{c}%"))
 
-        for order in orders:
-            wos = db.query(WorkOrder).filter(WorkOrder.order_id == order.id).order_by(WorkOrder.wo_number).all()
+        orders = (
+            query.options(
+                joinedload(Order.customer),
+                joinedload(Order.part),
+                joinedload(Order.po_line).joinedload(POLine.po),
+                joinedload(Order.schedule)
+            )
+            .order_by(nullslast(Order.created_at.desc()), Order.id.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        prefetch_ctx = WorkOrderService.build_oar_prefetch_context(db, orders)
+        return [WorkOrderService.build_oar_summary(db, order, prefetch_ctx=prefetch_ctx) for order in orders]
 
-            wo_summaries = []
-            allocated_total = 0
+    @staticmethod
+    def build_oar_summary(db: Session, order: Order, prefetch_ctx: Optional[dict] = None) -> OARListItem:
+        """Authoritative OAR Genealogy & Production Aggregation:
+        Rolls up all Original and Patch/Replacement WOs created under this OAR,
+        including all production, stage rejections, final good contributions,
+        total OAR fulfillment, and remaining shortfall without double-counting."""
+        if prefetch_ctx and "order_wo_links" in prefetch_ctx:
+            wo_links = prefetch_ctx["order_wo_links"].get(order.id, [])
+        else:
+            wo_links = get_order_wo_links(db, order)
 
-            for wo in wos:
-                allocated_total += wo.physical_wo_qty
+        oar_commit_date = order.commitment_date
+        oar_revised_commit_date = getattr(order, "revised_commitment_date", None)
+        oar_commit_rev_count = getattr(order, "commitment_date_revision_count", 0) or 0
+        oar_effective_commit_date = oar_revised_commit_date or oar_commit_date
+        oar_last_revised_at = getattr(order, "commitment_date_last_revised_at", None)
+        oar_rev_reason = getattr(order, "commitment_date_revision_reason", None)
 
+        wo_summaries: List[OARWorkOrderSummary] = []
+        allocated_total = 0
+
+        for wo, alloc_qty in wo_links:
+            allocated_total += alloc_qty
+
+            if prefetch_ctx and "routes_by_wo" in prefetch_ctx:
+                routes = prefetch_ctx["routes_by_wo"].get(wo.id, [])
+            else:
                 routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
-                route_stages = [r.stage for r in routes] if routes else STANDARD_STAGES
-                cur_stage = wo.current_stage or route_stages[0]
 
+            route_stages = [r.stage for r in routes] if routes else STANDARD_STAGES
+            cur_stage = wo.current_stage or route_stages[0]
+
+            if prefetch_ctx and "wips_by_wo" in prefetch_ctx:
+                wips = prefetch_ctx["wips_by_wo"].get(wo.id, [])
+                cur_wip_rec = next((w for w in wips if w.stage.upper() == cur_stage.upper()), None)
+            else:
                 cur_wip_rec = db.query(StageWIP).filter(
                     StageWIP.work_order_id == wo.id,
                     StageWIP.stage == cur_stage
                 ).first()
-                movable_wip = cur_wip_rec.available_wip if cur_wip_rec else 0
+                wips = db.query(StageWIP).filter(StageWIP.work_order_id == wo.id).all()
 
-                prod_ok = db.query(ProductionUpdate).filter(ProductionUpdate.work_order_id == wo.id).all()
-                ok_total = sum(p.good_qty or 0 for p in prod_ok)
-                rej_total = sum(p.reject_qty or 0 for p in prod_ok)
+            movable_wip = cur_wip_rec.available_wip if cur_wip_rec else 0
 
+            if prefetch_ctx and "prod_by_wo" in prefetch_ctx:
+                prod_entries = prefetch_ctx["prod_by_wo"].get(wo.id, [])
+            else:
+                prod_entries = db.query(ProductionUpdate).filter(ProductionUpdate.work_order_id == wo.id).all()
+
+            if prefetch_ctx and "moves_by_wo" in prefetch_ctx:
+                movements = prefetch_ctx["moves_by_wo"].get(wo.id, [])
+            else:
+                movements = db.query(ProductionMovement).filter(ProductionMovement.work_order_id == wo.id).all()
+
+            first_stg = route_stages[0] if route_stages else "F1"
+            first_wip = next((w for w in wips if w.stage.upper() == first_stg.upper()), None)
+            first_prod = [p for p in prod_entries if p.stage.upper() == first_stg.upper()]
+
+            # Total quantity launched into the work order pipeline:
+            # Measured at the initial production stage (e.g. F1) rather than summing intermediate steps.
+            if first_wip and (first_wip.ent_qty or (first_wip.ok_qty + first_wip.rejected_qty)):
+                launched_qty = first_wip.ent_qty or (first_wip.ok_qty + first_wip.rejected_qty)
+            elif first_prod:
+                launched_qty = sum((p.good_qty or 0) + (p.reject_qty or 0) for p in first_prod)
+            elif movements:
+                first_moves = [m for m in movements if m.from_stage.upper() == first_stg.upper()]
+                launched_qty = sum(m.quantity_moved + m.rejected_quantity for m in first_moves)
+            else:
+                launched_qty = wo.physical_wo_qty if wo.released_by else 0
+
+            # Total rejected on this WO across ALL stages
+            if wips:
+                rejected_qty = sum(w.rejected_qty for w in wips)
+            elif prefetch_ctx and "nc_by_wo" in prefetch_ctx:
+                rejected_qty = sum(nc.qty for nc in prefetch_ctx["nc_by_wo"].get(wo.id, []))
+            else:
+                rejected_qty = sum(nc.qty for nc in db.query(NCRecord).filter(NCRecord.work_order_id == wo.id).all())
+
+            # Authoritative Final Good fulfillment contribution for this WO:
+            # Dispatched material is already packed material, so ready_for_dispatch + dispatched equals total output.
+            if prefetch_ctx and "packing_by_wo" in prefetch_ctx:
+                pr = prefetch_ctx["packing_by_wo"].get(wo.id)
+            else:
+                pr = db.query(PackingRecord).filter(PackingRecord.work_order_id == wo.id).first()
+
+            if pr:
+                final_good = (pr.dispatched_qty or 0) + (pr.ready_for_dispatch_qty or 0)
+                if final_good == 0 and (pr.packed_qty or 0) > 0:
+                    final_good = pr.packed_qty or 0
+                elif final_good == 0 and (pr.received_qty or 0) > 0:
+                    final_good = pr.received_qty or 0
+            else:
+                is_packing_route = any(s.upper() in ("PACKING", "BSR", "PACKING / BSR", "PACKING/BSR", "DISPATCH") for s in route_stages)
+                if is_packing_route:
+                    # Route has a packing stage but material has not arrived there yet -> intermediate WIP, not yet fulfilled
+                    final_good = 0
+                else:
+                    # For custom routes terminating at FI or an earlier stage without packing
+                    terminal_stages = [s for s in route_stages if s.upper() not in ("DISPATCH",)]
+                    final_stage = terminal_stages[-1] if terminal_stages else (route_stages[-1] if route_stages else "F1")
+                    final_wip = next((sw for sw in wips if sw.stage.upper() == final_stage.upper()), None)
+                    if final_wip and final_wip.ok_qty > 0:
+                        final_good = final_wip.ok_qty
+                    else:
+                        final_good = 0
+
+            if prefetch_ctx and "dispatches_by_wo" in prefetch_ctx:
+                disp_list = prefetch_ctx["dispatches_by_wo"].get(wo.id, [])
+                dispatched_total = sum(d.dispatched_qty or 0 for d in disp_list)
+            else:
                 dispatched_total = sum(
                     d.dispatched_qty or 0
                     for d in db.query(Dispatch).filter(Dispatch.work_order_id == wo.id).all()
                 )
 
-                wo_summaries.append(OARWorkOrderSummary(
-                    wo_number=wo.wo_number,
-                    allocated_qty=wo.physical_wo_qty,
-                    release_status="Released" if wo.release_date else "Not Released",
-                    current_stage=cur_stage,
-                    wo_status=wo.status.value,
-                    ok_completed=ok_total,
-                    rejected=rej_total,
-                    movable_wip=movable_wip,
-                    dispatched_qty=dispatched_total
-                ))
+            oar_final_good = get_wo_qty_share_for_order(db, wo, order.id, final_good, prefetch_ctx=prefetch_ctx)
+            oar_dispatched = get_wo_qty_share_for_order(db, wo, order.id, dispatched_total, prefetch_ctx=prefetch_ctx)
 
-            results.append(OARListItem(
-                oar_number=order.oar_number or "—",
-                order_id=str(order.id),
-                customer_code=order.customer.customer_code if order.customer else "N/A",
-                customer_name=order.customer.name if order.customer else "N/A",
-                customer_po=order.customer_po,
-                part_number=order.part.part_number if order.part else "N/A",
-                oar_qty=order.po_qty,
-                allocated_qty=allocated_total,
-                remaining_qty=order.po_qty - allocated_total,
-                num_wos=len(wos),
-                status=order.status.value,
-                delivery_date=order.delivery_date,
-                created_at=order.created_at or datetime.now(),
-                work_orders=wo_summaries
+            good_qty = max(launched_qty - rejected_qty, 0)
+
+            if final_good > 0:
+                good_qty = max(good_qty, final_good)
+
+            produced_qty = launched_qty
+
+            rel_status = compute_wo_release_status(wo)
+            is_rel = bool(wo.released_by or wo.release_date or wo.status in (WOStatus.RELEASED, WOStatus.IN_PRODUCTION, WOStatus.DISPATCHED, WOStatus.CLOSED))
+            ready_prod = bool(is_rel or rel_status in ("RELEASED", "AWAITING_WO_RELEASE") or wo.status in (WOStatus.OPEN, WOStatus.PLANNED))
+
+            wo_type = "PATCH" if wo.is_replacement else "ORIGINAL"
+            source_wo_num = wo.source_wo.wo_number if wo.source_wo else None
+
+            wo_summaries.append(OARWorkOrderSummary(
+                wo_id=str(wo.id),
+                wo_number=wo.wo_number,
+                wo_type=wo_type,
+                is_replacement=bool(wo.is_replacement),
+                source_wo_id=str(wo.source_wo_id) if wo.source_wo_id else None,
+                source_wo_number=source_wo_num,
+                replacement_qty=wo.physical_wo_qty if wo.is_replacement else 0,
+                allocated_qty=alloc_qty,
+                production_qty=produced_qty,
+                good_qty=good_qty,
+                rejected_qty=rejected_qty,
+                final_good_contribution=oar_final_good,
+                release_status=rel_status,
+                current_stage=cur_stage,
+                wo_status=wo.status.value,
+                casting_process=getattr(wo, "casting_process", None),
+                ok_completed=good_qty,
+                rejected=rejected_qty,
+                movable_wip=movable_wip,
+                dispatched_qty=oar_dispatched,
+                wo_date=wo.created_at,
+                created_at=wo.created_at,
+                release_date=wo.release_date,
+                is_released=is_rel,
+                ready_for_production=ready_prod,
+                heat_number=getattr(wo, "heat_number", None),
+                classification=getattr(wo, "classification", None) or getattr(order, "order_type", None) or "Production",
+                excess_qty=getattr(wo, "excess_qty", 0) or 0,
+                shortfall_qty=getattr(wo, "shortfall_qty", 0) or 0,
+                shortfall_reason=getattr(wo, "shortfall_reason", None)
             ))
 
-        return results
+        num_orig = sum(1 for w in wo_summaries if w.wo_type == "ORIGINAL")
+        num_patch = sum(1 for w in wo_summaries if w.wo_type == "PATCH")
+        tot_produced = sum(w.production_qty for w in wo_summaries)
+        tot_good = sum(w.good_qty for w in wo_summaries)
+        tot_rejected = sum(w.rejected_qty for w in wo_summaries)
+        fulfilled_from_stock = getattr(order, "fulfilled_from_stock_qty", 0) or 0
+        allocated_total += fulfilled_from_stock
+        oar_fulfilled = sum(w.final_good_contribution for w in wo_summaries) + fulfilled_from_stock
+        oar_shortfall = max(order.po_qty - oar_fulfilled, 0)
+
+        po_cov_status = compute_po_coverage_status(order)
+        src_type = order.source_type if getattr(order, "source_type", None) else ("schedule" if (order and "SCH" in (order.customer_po or "").upper()) else "po")
+        po_matched_flag = (po_cov_status == "PO_MATCHED")
+        oar_po_st = order.oar_po_status if getattr(order, "oar_po_status", None) else None
+
+        # Determine PO creation date for order
+        po_date = None
+        if order.po_line and getattr(order.po_line, "po", None):
+            po_date = order.po_line.po.po_date or (order.po_line.po.created_at.date() if order.po_line.po.created_at else None)
+        elif order.customer_id and order.customer_po:
+            if prefetch_ctx and "po_master_map" in prefetch_ctx:
+                po_rec = prefetch_ctx["po_master_map"].get((order.customer_id, order.customer_po.strip().upper()))
+            else:
+                from app.models.master_data import POMaster
+                po_rec = db.query(POMaster).filter(
+                    POMaster.customer_id == order.customer_id,
+                    POMaster.po_number == order.customer_po.strip()
+                ).first()
+            if po_rec:
+                po_date = po_rec.po_date or (po_rec.created_at.date() if po_rec.created_at else None)
+
+        order_classification = getattr(order, "order_type", None) or "Production"
+        cust_part_no = resolve_order_customer_part_number(db, order, prefetch_ctx=prefetch_ctx)
+
+        return OARListItem(
+            oar_number=order.oar_number or "—",
+            order_id=str(order.id),
+            customer_code=order.customer.customer_code if order.customer else "N/A",
+            customer_name=order.customer.name if order.customer else "N/A",
+            customer_po=order.customer_po,
+            source_type=src_type,
+            oar_po_status=oar_po_st,
+            po_matched=po_matched_flag,
+            po_coverage_status=po_cov_status,
+            order_type=order_classification,
+            classification=order_classification,
+            part_id=str(order.part_id) if order.part_id else None,
+            fulfilled_from_stock_qty=fulfilled_from_stock,
+            part_number=order.part.part_number if order.part else "N/A",
+            customer_part_number=cust_part_no,
+            part_name=order.part.description if order.part else None,
+            oar_qty=order.po_qty,
+            allocated_qty=allocated_total,
+            remaining_qty=max(order.po_qty - allocated_total, 0),
+            num_wos=len(wo_links),
+            num_original_wos=num_orig,
+            num_patch_wos=num_patch,
+            total_produced=tot_produced,
+            total_good=tot_good,
+            total_rejected=tot_rejected,
+            oar_fulfilled=oar_fulfilled,
+            oar_shortfall=oar_shortfall,
+            status=order.status.value,
+            delivery_date=order.delivery_date,
+            commitment_date=order.commitment_date,
+            revised_commitment_date=oar_revised_commit_date,
+            effective_commitment_date=oar_effective_commit_date,
+            commitment_date_revision_count=oar_commit_rev_count,
+            commitment_date_last_revised_at=oar_last_revised_at,
+            commitment_date_revision_reason=oar_rev_reason,
+            created_at=order.created_at or datetime.now(),
+            po_date=po_date,
+            oar_date=order.created_at,
+            work_orders=wo_summaries
+        )
+
+    @staticmethod
+    def get_oar_genealogy(db: Session, oar_number: str) -> Optional[OARGenealogyResponse]:
+        order = db.query(Order).filter(Order.oar_number == oar_number.strip()).first()
+        if not order:
+            return None
+        summary = WorkOrderService.build_oar_summary(db, order)
+        return OARGenealogyResponse(
+            oar_number=summary.oar_number,
+            order_id=summary.order_id,
+            customer_code=summary.customer_code,
+            customer_name=summary.customer_name,
+            customer_po=summary.customer_po,
+            source_type=summary.source_type,
+            oar_po_status=summary.oar_po_status,
+            po_matched=summary.po_matched,
+            po_coverage_status=summary.po_coverage_status,
+            part_number=summary.part_number,
+            oar_qty=summary.oar_qty,
+            num_wos=summary.num_wos,
+            num_original_wos=summary.num_original_wos,
+            num_patch_wos=summary.num_patch_wos,
+            total_produced=summary.total_produced,
+            total_good=summary.total_good,
+            total_rejected=summary.total_rejected,
+            oar_fulfilled=summary.oar_fulfilled,
+            oar_shortfall=summary.oar_shortfall,
+            status=summary.status,
+            delivery_date=summary.delivery_date,
+            commitment_date=summary.commitment_date,
+            revised_commitment_date=summary.revised_commitment_date,
+            effective_commitment_date=summary.effective_commitment_date,
+            commitment_date_revision_count=summary.commitment_date_revision_count,
+            commitment_date_last_revised_at=summary.commitment_date_last_revised_at,
+            commitment_date_revision_reason=summary.commitment_date_revision_reason,
+            created_at=summary.created_at,
+            po_date=summary.po_date,
+            oar_date=summary.oar_date,
+            work_orders=summary.work_orders
+        )
 
     @staticmethod
     def get_wip_matrix(db: Session) -> WIPMatrixResponse:
@@ -448,16 +1455,16 @@ class WorkOrderService:
             
             for w in wips:
                 stg_key = w.stage
-                if stg_key in ("PACKING", "BSR", "PACKING/BSR", "PACKING / BSR"):
-                    stg_key = "PACKING / BSR"
+                if stg_key in ("PACKING/BSR", "PACKING / BSR"):
+                    stg_key = "PACKING"
                 wip_dict[stg_key] = wip_dict.get(stg_key, 0) + w.available_wip
                 inproc_dict[stg_key] = inproc_dict.get(stg_key, 0) + w.inproc_qty
                 onhand_dict[stg_key] = onhand_dict.get(stg_key, 0) + w.onhand_qty
 
             if not wip_dict:
                 cur_stg = wo.current_stage or "F1"
-                if cur_stg in ("PACKING", "BSR", "PACKING/BSR", "PACKING / BSR"):
-                    cur_stg = "PACKING / BSR"
+                if cur_stg in ("PACKING/BSR", "PACKING / BSR"):
+                    cur_stg = "PACKING"
                 wip_dict[cur_stg] = wo.physical_wo_qty
                 inproc_dict[cur_stg] = wo.physical_wo_qty
                 onhand_dict[cur_stg] = 0
@@ -496,3 +1503,181 @@ class WorkOrderService:
             stage_onhand_totals=stage_onhand_totals,
             grand_total_wip=grand_total
         )
+
+    @staticmethod
+    def get_planning_summary(db: Session) -> PlanningSummaryResponse:
+        """Computes live planning metrics for production planners:
+        - unreleased_count: WOs pending planner release
+        - released_count: WOs released into production
+        - producing_today_count: distinct WOs that had production entries or movements logged today
+        - ready_for_production_count: WOs ready for release / production
+        - active_in_production_count: floor WIP WOs
+        - total_active_wos: all non-dispatched WOs
+        - total_dispatched_wos: dispatched/closed WOs
+        """
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_str = str(date.today())
+
+        unreleased_count = db.query(WorkOrder).filter(
+            WorkOrder.release_date.is_(None),
+            WorkOrder.released_by.is_(None),
+            ~WorkOrder.status.in_([WOStatus.RELEASED, WOStatus.IN_PRODUCTION, WOStatus.DISPATCHED, WOStatus.CLOSED]),
+            WorkOrder.current_stage != "Completed"
+        ).count()
+
+        released_count = db.query(WorkOrder).filter(
+            or_(
+                WorkOrder.release_date.isnot(None),
+                WorkOrder.released_by.isnot(None),
+                WorkOrder.status.in_([WOStatus.RELEASED, WOStatus.IN_PRODUCTION, WOStatus.READY])
+            ),
+            WorkOrder.status != WOStatus.DISPATCHED,
+            WorkOrder.status != WOStatus.CLOSED,
+            WorkOrder.current_stage != "Completed"
+        ).count()
+
+        ready_for_production_count = db.query(WorkOrder).filter(
+            or_(
+                WorkOrder.release_date.isnot(None),
+                WorkOrder.manufacturing_released_at.isnot(None),
+                WorkOrder.status.in_([WOStatus.RELEASED, WOStatus.IN_PRODUCTION, WOStatus.OPEN, WOStatus.PLANNED, WOStatus.READY])
+            ),
+            WorkOrder.status != WOStatus.DISPATCHED,
+            WorkOrder.status != WOStatus.CLOSED,
+            WorkOrder.current_stage != "Completed"
+        ).count()
+
+        active_in_production_count = db.query(WorkOrder).filter(
+            WorkOrder.status.in_([WOStatus.IN_PRODUCTION, WOStatus.RELEASED]),
+            ~WorkOrder.current_stage.in_(["Completed", "DISPATCH", "PACKING", "BSR", "PACKING / BSR", "PACKING/BSR"])
+        ).count()
+
+        total_active_wos = db.query(WorkOrder).filter(
+            WorkOrder.status != WOStatus.DISPATCHED,
+            WorkOrder.status != WOStatus.CLOSED,
+            WorkOrder.current_stage != "Completed"
+        ).count()
+
+        total_dispatched_wos = db.query(WorkOrder).filter(
+            or_(
+                WorkOrder.status.in_([WOStatus.DISPATCHED, WOStatus.CLOSED]),
+                WorkOrder.current_stage == "Completed"
+            )
+        ).count()
+
+        prod_update_wo_ids = {
+            r[0] for r in db.query(ProductionUpdate.work_order_id).filter(
+                ProductionUpdate.created_at >= today_start
+            ).distinct().all() if r[0]
+        }
+        movement_wo_ids = {
+            r[0] for r in db.query(ProductionMovement.work_order_id).filter(
+                or_(
+                    ProductionMovement.created_at >= today_start,
+                    ProductionMovement.movement_date == today_str
+                )
+            ).distinct().all() if r[0]
+        }
+        producing_today_count = len(prod_update_wo_ids.union(movement_wo_ids))
+
+        return PlanningSummaryResponse(
+            unreleased_count=unreleased_count,
+            released_count=released_count,
+            producing_today_count=producing_today_count,
+            ready_for_production_count=ready_for_production_count,
+            active_in_production_count=active_in_production_count,
+            total_active_wos=total_active_wos,
+            total_dispatched_wos=total_dispatched_wos
+        )
+
+    @staticmethod
+    def list_movable_work_orders(db: Session, limit: int = 50, stage_filter: Optional[str] = None) -> List[MovableWorkOrderItem]:
+        """Returns active work orders that currently have produced parts / WIP waiting
+        at an origin stage to be moved to the next stage along the sequential route.
+        Sorted priority-wise by earliest delivery date and largest waiting quantity."""
+        active_wos = (
+            db.query(WorkOrder)
+            .join(Order)
+            .join(Customer)
+            .join(Part)
+            .filter(
+                WorkOrder.status.notin_([WOStatus.DISPATCHED, WOStatus.CLOSED]),
+                WorkOrder.current_stage != "Completed"
+            )
+            .all()
+        )
+        from app.models.vendor import VendorDispatch
+        active_dispatches = db.query(VendorDispatch).filter(
+            VendorDispatch.status.in_(["AT_VENDOR", "PARTIALLY_RECEIVED"])
+        ).all()
+        vendor_dispatch_map = {}
+        for d in active_dispatches:
+            vendor_dispatch_map.setdefault(d.work_order_id, []).append(d)
+
+        items = []
+        for wo in active_wos:
+            routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
+            route_stages = [r.stage for r in routes] if routes else ["F1", "F2", "F3", "SP", "FI", "PACKING", "DISPATCH"]
+            wip_records = {w.stage: w for w in db.query(StageWIP).filter(StageWIP.work_order_id == wo.id).all()}
+            wo_vendor_dispatches = vendor_dispatch_map.get(wo.id, [])
+
+            for idx2, stg2 in enumerate(route_stages):
+                if idx2 + 1 >= len(route_stages):
+                    break
+                if stage_filter and stage_filter.upper() != "ALL" and stg2.upper() != stage_filter.strip().upper():
+                    continue
+                wr = wip_records.get(stg2)
+                onhand = wr.onhand_qty if wr else 0
+                at_vendor = sum(
+                    max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0)
+                    for d in wo_vendor_dispatches
+                    if d.dispatch_stage == stg2
+                )
+                effective_onhand = max(onhand - at_vendor, 0)
+                if effective_onhand > 0:
+                    dest_stage = route_stages[idx2 + 1]
+                    order = wo.order
+
+                    # Compute MRB status for this waiting stage (Option 2)
+                    from app.services.mrb_service import MRBService
+                    already_moved = max(wr.ok_qty - wr.onhand_qty, 0)
+                    mrb_summary = MRBService.get_stage_mrb_summary(
+                        db=db,
+                        work_order_id=wo.id,
+                        stage=stg2,
+                        onhand_qty=effective_onhand,
+                        already_moved=already_moved
+                    )
+
+                    mrb_st = "APPROVED"
+                    if mrb_summary["lock_status"] == "LOCKED":
+                        mrb_st = "PENDING_MRB"
+                    elif mrb_summary["lock_status"] == "PARTIAL":
+                        mrb_st = "PARTIAL"
+
+                    items.append(MovableWorkOrderItem(
+                        wo_id=str(wo.id),
+                        wo_number=wo.wo_number,
+                        oar_number=order.oar_number if order else None,
+                        customer_code=order.customer.customer_code if (order and order.customer) else "N/A",
+                        customer_name=order.customer.name if (order and order.customer) else "VSPL Internal",
+                        part_number=order.part.part_number if (order and order.part) else "N/A",
+                        part_name=order.part.description if (order and order.part) else None,
+                        from_stage=stg2,
+                        to_stage=dest_stage,
+                        movable_wip=effective_onhand,
+                        current_stage=wo.current_stage or stg2,
+                        heat_number=wo.heat_number,
+                        delivery_date=order.delivery_date if order else None,
+                        created_at=wo.created_at,
+                        mrb_status=mrb_st,
+                        pending_mrb_count=mrb_summary["pending_tickets_count"],
+                        mrb_pending_qty=mrb_summary["pending_qty"]
+                    ))
+
+
+        items.sort(key=lambda x: (x.delivery_date or date(2099, 12, 31), -x.movable_wip))
+        for rank, item in enumerate(items, start=1):
+            item.priority_rank = rank
+        return items[:limit]
