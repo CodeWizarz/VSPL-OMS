@@ -157,6 +157,30 @@ class WOReleaseCreate(BaseModel):
     )
     remarks: Optional[str] = Field(None, max_length=2000)
 
+class StagePlanEdit(BaseModel):
+    stage: str = Field(..., min_length=1, max_length=40)
+    planned_start: Optional[date] = None
+    planned_end: Optional[date] = None
+
+
+class WOEditRequest(BaseModel):
+    """PPC edit of a Work Order. Send only what changes. What is allowed depends on the
+    WO's state (see OperationsService.edit_work_order)."""
+    physical_wo_qty: Optional[int] = Field(None, gt=0, le=1_000_000)
+    route_stages: Optional[List[str]] = Field(None, min_length=1, max_length=50)
+    stage_plan: Optional[List[StagePlanEdit]] = Field(None, max_length=50)
+    reason: str = Field(..., min_length=3, max_length=500, description="Why the WO is being changed (audit log)")
+
+
+class WOEditResponse(BaseModel):
+    wo_number: str
+    physical_wo_qty: int
+    route_stages: List[str]
+    stage_plans: dict
+    changes: List[str]
+    message: str
+
+
 class WOReleaseResponse(BaseModel):
     success: bool
     wo_number: str

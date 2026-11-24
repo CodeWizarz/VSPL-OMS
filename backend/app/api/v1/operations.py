@@ -13,6 +13,7 @@ from app.schemas.operations import (
     ReleaseEvidenceCreate,
     EngineeringReleaseResponse, ManufacturingReleaseResponse,
     WorkOrderCreatePayload, MergedWorkOrderCreatePayload, WorkOrderCreateResponse, WorkOrderUpdatePayload,
+    WOEditRequest, WOEditResponse,
     NextSequencesResponse, OARUpdate
 )
 from app.schemas.work_order import OARListItem, OARGenealogyResponse, WorkOrderListItem
@@ -69,7 +70,6 @@ def create_merged_work_order(
     return OperationsService.create_merged_work_order(db, payload, current_user=user)
 
 @router.put("/work-orders/{wo_identifier}", response_model=WorkOrderListItem)
-@router.patch("/work-orders/{wo_identifier}", response_model=WorkOrderListItem)
 def update_work_order(
     wo_identifier: str,
     payload: WorkOrderUpdatePayload,
@@ -78,6 +78,19 @@ def update_work_order(
 ):
     """Planner edits an existing Work Order: ID, quantity, casting process, heat number, route stages, or dates."""
     return OperationsService.update_work_order(db, wo_identifier, payload, current_user=user)
+
+
+@router.patch("/work-orders/{wo_number}", response_model=WOEditResponse)
+def edit_work_order(
+    wo_number: str,
+    payload: WOEditRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*PLANNING_ROLES)),
+):
+    """PPC edit of a Work Order (ported from phase-2 main): quantity/route before
+    production starts; pending route stages and stage plan dates afterwards. Every
+    change is audit-logged with the reason."""
+    return OperationsService.edit_work_order(db, wo_number, payload, current_user=user)
 
 @router.get("/oars", response_model=List[OARListItem])
 def list_oars(

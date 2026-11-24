@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
     ENVIRONMENT: str = "development"
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Read-only link to the DC (Delivery Challan) software for subcontracting. Both
+    # empty = link disabled; OMS keeps working and says DC data is unavailable.
+    DC_API_URL: str = ""        # e.g. https://dc.vijayspheroidals.in
+    DC_API_TOKEN: str = ""      # must equal OMS_INTEGRATION_TOKEN in the DC app
+    DC_API_TIMEOUT_SECONDS: float = 5.0
 
     @property
     def cors_origins_list(self) -> list[str]:

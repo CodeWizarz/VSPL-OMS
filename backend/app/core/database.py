@@ -564,6 +564,8 @@ def auto_migrate_schema():
             # Record WHICH statement failed (SQL text only -- never data or credentials)
             # so a schema gap is visible instead of just a count.
             failed_statements.append({"statement": stmt.strip(), "error": type(exc).__name__})
+            # SQLite cannot ALTER COLUMN TYPE, so those statements are expected to fail
+            # there; only a failure on a real (Postgres) database is worth a warning.
             log = logger.info if is_sqlite else logger.warning
             log("Schema sync statement failed (%s): %s", type(exc).__name__, stmt.strip())
 

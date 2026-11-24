@@ -17,10 +17,11 @@ class UserRole(str, enum.Enum):
     PACKING = "packing"
     STORE = "store"
     SALES = "sales"
+    SUPERVISOR = "supervisor"   # shop-floor supervisor: production entry + movement only
+    ACCOUNTS = "accounts"       # records customer payments against invoices
     DATA_ANALYST = "data_analyst"
     ENGINEERING = "engineering"
     MANUFACTURING = "manufacturing"
-    ACCOUNTS = "accounts"
 
     # Stage roles: a Supervisor and a Manager for each of F1, F2, F3, SP, FI, Packing
     # and Dispatch. The stage is
