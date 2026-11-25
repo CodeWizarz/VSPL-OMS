@@ -165,8 +165,13 @@ class OMSIntegrationService:
         route_names = [r.stage for r in routes]
         wip_map = {w.stage: w for w in db.query(StageWIP).filter(StageWIP.work_order_id == wo.id).all()}
         pr = db.query(PackingRecord).filter(PackingRecord.work_order_id == wo.id).first()
-        from app.models.vendor import VendorDispatch
+        from app.models.vendor import VendorDispatch, VendorTripReturn
         vendor_dispatches = db.query(VendorDispatch).filter(VendorDispatch.work_order_id == wo.id).all()
+        _trip_ids = [d.id for d in vendor_dispatches if d.source_state is not None]
+        returns_by_trip = {}
+        if _trip_ids:
+            for _r in db.query(VendorTripReturn).filter(VendorTripReturn.trip_id.in_(_trip_ids)).all():
+                returns_by_trip.setdefault(_r.trip_id, []).append(_r)
 
         # 1. Flow calculations along the route
         for i, r in enumerate(routes):
@@ -201,33 +206,55 @@ class OMSIntegrationService:
                 or (i + 1 < len(routes) and routes[i + 1].stage.upper() == "DISPATCH")
             )
 
-            # OMS Flow Formula: In-Process (net) = max(Ent - OK - Rej, 0)
-            std_inproc = max(ent - ok - rej, 0)
+            # Vendor outflow from this stage.
+            # Legacy trips (source_state is NULL: a vendor production entry) keep the original
+            # accounting below. Vendor trips (source_state set) only MOVE pieces and are
+            # accounted per source state (docs/vendor-trips-architecture.md).
+            legacy = [d for d in vendor_dispatches if d.dispatch_stage == stg and d.source_state is None]
+            trips = [d for d in vendor_dispatches if d.dispatch_stage == stg and d.source_state is not None]
 
-            # Vendor outflow from this stage:
+            def _at_vendor(d):
+                if d.status not in ("AT_VENDOR", "PARTIALLY_RECEIVED"):
+                    return 0
+                return max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0)
+
             # 1. Pieces currently at vendor (not yet received or scrapped)
-            active_at_vendor = sum(
-                max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0)
-                for d in vendor_dispatches
-                if d.dispatch_stage == stg and d.status in ("AT_VENDOR", "PARTIALLY_RECEIVED")
-            )
+            active_at_vendor = sum(_at_vendor(d) for d in legacy)
             # 2. Pieces that were received into a downstream stage != stg and != nxt_stg
             # (If received into nxt_stg, they are already counted inside nxt_wip.ent_qty below;
             # excluding nxt_stg avoids subtracting those pieces twice).
             nxt_stg = routes[i + 1].stage if (i + 1 < len(routes)) else None
             received_beyond_next = sum(
                 (d.received_qty or 0)
-                for d in vendor_dispatches
-                if d.dispatch_stage == stg 
-                and (d.received_stage or d.target_return_stage or "FI") not in (stg, nxt_stg)
+                for d in legacy
+                if (d.received_stage or d.target_return_stage or "FI") not in (stg, nxt_stg)
             )
             # 3. Pieces scrapped at vendor
-            scrapped_at_vendor = sum(
-                (d.scrap_qty or 0)
-                for d in vendor_dispatches
-                if d.dispatch_stage == stg
-            )
+            scrapped_at_vendor = sum((d.scrap_qty or 0) for d in legacy)
             vendor_outflow = active_at_vendor + received_beyond_next + scrapped_at_vendor
+
+            # Vendor trips: pieces out of "unprocessed" / out of "completed" at this gate.
+            # Pieces returned as "gate work done" were already added to OK by their own
+            # production entry, so only what is still out (or scrapped) leaves a state.
+            trip_out_unproc = sum(
+                _at_vendor(d) + (d.scrap_qty or 0) for d in trips if d.source_state == "UNPROCESSED"
+            )
+            trip_out_comp = sum(
+                _at_vendor(d) + (d.scrap_qty or 0) for d in trips if d.source_state == "COMPLETED"
+            )
+            trip_at_vendor = sum(_at_vendor(d) for d in trips)
+            # Good pieces of a trip that landed straight at another gate: counted at this gate,
+            # then gone. If that gate is the next one, its entered count already takes them out of
+            # on-hand; any other gate needs the same explicit subtraction as the earlier flow.
+            trip_beyond = sum(
+                r.good_qty or 0
+                for d in trips for r in returns_by_trip.get(d.id, [])
+                if r.destination_stage and r.destination_stage not in (stg, nxt_stg)
+            )
+
+            # OMS Flow Formula: In-Process (net) = max(Ent - OK - Rej - out of unprocessed, 0)
+            std_inproc = max(ent - ok - rej - trip_out_unproc, 0)
+            vendor_outflow += trip_out_comp + trip_beyond
 
             # OMS Flow Formula: On-Hand = max(OK - Ent(next) - vendor_outflow, 0)
             nxt_ent = 0
@@ -267,7 +294,7 @@ class OMSIntegrationService:
             # Gate lock status: If all entered material has been produced (net_ip == 0) and all good product moved out (on_hand == 0):
             is_completed_gate = bool(ent > 0 and net_ip == 0 and on_hand == 0 and (ok + rej) > 0)
             if is_completed_gate:
-                if active_at_vendor > 0:
+                if active_at_vendor + trip_at_vendor > 0:
                     r.stage_status = "At Vendor"
                 else:
                     r.stage_status = "Completed"
@@ -361,11 +388,24 @@ class OMSIntegrationService:
         pr = db.query(PackingRecord).filter(PackingRecord.work_order_id == wo.id).first()
         dispatched_qty = pr.dispatched_qty if pr else 0
         
-        accounted = total_wip + total_rej + dispatched_qty
+        # Pieces out at a vendor, and pieces the vendor scrapped, are no longer in any stage's
+        # WIP (recompute_work_order removes them from on-hand) but still belong to the WO.
+        from app.models.vendor import VendorDispatch
+        vds = db.query(VendorDispatch).filter(VendorDispatch.work_order_id == wo.id).all()
+        at_vendor = sum(
+            max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0)
+            for d in vds if d.status in ("AT_VENDOR", "PARTIALLY_RECEIVED")
+        )
+        vendor_scrap = sum(d.scrap_qty or 0 for d in vds)
+
+        accounted = total_wip + total_rej + dispatched_qty + at_vendor + vendor_scrap
         variance = wo.physical_wo_qty - accounted
         is_balanced = (variance == 0)
 
-        detail = f"Released: {wo.physical_wo_qty} | Total WIP: {total_wip} (InProc+OnHand) | Rejections: {total_rej} | Dispatched: {dispatched_qty} | Variance: {variance}"
+        detail = f"Released: {wo.physical_wo_qty} | Total WIP: {total_wip} (InProc+OnHand) | Rejections: {total_rej} | Dispatched: {dispatched_qty}"
+        if at_vendor or vendor_scrap:
+            detail += f" | At vendor: {at_vendor} | Vendor scrap: {vendor_scrap}"
+        detail += f" | Variance: {variance}"
         return ReconciliationItem(
             wo_number=wo.wo_number,
             released_qty=wo.physical_wo_qty,

@@ -49,6 +49,7 @@ import {
   MasterShift,
   MasterOperator,
   getCurrentUser,
+  getVendorConfig,
 } from "@/lib/api";
 
 
@@ -92,6 +93,11 @@ export function MovePartsContent() {
   const [remarks, setRemarks] = useState("");
   const [productionType, setProductionType] = useState<"IN_HOUSE" | "VENDOR">("IN_HOUSE");
   const [vendorName, setVendorName] = useState("");
+  // With vendor trips on, sending to a vendor happens in Production Entry (At vendor), not as a label on a move.
+  const [tripsEnabled, setTripsEnabled] = useState(false);
+  useEffect(() => {
+    getVendorConfig().then((c) => setTripsEnabled(!!c?.trips_enabled)).catch(() => setTripsEnabled(false));
+  }, []);
   const [dcNumber, setDcNumber] = useState("");
   const [machinesList, setMachinesList] = useState<MasterMachine[]>([]);
   const [shiftsList, setShiftsList] = useState<MasterShift[]>([]);
@@ -435,8 +441,8 @@ export function MovePartsContent() {
         remarks: remarks || undefined,
         heat_number: heatNumber.trim() || undefined,
         client_request_id: clientReqId,
-        production_type: productionType,
-        vendor_name: productionType === "VENDOR" ? vendorName.trim() : undefined,
+        production_type: tripsEnabled ? "IN_HOUSE" : productionType,
+        vendor_name: productionType === "VENDOR" && !tripsEnabled ? vendorName.trim() : undefined,
         dc_number: productionType === "VENDOR" ? dcNumber.trim() : undefined,
       });
 
@@ -1150,7 +1156,7 @@ export function MovePartsContent() {
 
 
                     {/* Special Routing: In-House vs At Vendor Toggle */}
-                    {originStage !== "DISPATCH" && (
+                    {originStage !== "DISPATCH" && !tripsEnabled && (
                       <div className="p-4 rounded-xl border border-indigo-200 dark:border-indigo-900/60 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-3">
                         <div className="flex items-center justify-between">
                           <label className="text-xs font-bold text-indigo-950 dark:text-indigo-200 flex items-center gap-1.5">

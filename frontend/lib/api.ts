@@ -1853,7 +1853,7 @@ export interface VendorDispatchItem {
   received_qty: number;
   scrap_qty: number;
   pending_qty: number;
-  status: "AT_VENDOR" | "PARTIALLY_RECEIVED" | "RECEIVED";
+  status: "AT_VENDOR" | "PARTIALLY_RECEIVED" | "RECEIVED" | "CANCELLED";
   target_return_stage?: string;
   received_stage?: string | null;
   dispatched_at: string;
@@ -1861,6 +1861,73 @@ export interface VendorDispatchItem {
   inward_dc_number?: string;
   remarks?: string;
   days_at_vendor: number;
+  source_state?: "UNPROCESSED" | "COMPLETED" | null;
+  origin?: string | null;
+  process_name?: string | null;
+  done_qty?: number;
+  cancelled_at?: string | null;
+  cancel_reason?: string | null;
+}
+
+export interface VendorTripResult {
+  success: boolean;
+  message: string;
+  trip_id: string;
+  wo_number: string;
+  stage: string;
+  source_state?: string | null;
+  status: string;
+  at_vendor_qty: number;
+  gate_unprocessed_qty: number;
+  gate_completed_qty: number;
+}
+
+export async function getVendorConfig(): Promise<{ trips_enabled: boolean }> {
+  const { data } = await api.get("/api/v1/vendor/config");
+  return data;
+}
+
+export async function getVendorGateState(wo_number: string, stage: string): Promise<{
+  wo_number: string;
+  stage: string;
+  unprocessed_qty: number;
+  completed_qty: number;
+  at_vendor_from_unprocessed_qty: number;
+  at_vendor_from_completed_qty: number;
+  trips_enabled: boolean;
+}> {
+  const { data } = await api.get("/api/v1/vendor/gate-state", { params: { wo_number, stage } });
+  return data;
+}
+
+export async function createVendorTrip(payload: {
+  wo_number: string;
+  stage: string;
+  quantity: number;
+  source_state?: "UNPROCESSED" | "COMPLETED";
+  vendor_name: string;
+  dc_number: string;
+  process_name?: string;
+  remarks?: string;
+}): Promise<VendorTripResult> {
+  const { data } = await api.post("/api/v1/vendor/trips", payload);
+  return data;
+}
+
+export async function recordVendorTripReturn(tripId: string, payload: {
+  good_qty: number;
+  scrap_qty?: number;
+  destination_stage?: string;
+  inward_dc?: string;
+  remarks?: string;
+}): Promise<VendorTripResult> {
+  const { data } = await api.post(`/api/v1/vendor/trips/${encodeURIComponent(tripId)}/returns`, payload);
+  return data;
+}
+
+export async function cancelVendorTrip(tripId: string, reason: string): Promise<VendorTripResult> {
+  const { data } = await api.post(`/api/v1/vendor/trips/${encodeURIComponent(tripId)}/cancel`, { reason });
+  return data;
 }
 
 export interface VendorSummary {
