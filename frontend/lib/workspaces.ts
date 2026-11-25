@@ -117,6 +117,22 @@ export function resolveWorkspace(roles: (string | null | undefined)[]): Workspac
       groups: ["PRODUCTION & WIP", "PACKING & DISPATCH"],
     };
   }
+  // SCM (Supply Chain Manager): sends material to vendors and receives it back, and runs the
+  // Dispatch Center. Production & WIP (work queue, production entry, vendor tracking, WO
+  // tracking), Packing & Dispatch, the two Sales & Accounts views, and reports. Nothing else.
+  if (list.length > 0 && list.every((r) => r === "scm")) {
+    return {
+      key: "SCM",
+      label: "SCM",
+      home: "/production/vendor",
+      hrefs: [
+        "/my-work", "/production/entry", "/production/vendor", "/production/tracking",
+        "/packing", "/bsr", "/dispatch",
+        "/sales/po-cycle", "/accounts/payments",
+        "/oms", "/reports/sales-ops", "/reports",
+      ],
+    };
+  }
   if (list.length === 1 && list[0] === "accounts") {
     return {
       key: "ACCOUNTS",

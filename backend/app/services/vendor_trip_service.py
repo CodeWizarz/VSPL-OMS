@@ -43,9 +43,9 @@ from app.models.vendor import VendorDispatch, VendorTripReturn
 from app.models.work_order import WORoute, WorkOrder, WOStatus
 from app.services.oms_integration_service import OMSIntegrationService, match_route_stage
 
-# SCM = Subcontracting managers/supervisors, plus admin, production manager and CEO.
+# SCM = the Supply Chain Manager role, Subcontracting managers/supervisors, plus admin, production manager and CEO.
 SCM_ROLES = (
-    UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.CEO,
+    UserRole.SCM, UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.CEO,
     UserRole.SP_MANAGER, UserRole.SP_SUPERVISOR,
 )
 UNPROCESSED = "UNPROCESSED"

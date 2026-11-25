@@ -313,13 +313,13 @@ const NAV_GROUPS: NavGroup[] = [
         name: "PO → Dispatch → Collection",
         href: "/sales/po-cycle",
         icon: <BarChart3 className="h-4 w-4 text-emerald-500" />,
-        roles: ["admin", "ceo", "sales", "accounts", "planner"],
+        roles: ["admin", "ceo", "sales", "accounts", "planner", "scm"],
       },
       {
         name: "Invoices & Payments",
         href: "/accounts/payments",
         icon: <Wallet className="h-4 w-4 text-indigo-500" />,
-        roles: ["admin", "accounts"],
+        roles: ["admin", "accounts", "scm"],
       },
     ],
   },
@@ -552,7 +552,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
 
-        {/* Quick Action Floor Badge */}
+        {/* Quick Action Floor Badge (not for SCM, whose menu has no Move Parts) */}
+        {workspace?.key !== "SCM" && (
         <div className="p-4 border-b border-zinc-100 dark:border-zinc-800/50">
           <Link
             href="/production/move"
@@ -567,6 +568,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </span>
           </Link>
         </div>
+        )}
 
         {/* Navigation Items */}
         <div
