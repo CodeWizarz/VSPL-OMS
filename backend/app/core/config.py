@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     DC_API_URL: str = ""        # e.g. https://dc.vijayspheroidals.in
     DC_API_TOKEN: str = ""      # must equal OMS_INTEGRATION_TOKEN in the DC app
     DC_API_TIMEOUT_SECONDS: float = 5.0
+    # Vendor trips (docs/vendor-trips-architecture.md). Off = today's behaviour for NEW vendor
+    # entries; trips already created are always understood by the recompute either way.
+    VENDOR_TRIPS_ENABLED: bool = False
 
     @property
     def cors_origins_list(self) -> list[str]:

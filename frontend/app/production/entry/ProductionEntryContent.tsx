@@ -37,6 +37,9 @@ import {
   getStageState,
   getRejectionTypes,
   recordStageProduction,
+  getVendorConfig,
+  getVendorGateState,
+  createVendorTrip,
   declareWOShortfall,
   MasterRejectionType,
   getMasterMachines,
@@ -100,6 +103,11 @@ export function ProductionEntryContent() {
   const [woData, setWoData] = useState<any>(null);
   const [routeData, setRouteData] = useState<any>(null);
   const [stageState, setStageState] = useState<any>(null);
+  // Vendor trips (docs/vendor-trips-architecture.md): "At vendor" moves pieces and never counts production.
+  const [tripsEnabled, setTripsEnabled] = useState(false);
+  const [gateState, setGateState] = useState<any>(null);
+  const [tripSource, setTripSource] = useState<"UNPROCESSED" | "COMPLETED" | "">("");
+  const [processName, setProcessName] = useState("");
   const [selectedStage, setSelectedStage] = useState<string>("F1");
 
   // Form Fields
@@ -407,6 +415,36 @@ export function ProductionEntryContent() {
     }
   };
 
+  useEffect(() => {
+    getVendorConfig().then((c) => setTripsEnabled(!!c?.trips_enabled)).catch(() => setTripsEnabled(false));
+  }, []);
+
+  useEffect(() => {
+    if (!tripsEnabled || !woData?.wo_number || !selectedStage) {
+      setGateState(null);
+      return;
+    }
+    getVendorGateState(woData.wo_number, selectedStage)
+      .then((g) => setGateState(g))
+      .catch(() => setGateState(null));
+  }, [tripsEnabled, woData?.wo_number, selectedStage, stageState]);
+
+  // Default the source to the only state that has pieces; ask when both do.
+  useEffect(() => {
+    if (!gateState) {
+      setTripSource("");
+      return;
+    }
+    const u = gateState.unprocessed_qty || 0;
+    const c = gateState.completed_qty || 0;
+    setTripSource((prev) => {
+      if (u > 0 && c > 0) return prev || "";
+      if (u > 0) return "UNPROCESSED";
+      if (c > 0) return "COMPLETED";
+      return "";
+    });
+  }, [gateState]);
+
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!woData) return;
@@ -435,6 +473,63 @@ export function ProductionEntryContent() {
         setFormError("Delivery Challan (DC #) is mandatory when recording Vendor production.");
         return;
       }
+    }
+
+    // Vendor trip: pieces are MOVED to the vendor, nothing is counted as production.
+    if (productionType === "VENDOR" && tripsEnabled) {
+      if (rejQtyNum > 0) {
+        setFormError("A vendor trip cannot include rejected pieces. Record rejections as in-house production, or have SCM enter scrap when the pieces return.");
+        return;
+      }
+      const u = gateState?.unprocessed_qty ?? 0;
+      const c = gateState?.completed_qty ?? 0;
+      if (u > 0 && c > 0 && !tripSource) {
+        setFormError(`${selectedStage} has ${u} unprocessed and ${c} completed pieces. Choose which ones are going to the vendor.`);
+        return;
+      }
+      const src = tripSource || (u > 0 ? "UNPROCESSED" : c > 0 ? "COMPLETED" : "");
+      const avail = src === "COMPLETED" ? c : u;
+      if (!src || goodQtyNum > avail) {
+        setFormError(`Only ${avail} ${src ? src.toLowerCase() : ""} pieces are available at ${selectedStage} to send. Pieces already at a vendor cannot be sent again.`);
+        return;
+      }
+      setSubmitting(true);
+      setFormError("");
+      try {
+        const trip = await createVendorTrip({
+          wo_number: woData.wo_number,
+          stage: selectedStage,
+          quantity: goodQtyNum,
+          source_state: src as "UNPROCESSED" | "COMPLETED",
+          vendor_name: vendorName.trim(),
+          dc_number: dcNumber.trim(),
+          process_name: processName.trim() || undefined,
+          remarks: remarks.trim() || undefined,
+        });
+        setSuccessResult({
+          is_trip: true,
+          entry_id: `DC #${dcNumber.trim()}`,
+          wo_number: trip.wo_number,
+          stage: trip.stage,
+          good_qty: goodQtyNum,
+          rejected_quantity: 0,
+          stage_onhand_available: trip.gate_completed_qty,
+          stage_inproc_remaining: trip.gate_unprocessed_qty,
+          production_type: "VENDOR",
+          vendor_name: vendorName.trim(),
+          dc_number: dcNumber.trim(),
+          message: trip.message + " No production was counted; SCM records the return in Vendor Tracking.",
+        });
+        setGoodQty("");
+        setDcNumber("");
+        await Promise.all([lookupWO(woData.wo_number), loadAvailableWOs()]);
+      } catch (err: any) {
+        const d = err?.response?.data?.detail;
+        setFormError(typeof d === "string" ? d : (d ? JSON.stringify(d) : (err?.message || "Could not create the vendor trip.")));
+      } finally {
+        setSubmitting(false);
+      }
+      return;
     }
 
     // The ceiling for a NEW production transaction is the unprocessed material still
@@ -570,7 +665,7 @@ export function ProductionEntryContent() {
   const isStageF1 = selectedStage.toUpperCase() === "F1";
   const remainingTargetForStage = stageState?.in_process_qty ?? activeStage?.in_process_qty ?? 0;
   const curProcTotal = (Number(goodQty) || 0) + (Number(rejectedQty) || 0);
-  const isF1ExcessActive = isStageF1 && curProcTotal > remainingTargetForStage;
+  const isF1ExcessActive = isStageF1 && curProcTotal > remainingTargetForStage && !(tripsEnabled && productionType === "VENDOR");
   const f1ExcessAmount = isF1ExcessActive ? curProcTotal - remainingTargetForStage : 0;
 
   const handleOpenShortfallModal = () => {
@@ -1113,7 +1208,7 @@ export function ProductionEntryContent() {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1.5">
-                        NEW OK QUANTITY (THIS TRANSACTION) <span className="text-emerald-600">*</span>
+                        {tripsEnabled && productionType === "VENDOR" ? "PIECES SENT TO THE VENDOR" : "NEW OK QUANTITY (THIS TRANSACTION)"} <span className="text-emerald-600">*</span>
                       </label>
                       <input
                         ref={inputGoodQtyRef}
@@ -1263,7 +1358,57 @@ export function ProductionEntryContent() {
                             />
                           </div>
 
-                          <div className="col-span-full pt-1">
+                          {tripsEnabled && (
+                            <div className="col-span-full space-y-3 pt-1">
+                              <div className="rounded-xl border border-purple-300 dark:border-purple-800 bg-purple-50 dark:bg-purple-950/40 px-3.5 py-2.5 text-[11px] text-purple-900 dark:text-purple-200">
+                                <strong>Vendor trip.</strong> The pieces are moved to the vendor; <strong>no production is counted</strong> and nothing is entered twice.
+                                When the pieces come back, SCM enters the receive gate in Vendor Tracking. No MRB at receipt.
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <button
+                                  type="button"
+                                  disabled={(gateState?.unprocessed_qty ?? 0) <= 0}
+                                  onClick={() => setTripSource("UNPROCESSED")}
+                                  className={`p-3 rounded-xl border text-left transition-all ${
+                                    tripSource === "UNPROCESSED" ? "border-purple-600 bg-purple-50 dark:bg-purple-950/40 ring-2 ring-purple-500/20" : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900"
+                                  } ${(gateState?.unprocessed_qty ?? 0) <= 0 ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                                >
+                                  <div className="font-extrabold text-xs">Not processed yet at {selectedStage}</div>
+                                  <div className="text-[10px] text-zinc-500">{gateState?.unprocessed_qty ?? 0} pcs available{(gateState?.at_vendor_from_unprocessed_qty ?? 0) > 0 ? ` · ${gateState.at_vendor_from_unprocessed_qty} already at a vendor` : ""}</div>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={(gateState?.completed_qty ?? 0) <= 0}
+                                  onClick={() => setTripSource("COMPLETED")}
+                                  className={`p-3 rounded-xl border text-left transition-all ${
+                                    tripSource === "COMPLETED" ? "border-purple-600 bg-purple-50 dark:bg-purple-950/40 ring-2 ring-purple-500/20" : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900"
+                                  } ${(gateState?.completed_qty ?? 0) <= 0 ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                                >
+                                  <div className="font-extrabold text-xs">Already produced at {selectedStage}</div>
+                                  <div className="text-[10px] text-zinc-500">{gateState?.completed_qty ?? 0} pcs available{(gateState?.at_vendor_from_completed_qty ?? 0) > 0 ? ` · ${gateState.at_vendor_from_completed_qty} already at a vendor` : ""}</div>
+                                </button>
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1.5">PROCESS AT VENDOR (optional)</label>
+                                <input
+                                  type="text"
+                                  list="trip-process-suggestions"
+                                  value={processName}
+                                  onChange={(e) => setProcessName(e.target.value)}
+                                  placeholder="e.g. Heat treatment, Plating, Machining..."
+                                  className="w-full rounded-xl border border-purple-300 dark:border-purple-800 bg-white dark:bg-zinc-900 px-3.5 py-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                                />
+                                <datalist id="trip-process-suggestions">
+                                  <option value="Heat treatment" />
+                                  <option value="Plating" />
+                                  <option value="Machining" />
+                                  <option value="Grinding" />
+                                  <option value="Painting / Coating" />
+                                </datalist>
+                              </div>
+                            </div>
+                          )}
+                          {!tripsEnabled && (<div className="col-span-full pt-1">
                             <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1.5 flex items-center gap-1.5">
                               <ArrowRight className="h-3.5 w-3.5 text-purple-600" />
                               EXPECTED RETURN DESTINATION (WHERE DOES MATERIAL GO WHEN INWARDED?) *
@@ -1365,7 +1510,7 @@ export function ProductionEntryContent() {
                                 </button>
                               )}
                             </div>
-                          </div>
+                          </div>)}
                         </div>
                       )}
                     </div>
@@ -1527,12 +1672,12 @@ export function ProductionEntryContent() {
                       {submitting ? (
                         <>
                           <RotateCcw className="h-4 w-4 animate-spin" />
-                          <span>Saving Production Entry...</span>
+                          <span>{tripsEnabled && productionType === "VENDOR" ? "Sending to vendor..." : "Saving Production Entry..."}</span>
                         </>
                       ) : (
                         <>
                           <CheckCircle2 className="h-4 w-4" />
-                          <span>SAVE PRODUCTION ENTRY</span>
+                          <span>{tripsEnabled && productionType === "VENDOR" ? "SEND TO VENDOR (NO PRODUCTION COUNTED)" : "SAVE PRODUCTION ENTRY"}</span>
                         </>
                       )}
                     </button>
@@ -1552,7 +1697,7 @@ export function ProductionEntryContent() {
             </div>
             <div className="flex-1 text-xs space-y-1">
               <h4 className="text-sm font-extrabold text-emerald-800 dark:text-emerald-200">
-                Production Recorded Successfully ({successResult.entry_id})
+                {successResult.is_trip ? "Sent to Vendor" : "Production Recorded Successfully"} ({successResult.entry_id})
               </h4>
               <p className="text-zinc-600 dark:text-zinc-300">
                 {successResult.message}

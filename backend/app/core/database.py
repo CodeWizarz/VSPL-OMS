@@ -482,6 +482,30 @@ def auto_migrate_schema():
         "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_status ON vendor_dispatches (status);",
         "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_vendor_name ON vendor_dispatches (vendor_name);",
         "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_dc_number ON vendor_dispatches (dc_number);",
+        # Vendor trips (docs/vendor-trips-architecture.md). Additive: existing rows stay
+        # source_state NULL = legacy trips with their original accounting.
+        "ALTER TABLE vendor_dispatches ADD COLUMN IF NOT EXISTS source_state VARCHAR(20);",
+        "ALTER TABLE vendor_dispatches ADD COLUMN IF NOT EXISTS origin VARCHAR(10);",
+        "ALTER TABLE vendor_dispatches ADD COLUMN IF NOT EXISTS process_name VARCHAR(200);",
+        "ALTER TABLE vendor_dispatches ADD COLUMN IF NOT EXISTS done_qty INTEGER DEFAULT 0 NOT NULL;",
+        "ALTER TABLE vendor_dispatches ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;",
+        "ALTER TABLE vendor_dispatches ADD COLUMN IF NOT EXISTS cancel_reason VARCHAR(500);",
+        "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_source_state ON vendor_dispatches (source_state);",
+        "CREATE TABLE IF NOT EXISTS vendor_trip_returns ("
+        "    id UUID PRIMARY KEY,"
+        "    trip_id UUID NOT NULL REFERENCES vendor_dispatches(id),"
+        "    good_qty INTEGER NOT NULL DEFAULT 0,"
+        "    scrap_qty INTEGER NOT NULL DEFAULT 0,"
+        "    decision VARCHAR(30),"
+        "    destination_stage VARCHAR(50),"
+        "    production_update_id UUID,"
+        "    inward_dc VARCHAR(100),"
+        "    remarks TEXT,"
+        "    received_by UUID REFERENCES users(id),"
+        "    received_at TIMESTAMPTZ DEFAULT NOW()"
+        ");",
+        "ALTER TABLE vendor_trip_returns ADD COLUMN IF NOT EXISTS destination_stage VARCHAR(50);",
+        "CREATE INDEX IF NOT EXISTS ix_vendor_trip_returns_trip_id ON vendor_trip_returns (trip_id);",
 
         # BSR Finished Goods Stock
         "CREATE TABLE IF NOT EXISTS bsr_stock ("

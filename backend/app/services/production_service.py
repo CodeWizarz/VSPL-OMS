@@ -4,6 +4,7 @@ from typing import Optional, List
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from app.core.config import settings
 from app.models.work_order import WorkOrder, WORoute, WOStatus
 from app.models.production_movement import ProductionMovement, StageWIP
 from app.models.production import ProductionUpdate, ProductionStatus
@@ -70,6 +71,18 @@ class ProductionService:
             )
 
     @staticmethod
+    def _trip_out_unprocessed(db: Session, work_order_id, stage: str) -> int:
+        """Pieces of this WO still at a vendor that left this gate UNPROCESSED (vendor trips)."""
+        from app.models.vendor import VendorDispatch
+        rows = db.query(VendorDispatch).filter(
+            VendorDispatch.work_order_id == work_order_id,
+            VendorDispatch.dispatch_stage == stage,
+            VendorDispatch.source_state == "UNPROCESSED",
+            VendorDispatch.status.in_(["AT_VENDOR", "PARTIALLY_RECEIVED"]),
+        ).all()
+        return sum(max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0) for d in rows)
+
+    @staticmethod
     def get_stage_dashboard(db: Session, wo_number: str, stage: str):
         """Deterministic unified summary for one WO/stage -- Target, Produced, Rejected,
         Good, WIP, Yet to Produce, Remaining Movable -- reused directly from the same
@@ -104,14 +117,11 @@ class ProductionService:
         yet_to_produce = max(target - produced, 0)
         # Remaining Movable = completed good sitting on-hand, not yet moved
         # downstream (StageWIP.onhand_qty) -- rejected quantity is never included.
-        from app.models.vendor import VendorDispatch
-        v_dispatches = db.query(VendorDispatch).filter(
-            VendorDispatch.work_order_id == wo.id,
-            VendorDispatch.dispatch_stage == matched_stage,
-            VendorDispatch.status.in_(["AT_VENDOR", "PARTIALLY_RECEIVED"])
-        ).all()
-        at_vendor_qty = sum(max(d.dispatched_qty - (d.received_qty or 0) - (d.scrap_qty or 0), 0) for d in v_dispatches)
-        remaining_movable = max((wip.onhand_qty if wip else 0) - at_vendor_qty, 0)
+        # Pieces still at an outside vendor are already excluded from onhand_qty by
+        # recompute_work_order (vendor_outflow), and move_parts validates against
+        # onhand_qty alone; subtracting them again here showed 0 movable (and locked
+        # the MRB check) while in-house pieces were on hand at the same stage.
+        remaining_movable = max(wip.onhand_qty if wip else 0, 0)
 
         # Compute MRB approval status (Option 2)
         from app.services.mrb_service import MRBService
@@ -193,6 +203,11 @@ class ProductionService:
                 detail=f"Cannot move parts for Work Order '{req.wo_number}'. The work order is completely dispatched."
             )
         ProductionService._enforce_release_gate(wo)
+        if (req.production_type or "").upper() == "VENDOR" and settings.VENDOR_TRIPS_ENABLED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A move cannot be marked as going to a vendor. Send pieces to a vendor from Production Entry (At vendor), where the trip is tracked."
+            )
         if req.rejected_quantity > 0:
             validate_active_rejection_type(db, req.defect_code)
 
@@ -642,6 +657,12 @@ class ProductionService:
                 detail="Good quantity and rejected quantity cannot both be zero."
             )
 
+        if (req.production_type or "").upper() == "VENDOR" and settings.VENDOR_TRIPS_ENABLED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Sending pieces to a vendor is no longer recorded as a production entry. Use At vendor in Production Entry to create a vendor trip; it moves the pieces without counting production."
+            )
+
         wip = db.query(StageWIP).filter(
             StageWIP.work_order_id == wo.id,
             StageWIP.stage == matched_stage
@@ -666,6 +687,45 @@ class ProductionService:
             )
             db.add(wip)
             db.flush()
+
+        # Vendor work is never extra production. A production entry marked VENDOR means "this
+        # gate's work is done at the vendor", so it can only cover pieces not yet produced here
+        # (in process). Pieces already produced are sent out with Send to vendor
+        # (VendorService.send_to_vendor), which moves on-hand stock out and back without a
+        # second entry. Checked before the F1 excess path so vendor pieces can never grow the WO.
+        if (req.production_type or "").upper() == "VENDOR":
+            if not (req.vendor_name and req.vendor_name.strip() and req.dc_number and req.dc_number.strip()):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Vendor name and DC number are required for a vendor entry."
+                )
+            if total_proc > (wip.inproc_qty or 0):
+                onhand_now = wip.onhand_qty or 0
+                hint = (
+                    f" {onhand_now} pcs are already produced and on hand at {matched_stage}: use 'Send to vendor' "
+                    f"(Move screen) to send them out and back without entering them again."
+                    if onhand_now > 0 else ""
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Cannot record {total_proc} pcs as vendor work at {matched_stage} for {req.wo_number}: "
+                        f"only {wip.inproc_qty or 0} pcs are still unprocessed there. Vendor pieces are never "
+                        f"counted as excess production.{hint}"
+                    )
+                )
+
+        # Pieces of this gate that are out at a vendor (left unprocessed) are not available to
+        # enter, and must never be mistaken for a finished gate or for F1 excess production.
+        out_unproc = ProductionService._trip_out_unprocessed(db, wo.id, matched_stage)
+        if out_unproc > 0 and total_proc > (wip.inproc_qty or 0):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot record {total_proc} pcs at {matched_stage}: only {wip.inproc_qty or 0} pcs are here to process, "
+                    f"and {out_unproc} pcs are at a vendor. They can be entered after SCM records their return."
+                )
+            )
 
         # Gate completion: if this gate has completed processing and material moved downstream
         if wip.ent_qty > 0 and wip.inproc_qty == 0 and (wip.ok_qty + wip.rejected_qty) > 0:
