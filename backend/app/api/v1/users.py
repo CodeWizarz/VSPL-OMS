@@ -70,6 +70,17 @@ def set_status(
     return UserAdminService.set_active(db, user_id, payload.is_active, current_user=user)
 
 
+@router.post("/purge-inactive")
+def purge_inactive_users(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    from app.services.user_admin_service import _require_admin
+    _require_admin(user, "purge inactive users")
+    count = UserAdminService.purge_inactive_users(db)
+    return {"success": True, "purged_count": count, "message": f"Successfully purged {count} inactive user(s)."}
+
+
 @router.delete("/{user_id}", response_model=UserDeleteResponse)
 def delete_user(
     user_id: str,
