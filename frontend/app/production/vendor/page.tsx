@@ -25,6 +25,8 @@ import {
   getVendorDispatches,
   getVendorSummary,
   receiveVendorDispatch,
+  recordVendorTripReturn,
+  cancelVendorTrip,
   VendorDispatchItem,
   VendorSummary
 } from "@/lib/api";
@@ -62,12 +64,17 @@ export default function VendorTrackingPage() {
   const [submitting, setSubmitting] = useState(false);
   const [modalError, setModalError] = useState("");
   const [successToast, setSuccessToast] = useState("");
+  // Vendor trips (docs/vendor-trips-architecture.md): same dialog, plus the SCM decision for pieces
+  // that left unprocessed. Pieces of a trip come back to the gate they left from.
+  const [cancelItem, setCancelItem] = useState<VendorDispatchItem | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const statusParam = statusTab === "ACTIVE" ? "AT_VENDOR" : (statusTab === "RECEIVED" ? "RECEIVED" : "ALL");
+      // ACTIVE loads everything and filters on screen, so partly returned rows stay listed.
+      const statusParam = statusTab === "RECEIVED" ? "RECEIVED" : "ALL";
       const [listRes, sumRes] = await Promise.all([
         getVendorDispatches({
           status: statusParam,
@@ -89,11 +96,35 @@ export default function VendorTrackingPage() {
     fetchData();
   }, [fetchData]);
 
+  const handleTripCancel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!cancelItem) return;
+    if (cancelReason.trim().length < 3) {
+      setModalError("A reason is required to cancel a vendor trip.");
+      return;
+    }
+    setSubmitting(true);
+    setModalError("");
+    try {
+      const res = await cancelVendorTrip(cancelItem.id, cancelReason.trim());
+      setSuccessToast(res.message);
+      setCancelItem(null);
+      setCancelReason("");
+      await fetchData();
+      setTimeout(() => setSuccessToast(""), 6000);
+    } catch (err: any) {
+      const d = err?.response?.data?.detail;
+      setModalError(typeof d === "string" ? d : (d ? JSON.stringify(d) : (err?.message || "Could not cancel the trip.")));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const openReceiveModal = (item: VendorDispatchItem) => {
     setReceiveModalItem(item);
     setReceivedQty(item.pending_qty);
     setScrapQty(0);
-    setDestinationStage(item.target_return_stage || "FI");
+    setDestinationStage(item.source_state ? item.dispatch_stage : (item.target_return_stage || "FI"));
     setInwardDc("");
     setReceiveRemarks("");
     setModalError("");
@@ -105,11 +136,13 @@ export default function VendorTrackingPage() {
 
     const numRec = Number(receivedQty);
     const numScrap = Number(scrapQty) || 0;
+    const isTrip = !!receiveModalItem.source_state;
 
-    if (!numRec || numRec <= 0) {
-      setModalError("Received Quantity must be greater than 0.");
+    if (isTrip ? numRec + numScrap <= 0 : (!numRec || numRec <= 0)) {
+      setModalError(isTrip ? "Enter the good and/or scrap pieces that came back." : "Received Quantity must be greater than 0.");
       return;
     }
+    const tripElsewhere = isTrip && numRec > 0 && destinationStage !== receiveModalItem.dispatch_stage;
 
     if (numRec + numScrap > receiveModalItem.pending_qty) {
       setModalError(
@@ -121,14 +154,22 @@ export default function VendorTrackingPage() {
     setSubmitting(true);
     setModalError("");
     try {
-      const res = await receiveVendorDispatch({
-        dispatch_id: receiveModalItem.id,
-        received_qty: numRec,
-        scrap_qty: numScrap,
-        destination_stage: destinationStage,
-        inward_dc: inwardDc.trim() || undefined,
-        remarks: receiveRemarks.trim() || undefined,
-      });
+      const res = isTrip
+        ? await recordVendorTripReturn(receiveModalItem.id, {
+            good_qty: numRec,
+            scrap_qty: numScrap,
+            destination_stage: tripElsewhere ? destinationStage : undefined,
+            inward_dc: inwardDc.trim() || undefined,
+            remarks: receiveRemarks.trim() || undefined,
+          })
+        : await receiveVendorDispatch({
+            dispatch_id: receiveModalItem.id,
+            received_qty: numRec,
+            scrap_qty: numScrap,
+            destination_stage: destinationStage,
+            inward_dc: inwardDc.trim() || undefined,
+            remarks: receiveRemarks.trim() || undefined,
+          });
 
       setSuccessToast(res.message);
       setReceiveModalItem(null);
@@ -381,6 +422,12 @@ export default function VendorTrackingPage() {
 
                         <td className="py-3 px-4 text-center font-bold text-zinc-800 dark:text-zinc-200">
                           {item.dispatched_qty} pcs
+                          {item.source_state && (
+                            <div className="text-[10px] font-bold text-purple-600 dark:text-purple-400">
+                              {item.source_state === "UNPROCESSED" ? "Left unprocessed" : "Left completed"} · {item.dispatch_stage}
+                              {item.process_name ? ` · ${item.process_name}` : ""}
+                            </div>
+                          )}
                         </td>
 
                         <td className="py-3 px-4 text-center font-bold text-emerald-600 dark:text-emerald-400">
@@ -392,7 +439,12 @@ export default function VendorTrackingPage() {
                         </td>
 
                         <td className="py-3 px-4">
-                          {isCompleted ? (
+                          {item.status === "CANCELLED" ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700">
+                              <X className="h-3 w-3" />
+                              <span>Cancelled</span>
+                            </span>
+                          ) : isCompleted ? (
                             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
                               <CheckCircle2 className="h-3 w-3" />
                               <span>Received</span>
@@ -411,7 +463,10 @@ export default function VendorTrackingPage() {
                         </td>
 
                         <td className="py-3 px-4 text-right">
-                          {!isCompleted ? (
+                          {item.status === "CANCELLED" ? (
+                            <span className="text-[11px] font-bold text-zinc-400" title={item.cancel_reason || ""}>Cancelled</span>
+                          ) : !isCompleted ? (
+                            <>
                             <button
                               onClick={() => openReceiveModal(item)}
                               className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-white font-bold text-xs shadow-sm transition-all cursor-pointer ${
@@ -419,8 +474,18 @@ export default function VendorTrackingPage() {
                               }`}
                             >
                               <PackageCheck className="h-3.5 w-3.5" />
-                              <span>Receive to {item.target_return_stage || "FI"}</span>
+                              <span>Receive to {item.source_state ? item.dispatch_stage : (item.target_return_stage || "FI")}</span>
                             </button>
+                            {item.source_state && item.status === "AT_VENDOR" && (item.received_qty || 0) === 0 && (
+                              <button
+                                onClick={() => { setCancelItem(item); setCancelReason(""); setModalError(""); }}
+                                className="ml-2 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 font-bold text-[11px] hover:bg-zinc-50 dark:hover:bg-zinc-800 cursor-pointer"
+                              >
+                                <X className="h-3 w-3" />
+                                <span>Cancel trip</span>
+                              </button>
+                            )}
+                            </>
                           ) : (
                             <span className="text-[11px] font-bold text-zinc-400">
                               Fully Inwarded
@@ -437,6 +502,31 @@ export default function VendorTrackingPage() {
         </div>
 
         {/* Receive from Vendor Modal */}
+        {cancelItem && (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
+            <div className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl p-6">
+              <h3 className="text-base font-extrabold text-zinc-900 dark:text-zinc-100">Cancel DC #{cancelItem.dc_number}?</h3>
+              <p className="text-xs text-zinc-500 mt-1 mb-4">
+                Nothing has come back yet, so the {cancelItem.dispatched_qty} pcs go back to {cancelItem.source_state === "UNPROCESSED" ? "unprocessed" : "completed"} stock at {cancelItem.dispatch_stage}.
+              </p>
+              {modalError && <div className="mb-3 p-3 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 font-semibold">{modalError}</div>}
+              <form onSubmit={handleTripCancel} className="space-y-3">
+                <div>
+                  <label htmlFor="cancel-reason" className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1">Reason *</label>
+                  <input id="cancel-reason" type="text" value={cancelReason} onChange={(e) => setCancelReason(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs" placeholder="e.g. Vendor could not take the load" />
+                </div>
+                <div className="flex items-center justify-end gap-3">
+                  <button type="button" onClick={() => setCancelItem(null)} className="px-4 py-2 rounded-xl text-xs font-bold text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer">Keep trip</button>
+                  <button type="submit" disabled={submitting} className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold disabled:opacity-60 cursor-pointer">
+                    {submitting ? "Cancelling..." : "Cancel trip"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
         {receiveModalItem && (
           <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
             <div className="w-full max-w-lg rounded-2xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl p-6 relative">
@@ -494,7 +584,9 @@ export default function VendorTrackingPage() {
                   <label className="block text-[11px] font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1.5 flex items-center justify-between">
                     <span>Destination Stage (Where is material landing?)</span>
                     <span className="text-[10px] text-purple-600 dark:text-purple-400 font-semibold lowercase">
-                      {receiveModalItem.target_return_stage ? `planned: ${receiveModalItem.target_return_stage}` : ""}
+                      {receiveModalItem.source_state
+                        ? `default: ${receiveModalItem.dispatch_stage}`
+                        : (receiveModalItem.target_return_stage ? `planned: ${receiveModalItem.target_return_stage}` : "")}
                     </span>
                   </label>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
@@ -618,7 +710,24 @@ export default function VendorTrackingPage() {
                       </p>
                     </button>
                   </div>
+                  {receiveModalItem.source_state && (
+                    <p className="text-[10px] text-zinc-500 mt-1.5">
+                      These pieces left {receiveModalItem.dispatch_stage}. Choose the gate they are received at: {receiveModalItem.dispatch_stage} (default) or a later gate.
+                    </p>
+                  )}
                 </div>
+
+                {receiveModalItem.source_state ? (
+                  <p className="text-[11px] text-indigo-800 dark:text-indigo-300 bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900 rounded-xl px-3 py-2">
+                    {destinationStage !== receiveModalItem.dispatch_stage
+                      ? (receiveModalItem.source_state === "UNPROCESSED"
+                          ? `The good pieces go straight to ${destinationStage}. ${receiveModalItem.dispatch_stage}'s work is counted as done (once). No MRB at receipt.`
+                          : `The good pieces go straight to ${destinationStage}. They were already produced at ${receiveModalItem.dispatch_stage}, so they are not counted again. No MRB at receipt.`)
+                      : (receiveModalItem.source_state === "UNPROCESSED"
+                          ? `The good pieces go back to ${receiveModalItem.dispatch_stage} as unprocessed. Record the in-house work in Production Entry (counted once). No MRB at receipt.`
+                          : `The good pieces go back to ${receiveModalItem.dispatch_stage} completed stock. They were already produced, so they are not counted again. No MRB at receipt.`)}
+                  </p>
+                ) : null}
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -627,8 +736,8 @@ export default function VendorTrackingPage() {
                     </label>
                     <input
                       type="number"
-                      required
-                      min={1}
+                      required={!receiveModalItem.source_state}
+                      min={receiveModalItem.source_state ? 0 : 1}
                       max={receiveModalItem.pending_qty}
                       value={receivedQty}
                       onChange={(e) => setReceivedQty(e.target.value === "" ? "" : Number(e.target.value))}
@@ -698,7 +807,7 @@ export default function VendorTrackingPage() {
                     ) : destinationStage === "SP" ? (
                       <>Confirming this inward will land the material in <strong>Stage SP (Surface Treatment)</strong> for blasting, coating, or plating before moving to FI.</>
                     ) : (
-                      <>Confirming this inward will return the material to <strong>Stage F2 (Fettling & In-House Finishing)</strong> on the shop floor. Parts will be available in-process at F2 for in-house operations and floor stage movement.</>
+                      <>Confirming this inward will return the material to <strong>Stage {destinationStage}</strong> on the shop floor. Parts will be available in-process at {destinationStage} for in-house operations and floor stage movement.</>
                     )}
                   </span>
                 </div>

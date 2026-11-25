@@ -75,7 +75,13 @@ class VendorService:
                 "received_at": d.received_at,
                 "inward_dc_number": d.inward_dc_number,
                 "remarks": d.remarks,
-                "days_at_vendor": max(days_at_vendor, 0)
+                "days_at_vendor": max(days_at_vendor, 0),
+                "source_state": d.source_state,
+                "origin": d.origin,
+                "process_name": d.process_name,
+                "done_qty": d.done_qty or 0,
+                "cancelled_at": d.cancelled_at,
+                "cancel_reason": d.cancel_reason,
             })
             
         return results
@@ -101,6 +107,31 @@ class VendorService:
         }
 
     @staticmethod
+    def _release_vendor_auto_approval(db: Session, work_order_id, stage: str, qty: int, dc_number: str) -> None:
+        """Takes `qty` pieces off the automatic MRB approvals created when a production entry was
+        marked VENDOR at `stage` (oldest first). Only those system tickets are touched; review
+        notes record why."""
+        from app.models.mrb import MRBReview
+        remaining = qty
+        tickets = db.query(MRBReview).filter(
+            MRBReview.work_order_id == work_order_id,
+            MRBReview.stage == (stage or "").upper(),
+            MRBReview.disposition == "DISPATCHED_TO_VENDOR",
+            MRBReview.status.in_(["APPROVED", "ADJUSTED"]),
+        ).order_by(MRBReview.created_at).with_for_update().all()
+        for t in tickets:
+            if remaining <= 0:
+                break
+            current = t.verified_ok_qty if t.verified_ok_qty is not None else (t.reported_ok_qty or 0)
+            take = min(current, remaining)
+            if take <= 0:
+                continue
+            t.verified_ok_qty = current - take
+            note = f"{take} pcs returned from vendor (DC #{dc_number}) to {stage} for in-house work; they need their own MRB review."
+            t.review_notes = f"{t.review_notes} | {note}" if t.review_notes else note
+            remaining -= take
+
+    @staticmethod
     def receive_from_vendor(
         db: Session,
         dispatch_id: str,
@@ -114,14 +145,15 @@ class VendorService:
         """Receives material returned from an outside subcontractor and lands it
         into the designated stage (e.g. FI for final QA, or F2 for in-house finishing)."""
         now = datetime.now()
-        target_stage = (destination_stage or "FI").strip().upper()
-        
+
         dispatch = db.query(VendorDispatch).filter(VendorDispatch.id == dispatch_id).with_for_update().first()
         if not dispatch:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Vendor dispatch record '{dispatch_id}' not found."
             )
+
+        target_stage = (destination_stage or "FI").strip().upper()
             
         if dispatch.status == "RECEIVED":
             raise HTTPException(
@@ -179,9 +211,20 @@ class VendorService:
                 # Deduct received_qty from ok_qty so that in-house operators can record completed good pieces.
                 origin_wip.ok_qty = max(origin_wip.ok_qty - received_qty, 0)
                 origin_wip.onhand_qty = max(origin_wip.onhand_qty - received_qty, 0)
-                if scrap_qty > 0:
-                    origin_wip.rejected_qty += scrap_qty
-            
+                # Scrap at the vendor stays on the vendor record (dispatch.scrap_qty), exactly as it
+                # does for a return into a later stage. recompute_work_order already removes it from
+                # this stage via scrapped_at_vendor; adding it to rejected_qty here as well counted the
+                # scrapped pieces twice, leaving in-process short by the scrap quantity so returned
+                # pieces could not be recorded (and at F1 looked like excess production).
+
+            # The vendor send was auto-approved in MRB (disposition DISPATCHED_TO_VENDOR).
+            # Pieces coming back for in-house work are no longer covered by that approval;
+            # otherwise the later in-house entry could move without its own MRB review.
+            # Only the pieces that came back: scrapped pieces stay approved-and-gone, which keeps
+            # the MRB arithmetic (approved - already moved, where already moved includes vendor
+            # scrap) in line with on-hand.
+            VendorService._release_vendor_auto_approval(db, wo.id, dispatch.dispatch_stage, received_qty, dispatch.dc_number)
+
             wo.current_stage = target_stage
         else:
             # Material lands in downstream stage (e.g. FI for final QA, bypassing intermediate in-house stages)

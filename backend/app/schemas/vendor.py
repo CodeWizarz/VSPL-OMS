@@ -12,6 +12,47 @@ class VendorReceiveRequest(BaseModel):
     remarks: Optional[str] = Field(None, max_length=1000, description="Inward remarks / inspection condition")
 
 
+class VendorTripCreateRequest(BaseModel):
+    """Send pieces of a work order from a gate to a vendor. Counts no production."""
+    wo_number: str = Field(..., min_length=1)
+    stage: str = Field(..., min_length=1, description="Gate the pieces leave from")
+    quantity: int = Field(..., ge=1)
+    source_state: Optional[str] = Field(None, description="UNPROCESSED or COMPLETED; may be omitted when the gate has only one")
+    vendor_name: str = Field(..., min_length=1, max_length=200)
+    dc_number: str = Field(..., min_length=1, max_length=100)
+    process_name: Optional[str] = Field(None, max_length=200)
+    remarks: Optional[str] = Field(None, max_length=1000)
+
+
+class VendorTripReturnRequest(BaseModel):
+    good_qty: int = Field(0, ge=0)
+    scrap_qty: int = Field(0, ge=0)
+    destination_stage: Optional[str] = Field(None, description="Receive gate entered by SCM: the gate the trip left from (default) or a later gate of the route")
+    inward_dc: Optional[str] = Field(None, max_length=100)
+    remarks: Optional[str] = Field(None, max_length=1000)
+
+
+class VendorTripCancelRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class VendorTripResponse(BaseModel):
+    success: bool
+    message: str
+    trip_id: str
+    wo_number: str
+    stage: str
+    source_state: Optional[str] = None
+    status: str
+    at_vendor_qty: int
+    gate_unprocessed_qty: int
+    gate_completed_qty: int
+
+
+class VendorConfigResponse(BaseModel):
+    trips_enabled: bool
+
+
 class VendorReceiveResponse(BaseModel):
     success: bool
     message: str
@@ -46,6 +87,12 @@ class VendorDispatchItem(BaseModel):
     inward_dc_number: Optional[str]
     remarks: Optional[str]
     days_at_vendor: int
+    source_state: Optional[str] = None
+    origin: Optional[str] = None
+    process_name: Optional[str] = None
+    done_qty: int = 0
+    cancelled_at: Optional[datetime] = None
+    cancel_reason: Optional[str] = None
 
 
 class VendorSummaryResponse(BaseModel):

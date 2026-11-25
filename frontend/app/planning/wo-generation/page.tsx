@@ -567,7 +567,8 @@ function WOGenerationContent() {
 
   // Filtered OARs
   const filteredOars = oars.filter((o) => {
-    if (filterPendingOnly && !searchOar.trim() && o.remaining_qty <= 0) return false;
+    // When "Awaiting Work Orders" is active, strictly hide fully planned OARs (remaining <= 0)
+    if (filterPendingOnly && o.remaining_qty <= 0) return false;
     if (!searchOar.trim()) return true;
     const q = searchOar.toLowerCase().trim();
     return (
@@ -648,7 +649,7 @@ function WOGenerationContent() {
                       : "bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
                   }`}
                 >
-                  Awaiting Work Orders
+                  Awaiting Work Orders ({oars.filter((o) => o.remaining_qty > 0).length})
                 </button>
                 <button
                   type="button"
@@ -659,7 +660,7 @@ function WOGenerationContent() {
                       : "bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"
                   }`}
                 >
-                  All OARs
+                  All OARs ({oars.length})
                 </button>
               </div>
 
@@ -851,6 +852,10 @@ function WOGenerationContent() {
                             >
                               {isMergeChecked ? "✓ In Merge" : "+ Add to Merge"}
                             </button>
+                          ) : o.remaining_qty <= 0 && !allowOverrun ? (
+                            <span className="inline-block px-3 py-1.5 text-xs font-semibold rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 border border-zinc-200 dark:border-zinc-700 select-none">
+                              Fully Planned
+                            </span>
                           ) : (
                             <button
                               type="button"
