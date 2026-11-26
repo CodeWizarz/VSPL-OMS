@@ -15,7 +15,10 @@ import {
   POMasterOut,
   POLineOut,
   POLineOrderSummary,
+  getCurrentUserRole,
+  getCurrentUserRoles,
 } from "@/lib/api";
+import Link from "next/link";
 import {
   FilePlus,
   AlertTriangle,
@@ -32,6 +35,8 @@ import {
   Calendar,
   RotateCw,
   RefreshCw,
+  BarChart3,
+  ChevronDown,
 } from "lucide-react";
 
 interface LineDraft {
@@ -587,22 +592,52 @@ export default function POMasterPage() {
     }
   }
 
+  const [reportsOpen, setReportsOpen] = useState(false);
+  const [canSeeSalesReports, setCanSeeSalesReports] = useState(false);
+  useEffect(() => {
+    const all = [getCurrentUserRole(), ...getCurrentUserRoles()].map((r) => String(r || "").toLowerCase());
+    setCanSeeSalesReports(all.includes("sales") || all.includes("admin"));
+  }, []);
+
   const isPoAllocated = editingPO ? editingPO.lines.some((l) => l.allocated_qty > 0) : false;
 
   return (
     <AppShell>
       <div className="max-w-6xl mx-auto space-y-6">
-        <div>
-          <span className="rounded-md bg-blue-600 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
-            Masters
-          </span>
-          <h1 className="text-2xl font-extrabold tracking-tight text-zinc-900 dark:text-zinc-50 mt-1">
-            PO Master
-          </h1>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            Confirmed customer purchase orders. Each line tracks allocated vs. available quantity
-            as OARs are raised against it.
-          </p>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <span className="rounded-md bg-blue-600 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
+              Masters
+            </span>
+            <h1 className="text-2xl font-extrabold tracking-tight text-zinc-900 dark:text-zinc-50 mt-1">
+              PO Master
+            </h1>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+              Confirmed customer purchase orders. Each line tracks allocated vs. available quantity
+              as OARs are raised against it.
+            </p>
+          </div>
+          {canSeeSalesReports && (
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setReportsOpen((v) => !v)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-xs font-bold text-zinc-700 dark:text-zinc-200 shadow-sm hover:bg-zinc-50 dark:hover:bg-zinc-800"
+              >
+                <BarChart3 className="h-4 w-4 text-blue-500" /> Reports <ChevronDown className="h-3.5 w-3.5" />
+              </button>
+              {reportsOpen && (
+                <div className="absolute right-0 z-20 mt-1 w-64 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-1 shadow-lg">
+                  <Link
+                    href="/masters/pos/order-status"
+                    className="block rounded-lg px-3 py-2 text-xs font-bold text-zinc-800 dark:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  >
+                    Sales Order Status Dashboard
+                  </Link>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Add PO Section */}

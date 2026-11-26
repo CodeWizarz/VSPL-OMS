@@ -167,3 +167,7 @@ COMMERCIAL_REPORT_ROLES = (
 # Master for that -- without the rest of PLANNING_ROLES (masters editing, OAR intake...).
 WO_GENERATION_ROLES = PLANNING_ROLES + (UserRole.ENGINEERING,)
 CUSTOMER_MASTER_VIEW_ROLES = PLANNING_ROLES + (UserRole.ENGINEERING,)
+
+
+# Sales order status dashboard (daily sales meeting): Sales department and Admin only.
+SALES_DASHBOARD_ROLES = (UserRole.ADMIN, UserRole.SALES)
