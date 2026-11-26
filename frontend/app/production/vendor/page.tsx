@@ -418,6 +418,11 @@ export default function VendorTrackingPage() {
                           <div className="text-[10px] text-amber-600 dark:text-amber-400 font-bold">
                             {item.days_at_vendor} {item.days_at_vendor === 1 ? "day" : "days"} ago
                           </div>
+                          {item.gate_planned_end && (
+                            <div className="text-[10px] font-bold text-blue-600 dark:text-blue-400" title="Planned end of the gate these pieces left from (setup planning)">
+                              {item.dispatch_stage} due {formatDate(item.gate_planned_end)}
+                            </div>
+                          )}
                         </td>
 
                         <td className="py-3 px-4 text-center font-bold text-zinc-800 dark:text-zinc-200">

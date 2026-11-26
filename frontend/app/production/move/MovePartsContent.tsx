@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
+import { PlanBanner } from "@/app/components/planning/PlanUi";
 import { useSearchParams } from "next/navigation";
 import {
   ArrowRightLeft,
@@ -747,6 +748,8 @@ export function MovePartsContent() {
         {/* Work Order Details & Movement Form */}
         {woData && (
           <div id="move-form-section" className="space-y-6">
+            {/* Plan for this work order and the gate the parts leave (setup planning; read-only) */}
+            <PlanBanner woNumber={woData.wo_number} stage={originStage} />
             {/* Header Strip */}
             <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-sm space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-zinc-100 dark:border-zinc-800">

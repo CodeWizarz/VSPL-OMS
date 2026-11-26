@@ -1268,6 +1268,10 @@ export async function releaseWorkOrder(payload: {
   casting_process?: string;
   heat_number?: string;
   remarks?: string;
+  // Setup planning (only when switched on): the setup this work order is planned in.
+  setup_number?: string;
+  new_setup_date?: string;
+  heat_numbers?: string[];
 }) {
   const { data } = await api.post("/api/v1/operations/wo-release", payload);
   return data;
@@ -1861,6 +1865,7 @@ export interface VendorDispatchItem {
   inward_dc_number?: string;
   remarks?: string;
   days_at_vendor: number;
+  gate_planned_end?: string | null;
   source_state?: "UNPROCESSED" | "COMPLETED" | null;
   origin?: string | null;
   process_name?: string | null;
@@ -2145,6 +2150,12 @@ export interface QueueItem {
   days_to_due?: number | null;
   bucket: "overdue" | "today" | "next" | "later" | "no_date";
   delivery_risk?: string | null;
+  // Setup planning (present only when switched on)
+  setup_number?: string | null;
+  heat_numbers?: string[];
+  commitment_date?: string | null;
+  plan_status?: PlanStatus;
+  plan_text?: string;
 }
 
 export interface StageQueue {
@@ -2357,5 +2368,358 @@ export interface POCycleRow {
 
 export async function getPOCycle(search?: string): Promise<POCycleRow[]> {
   const { data } = await api.get("/api/v1/accounts/po-cycle", { params: search ? { search } : undefined });
+  return data;
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Setup planning and scheduling (docs/setup-planning-architecture.md)
+// ---------------------------------------------------------------------------------------------
+export type PlanStatus = "DELAYED" | "AT_RISK" | "NO_PLAN" | "ON_TRACK" | "COMPLETE";
+export type GateState = "DONE" | "IN_PROGRESS" | "NOT_STARTED";
+export type GateFlag = "LATE" | "DUE_TODAY" | "DUE_SOON" | "START_MISSED" | null;
+
+export interface PlanGate {
+  stage: string;
+  sequence: number;
+  planned_start: string | null;
+  planned_end: string | null;
+  state: GateState;
+  flag: GateFlag;
+  days_late: number;
+  days_to_end: number | null;
+  plan_source?: string | null;
+}
+
+export interface PlanWorkOrder {
+  wo_number: string;
+  is_split?: boolean;
+  total_qty?: number;
+  split_note?: string | null;
+  primary_setup?: string | null;
+  oar_number?: string | null;
+  customer_po?: string | null;
+  customer_name?: string | null;
+  part_number?: string | null;
+  part_name?: string | null;
+  qty: number;
+  wo_status: string;
+  current_stage?: string | null;
+  setup_number: string | null;
+  heat_numbers: string[];
+  plan_version: number;
+  commitment_date: string | null;
+  days_to_commitment: number | null;
+  plan_status: PlanStatus;
+  plan_text: string;
+  late_gate: string | null;
+  late_days: number;
+  missing_dates: string[];
+  gates: PlanGate[];
+}
+
+export interface SetupRollup {
+  wo_count: number;
+  total_qty: number;
+  heat_count: number;
+  earliest_commitment: string | null;
+  delayed: number;
+  at_risk: number;
+  no_plan: number;
+  on_track: number;
+  complete: number;
+  gates_total: number;
+  gates_dated: number;
+}
+
+export interface SetupSummary extends SetupRollup {
+  setup_number: string;
+  setup_date: string | null;
+  status: "OPEN" | "CLOSED";
+  remarks: string | null;
+  created_by: string | null;
+  created_at: string | null;
+}
+
+export interface SetupDetail {
+  setup: {
+    setup_number: string;
+    setup_date: string | null;
+    status: "OPEN" | "CLOSED";
+    remarks: string | null;
+    created_by: string | null;
+    created_at: string | null;
+  };
+  rollup: SetupRollup;
+  gate_columns: string[];
+  work_orders: PlanWorkOrder[];
+  finished_work_orders: number;
+}
+
+export interface PlanImportRowOut {
+  row_no: number | null;
+  wo_number: string | null;
+  stage: string | null;
+  old_start: string | null;
+  old_end: string | null;
+  new_start: string | null;
+  new_end: string | null;
+  old_text: string | null;
+  new_text: string | null;
+  result: "OK" | "WARNING" | "ERROR" | "UNCHANGED";
+  message: string | null;
+  applied: boolean;
+}
+
+export interface PlanImportOut {
+  id: string;
+  setup_number: string;
+  file_name: string;
+  status: "REVIEW" | "APPLIED" | "DISCARDED" | "UNDONE";
+  uploaded_by: string | null;
+  uploaded_at: string | null;
+  applied_at: string | null;
+  counts: { total_wos: number; ready: number; warning: number; error: number; unchanged: number; applied: number; skipped: number };
+  notes: string[];
+  rows: PlanImportRowOut[];
+  skipped?: { wo_number: string; message: string }[];
+  restored?: number;
+}
+
+export interface PlanInfo {
+  enabled: boolean;
+  wo_number?: string;
+  setup_number?: string | null;
+  heat_numbers?: string[];
+  commitment_date?: string | null;
+  days_to_commitment?: number | null;
+  plan_status?: PlanStatus;
+  plan_text?: string;
+  this_gate?: PlanGate | null;
+  next_gate?: PlanGate | null;
+  gates?: PlanGate[];
+}
+
+/** Turns an API error (detail may be a string, or {message, issues}) into text. */
+export function planningErrorText(err: any, fallback = "Something went wrong."): string {
+  const d = err?.response?.data?.detail;
+  if (!d) return err?.message || fallback;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) return d.map((x: any) => x?.msg || JSON.stringify(x)).join(", ");
+  if (typeof d === "object") {
+    const issues = Array.isArray(d.issues) ? d.issues.filter((i: any) => i.level === "ERROR").map((i: any) => i.message) : [];
+    return [d.message, ...issues].filter(Boolean).join(" ") || JSON.stringify(d);
+  }
+  return fallback;
+}
+
+export async function getPlanningConfig(): Promise<{ setup_planning_enabled: boolean; at_risk_days: number }> {
+  const { data } = await api.get("/api/v1/planning/config");
+  return data;
+}
+
+export async function getPlanInfo(woNumber: string, stage?: string): Promise<PlanInfo> {
+  const { data } = await api.get(`/api/v1/planning/wo/${encodeURIComponent(woNumber)}/plan-info`, {
+    params: stage ? { stage } : undefined,
+  });
+  return data;
+}
+
+export async function listSetups(status?: "OPEN" | "CLOSED"): Promise<SetupSummary[]> {
+  const { data } = await api.get("/api/v1/planning/setups", { params: status ? { status } : undefined });
+  return data;
+}
+
+export async function createSetup(payload: { setup_number: string; setup_date?: string | null; remarks?: string }): Promise<SetupDetail> {
+  const { data } = await api.post("/api/v1/planning/setups", payload);
+  return data;
+}
+
+export async function getSetupDetail(setupNumber: string): Promise<SetupDetail> {
+  const { data } = await api.get(`/api/v1/planning/setups/${encodeURIComponent(setupNumber)}`);
+  return data;
+}
+
+export async function updateSetup(
+  setupNumber: string,
+  payload: { setup_date?: string | null; remarks?: string; status?: "OPEN" | "CLOSED" }
+): Promise<SetupDetail> {
+  const { data } = await api.patch(`/api/v1/planning/setups/${encodeURIComponent(setupNumber)}`, payload);
+  return data;
+}
+
+export async function mapWorkOrdersToSetup(
+  setupNumber: string,
+  payload: { wo_numbers: string[]; reason: string }
+): Promise<{ mapped: string[]; errors: { wo_number: string; message: string }[] }> {
+  const { data } = await api.post(`/api/v1/planning/setups/${encodeURIComponent(setupNumber)}/work-orders`, payload);
+  return data;
+}
+
+export async function moveWorkOrderToSetup(
+  woNumber: string,
+  payload: { to_setup_number: string; reason: string }
+): Promise<{ wo_number: string; from: string | null; to: string }> {
+  const { data } = await api.post(`/api/v1/planning/work-orders/${encodeURIComponent(woNumber)}/move`, payload);
+  return data;
+}
+
+export async function setWorkOrderHeats(
+  woNumber: string,
+  payload: { heat_numbers: string[]; reason: string }
+): Promise<{ wo_number: string; heat_numbers: string[]; plan_version: number }> {
+  const { data } = await api.put(`/api/v1/planning/work-orders/${encodeURIComponent(woNumber)}/heats`, payload);
+  return data;
+}
+
+export async function updateWorkOrderPlan(
+  woNumber: string,
+  payload: {
+    gates: { stage: string; planned_start?: string | null; planned_end?: string | null; clear?: boolean }[];
+    heat_numbers?: string[];
+    reason: string;
+    expected_plan_version?: number;
+  }
+): Promise<{ wo_number: string; changed_gates: string[]; heat_numbers: string[] | null; warnings: { stage: string; level: string; message: string }[]; plan_version: number }> {
+  const { data } = await api.patch(`/api/v1/planning/work-orders/${encodeURIComponent(woNumber)}/plan`, payload);
+  return data;
+}
+
+export async function getUnassignedWorkOrders(): Promise<PlanWorkOrder[]> {
+  const { data } = await api.get("/api/v1/planning/unassigned");
+  return data.work_orders || [];
+}
+
+export async function getDelayBoard(params?: { setup?: string; status?: string }): Promise<{ today: string; count: number; work_orders: PlanWorkOrder[] }> {
+  const { data } = await api.get("/api/v1/planning/delays", { params });
+  return data;
+}
+
+/** Downloads the setup's Excel sheet (needs the auth header, so it is fetched as a blob). */
+export async function downloadSetupExcel(setupNumber: string): Promise<void> {
+  const res = await api.get(`/api/v1/planning/setups/${encodeURIComponent(setupNumber)}/export.xlsx`, { responseType: "blob" });
+  const cd: string = res.headers?.["content-disposition"] || "";
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  const name = m ? m[1] : `setup-${setupNumber}-plan.xlsx`;
+  const url = window.URL.createObjectURL(res.data as Blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+export async function uploadPlanImport(file: File, setupNumber?: string): Promise<PlanImportOut> {
+  const form = new FormData();
+  form.append("file", file);
+  if (setupNumber) form.append("setup_number", setupNumber);
+  const { data } = await api.post("/api/v1/planning/imports", form);
+  return data;
+}
+
+export async function getPlanImport(importId: string): Promise<PlanImportOut> {
+  const { data } = await api.get(`/api/v1/planning/imports/${encodeURIComponent(importId)}`);
+  return data;
+}
+
+export async function applyPlanImport(importId: string, overwriteStale: boolean): Promise<PlanImportOut> {
+  const { data } = await api.post(`/api/v1/planning/imports/${encodeURIComponent(importId)}/apply`, { overwrite_stale: overwriteStale });
+  return data;
+}
+
+export async function discardPlanImport(importId: string): Promise<PlanImportOut> {
+  const { data } = await api.delete(`/api/v1/planning/imports/${encodeURIComponent(importId)}`);
+  return data;
+}
+
+export async function undoPlanImport(importId: string): Promise<PlanImportOut> {
+  const { data } = await api.post(`/api/v1/planning/imports/${encodeURIComponent(importId)}/undo`);
+  return data;
+}
+
+/** One Excel sheet with the work orders of several setups (default: all open setups). */
+export async function downloadAllSetupsExcel(status: "OPEN" | "CLOSED" | "ALL" = "OPEN"): Promise<void> {
+  const res = await api.get("/api/v1/planning/export-all.xlsx", { params: { status }, responseType: "blob" });
+  const cd: string = res.headers?.["content-disposition"] || "";
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  const url = window.URL.createObjectURL(res.data as Blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = m ? m[1] : "setups-plan.xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+export interface PlanDigest {
+  date: string;
+  counts: { delayed: number; at_risk: number; no_plan: number };
+  delayed: PlanWorkOrder[];
+  at_risk: PlanWorkOrder[];
+}
+
+export async function getPlanDigest(): Promise<PlanDigest> {
+  const { data } = await api.get("/api/v1/planning/digest");
+  return data;
+}
+
+export async function sendPlanDigest(): Promise<PlanDigest & { email_sent: boolean; recipients: string[] }> {
+  const { data } = await api.post("/api/v1/planning/digest/send");
+  return data;
+}
+
+
+// --- working calendar, gate capacity and split work orders (planning information only)
+export interface PlanCalendarDay { day: string; kind: "HOLIDAY" | "WORKING"; note?: string | null }
+export async function getPlanCalendar(start: string, end: string): Promise<{ weekly_off: number[]; days: PlanCalendarDay[] }> {
+  const { data } = await api.get("/api/v1/planning/calendar", { params: { start, end } });
+  return data;
+}
+export async function setPlanCalendarDay(day: string, kind: "HOLIDAY" | "WORKING", note: string): Promise<PlanCalendarDay> {
+  const { data } = await api.put(`/api/v1/planning/calendar/${day}`, { kind, note: note || null });
+  return data;
+}
+export async function deletePlanCalendarDay(day: string): Promise<void> {
+  await api.delete(`/api/v1/planning/calendar/${day}`);
+}
+
+export interface PlanCapacityRow { stage: string; daily_qty: number; note?: string | null }
+export interface CapacityView {
+  start: string;
+  days: { day: string; non_working: string | null }[];
+  stages: { stage: string; daily_qty: number | null; cells: { day: string; load: number; over: boolean }[] }[];
+}
+export async function getPlanCapacity(): Promise<PlanCapacityRow[]> {
+  const { data } = await api.get("/api/v1/planning/capacity");
+  return data;
+}
+export async function setPlanCapacity(stage: string, daily_qty: number, note: string): Promise<PlanCapacityRow> {
+  const { data } = await api.put(`/api/v1/planning/capacity/${encodeURIComponent(stage)}`, { daily_qty, note: note || null });
+  return data;
+}
+export async function deletePlanCapacity(stage: string): Promise<void> {
+  await api.delete(`/api/v1/planning/capacity/${encodeURIComponent(stage)}`);
+}
+export async function getCapacityView(days: number): Promise<CapacityView> {
+  const { data } = await api.get("/api/v1/planning/capacity-view", { params: { days } });
+  return data;
+}
+
+export interface WoSplits {
+  wo_number: string;
+  total_qty: number;
+  primary_setup: string | null;
+  primary_qty: number;
+  splits: { setup_number: string; qty: number; note?: string | null }[];
+}
+export async function getWoSplits(woNumber: string): Promise<WoSplits> {
+  const { data } = await api.get(`/api/v1/planning/work-orders/${encodeURIComponent(woNumber)}/splits`);
+  return data;
+}
+export async function saveWoSplits(woNumber: string, parts: { setup_number: string; qty: number }[], reason: string): Promise<WoSplits> {
+  const { data } = await api.put(`/api/v1/planning/work-orders/${encodeURIComponent(woNumber)}/splits`, { parts, reason });
   return data;
 }

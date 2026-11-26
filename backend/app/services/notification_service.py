@@ -93,3 +93,60 @@ Automated alert from VSPL SMES Engine v3.3 (https://oms.vijayspheroidals.in)
         except Exception as e:
             logger.error(f"Failed to deliver SMTP email alert: {e}")
             return False
+
+
+def _digest_text(digest: dict) -> tuple:
+    c = digest["counts"]
+    subject = f"[VSPL SMES] Plan delays {digest['date']}: {c['delayed']} delayed, {c['at_risk']} at risk"
+    lines = [
+        "VSPL Smart Manufacturing Execution System (SMES) - Planning digest",
+        "=" * 66,
+        f"Date: {digest['date']}   Delayed: {c['delayed']}   At risk: {c['at_risk']}   No plan: {c['no_plan']}",
+        "",
+    ]
+    for title, key in (("DELAYED", "delayed"), ("AT RISK", "at_risk")):
+        rows = digest[key]
+        lines.append(f"{title} ({len(rows)})")
+        if not rows:
+            lines.append("  none")
+        for r in rows:
+            lines.append(
+                f"  {r['wo_number']}  setup {r.get('setup_number') or 'none'}  {r.get('part_number') or ''}  "
+                f"commitment {r.get('commitment_date') or 'n/a'}  {r['plan_text']}"
+            )
+        lines.append("")
+    lines.append("Automated message from VSPL SMES (https://oms.vijayspheroidals.in)")
+    return subject, "\n".join(lines)
+
+
+def send_plan_delay_digest(digest: dict, recipients: list) -> dict:
+    """Email the planning digest. Without SMTP_PASSWORD on the server nothing is emailed; the list is
+    only written to the server log. Returns {email_sent, recipients}."""
+    subject, body = _digest_text(digest)
+    smtp_user = os.environ.get("SMTP_USER", "data.analyst@vijayspheroidals.in")
+    smtp_pass = os.environ.get("SMTP_PASSWORD", os.environ.get("GMAIL_APP_PASSWORD", ""))
+    to = list(dict.fromkeys([r for r in recipients if r]))
+    for extra in os.environ.get("ALERT_EMAIL_RECIPIENTS", "").split(","):
+        if extra.strip() and extra.strip() not in to:
+            to.append(extra.strip())
+    logger.info(f"PLAN DIGEST: {digest['counts']}; recipients: {to}")
+    print(f"[PLAN_DIGEST] {subject}\n{body}")
+    if not smtp_pass or not to:
+        return {"email_sent": False, "recipients": to}
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = smtp_user
+        msg["To"] = ", ".join(to)
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+        with smtplib.SMTP(os.environ.get("SMTP_HOST", "smtp.gmail.com"), int(os.environ.get("SMTP_PORT", "587")), timeout=10) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+        return {"email_sent": True, "recipients": to}
+    except Exception as e:
+        logger.error(f"Failed to deliver the planning digest: {e}")
+        return {"email_sent": False, "recipients": to}
+
+
+NotificationService.send_plan_delay_digest = staticmethod(send_plan_delay_digest)

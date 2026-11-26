@@ -482,6 +482,13 @@ def auto_migrate_schema():
         "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_status ON vendor_dispatches (status);",
         "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_vendor_name ON vendor_dispatches (vendor_name);",
         "CREATE INDEX IF NOT EXISTS ix_vendor_dispatches_dc_number ON vendor_dispatches (dc_number);",
+        # Setup planning (docs/setup-planning-architecture.md). Additive; new tables come from create_all.
+        "ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS setup_id UUID;",
+        "ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS plan_version INTEGER DEFAULT 0 NOT NULL;",
+        "CREATE INDEX IF NOT EXISTS ix_work_orders_setup_id ON work_orders (setup_id);",
+        "ALTER TABLE wo_routes ADD COLUMN IF NOT EXISTS plan_source VARCHAR(12);",
+        "ALTER TABLE wo_routes ADD COLUMN IF NOT EXISTS plan_updated_at TIMESTAMP;",
+
         # Vendor trips (docs/vendor-trips-architecture.md). Additive: existing rows stay
         # source_state NULL = legacy trips with their original accounting.
         "ALTER TABLE vendor_dispatches ADD COLUMN IF NOT EXISTS source_state VARCHAR(20);",

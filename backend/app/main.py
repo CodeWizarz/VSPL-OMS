@@ -15,7 +15,7 @@ from app.api.v1 import (
     auth, oms, production, work_orders, packing,
     dispatch, operations, dashboard, reports, ai, admin, analytics, rejection,
     conversion_mapping, users, migration, masters, po_matching, roles, continuous_casting,
-    mrb, vendor, bsr_stock, planning, activity_log, accounts, subcontract
+    mrb, vendor, bsr_stock, planning, activity_log, accounts, subcontract, setup_planning
 )
 from app.services.seed_service import seed_database_if_empty
 
@@ -116,6 +116,7 @@ app.include_router(mrb.router)
 app.include_router(vendor.router)
 app.include_router(bsr_stock.router)
 app.include_router(planning.router)
+app.include_router(setup_planning.router)
 app.include_router(activity_log.router)
 app.include_router(accounts.router)
 app.include_router(subcontract.router)
