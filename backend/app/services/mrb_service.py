@@ -568,3 +568,17 @@ class MRBService:
             db.commit()
         return len(pending)
 
+
+
+
+def display_state(summary: dict, rejected_only: bool = False) -> str:
+    """Plain label for a stage's MRB summary, for screens: NONE / PENDING / PARTIAL / CLEARED.
+    Display only; it never feeds a movement rule."""
+    if not summary or summary.get("total_tickets", 0) == 0:
+        return "NONE"
+    lock = summary.get("lock_status")
+    if lock == "LOCKED":
+        return "PENDING"
+    if lock == "PARTIAL":
+        return "PARTIAL"
+    return "CLEARED"
