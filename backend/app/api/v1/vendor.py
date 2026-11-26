@@ -23,7 +23,11 @@ from app.core.roles import PRODUCTION_ENTRY_ROLES, MATERIAL_MOVEMENT_ROLES
 
 # Who may send pieces to a vendor from Production Entry: the production entry roles for their
 # own gate (enforced in the service) plus SCM.
-TRIP_SEND_ROLES = tuple(PRODUCTION_ENTRY_ROLES) + (UserRole.SP_MANAGER, UserRole.SP_SUPERVISOR)
+TRIP_SEND_ROLES = tuple(PRODUCTION_ENTRY_ROLES) + tuple(SCM_ROLES)
+
+# Receiving on the earlier-style Receive screen (records that pre-date vendor trips): the usual
+# material-movement roles plus SCM.
+LEGACY_RECEIVE_ROLES = tuple(MATERIAL_MOVEMENT_ROLES) + (UserRole.SCM,)
 
 router = APIRouter(prefix="/api/v1/vendor", tags=["vendor-tracking"])
 
@@ -56,7 +60,7 @@ def get_vendor_summary(
 def receive_from_vendor(
     payload: VendorReceiveRequest,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*MATERIAL_MOVEMENT_ROLES))
+    user: User = Depends(require_roles(*LEGACY_RECEIVE_ROLES))
 ):
     """Receives subcontracted parts returned from a vendor and lands them
     into the designated stage (e.g. FI for final QA, or F2 for in-house finishing)."""

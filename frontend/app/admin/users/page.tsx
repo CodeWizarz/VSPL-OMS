@@ -25,7 +25,7 @@ const SUPERVISED_STAGES = ["f1", "f2", "f3", "sp", "fi", "packing", "dispatch"];
 // old roles: they keep working for existing accounts until converted, but aren't offered.
 const ROLES = [
   "admin", "ceo", "production_manager", "planner", "qa", "quality", "store", "sales", "accounts",
-  "engineering", "data_analyst",
+  "engineering", "data_analyst", "scm",
   ...SUPERVISED_STAGES.flatMap((k) => [`${k}_supervisor`, `${k}_manager`]),
 ];
 const LEGACY_ROLES = new Set(["operator", "machine_operator", "packing", "dispatch", "manufacturing"]);
@@ -40,6 +40,7 @@ function isValidCompanyEmail(emailStr: string): boolean {
 }
 
 function roleLabel(role: string) {
+  if (role === "scm") return "SCM (Supply Chain Manager)";
   return role
     .split("_")
     .map((w) => (["f1", "f2", "f3", "sp", "fi", "ceo", "qa"].includes(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
