@@ -156,6 +156,10 @@ class WOReleaseCreate(BaseModel):
         description="Heat number / cast batch from which parts are produced"
     )
     remarks: Optional[str] = Field(None, max_length=2000)
+    # Setup planning (docs/setup-planning-architecture.md). Mandatory when SETUP_PLANNING_ENABLED is on.
+    setup_number: Optional[str] = Field(None, max_length=60, description="The setup (production day) this work order is planned in")
+    new_setup_date: Optional[date] = Field(None, description="Production day, to create the setup if it does not exist (PPC only)")
+    heat_numbers: Optional[List[str]] = Field(None, max_length=50, description="Heat numbers used; required when the route includes F1")
 
 class StagePlanEdit(BaseModel):
     stage: str = Field(..., min_length=1, max_length=40)
@@ -188,6 +192,7 @@ class WOReleaseResponse(BaseModel):
     route: str
     casting_process: Optional[str] = None
     heat_number: Optional[str] = None
+    setup_number: Optional[str] = None
     stage_targets: dict[str, int]
     message: str
 

@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # Vendor trips (docs/vendor-trips-architecture.md). Off = today's behaviour for NEW vendor
     # entries; trips already created are always understood by the recompute either way.
     VENDOR_TRIPS_ENABLED: bool = False
+    # Setup planning and scheduling (docs/setup-planning-architecture.md). Off = release works as today
+    # and the planning module is hidden/refused. On = a setup number is mandatory at release.
+    SETUP_PLANNING_ENABLED: bool = False
+    SETUP_PLANNING_AT_RISK_DAYS: int = 2
+    # Lets a scheduler (for example Cloud Scheduler) call POST /api/v1/planning/digest/run with the header
+    # X-Planning-Digest-Token. Empty = that trigger is disabled.
+    PLANNING_DIGEST_TOKEN: str = ""
+    PLANNING_WEEKLY_OFF: str = "6"          # weekdays the plant is closed (0=Mon .. 6=Sun), comma separated
 
     @property
     def cors_origins_list(self) -> list[str]:

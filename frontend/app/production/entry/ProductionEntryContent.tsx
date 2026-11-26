@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
+import { PlanBanner } from "@/app/components/planning/PlanUi";
 import { useSearchParams } from "next/navigation";
 import {
   Factory,
@@ -849,6 +850,8 @@ export function ProductionEntryContent() {
 
         {woData && (
           <div className="space-y-6">
+            {/* Plan for this work order and gate (setup planning; read-only, only when switched on) */}
+            <PlanBanner woNumber={woData.wo_number} stage={selectedStage} />
             {/* Vendor Alert Banner if WO is currently at a vendor */}
             {Boolean(woData.is_at_vendor || woData.active_vendor_name || woData.vendor_name) && (
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-2xl border-2 border-purple-400 dark:border-purple-600 bg-purple-50 dark:bg-purple-950/40 shadow-sm">

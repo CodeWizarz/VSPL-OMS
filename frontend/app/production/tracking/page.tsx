@@ -27,7 +27,13 @@ import {
 } from "lucide-react";
 import { AppShell } from "@/app/components/layout/AppShell";
 import { Badge, getRAGVariant } from "@/app/components/ui/Badge";
-import { getWorkOrders, getWorkOrderTracking, declareWOShortfall } from "@/lib/api";
+import { getWorkOrders, getWorkOrderTracking, declareWOShortfall, getPlanInfo, PlanGate } from "@/lib/api";
+import { GateCell, PlanBanner } from "@/app/components/planning/PlanUi";
+
+function planKey(stage: string): string {
+  const v = (stage || "").trim().toUpperCase();
+  return v === "PACKING / BSR" || v === "PACKING/BSR" ? "PACKING" : v;
+}
 
 export default function WorkOrderTrackingPage() {
   return (
@@ -45,6 +51,8 @@ function WorkOrderTrackingPageInner() {
   const [selectedWO, setSelectedWO] = useState<string>(initialWO);
   const [loading, setLoading] = useState(false);
   const [woData, setWoData] = useState<any>(null);
+  // Planned dates per gate (setup planning; stays null when switched off)
+  const [planGates, setPlanGates] = useState<Record<string, PlanGate> | null>(null);
   const [wosList, setWosList] = useState<any[]>([]);
   const [error, setError] = useState("");
 
@@ -98,6 +106,24 @@ function WorkOrderTrackingPageInner() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    let alive = true;
+    if (!woData?.wo_number) {
+      setPlanGates(null);
+      return;
+    }
+    getPlanInfo(woData.wo_number)
+      .then((info) => {
+        if (!alive) return;
+        if (!info.enabled || !info.gates) return setPlanGates(null);
+        setPlanGates(Object.fromEntries(info.gates.map((g) => [planKey(g.stage), g])));
+      })
+      .catch(() => alive && setPlanGates(null));
+    return () => {
+      alive = false;
+    };
+  }, [woData?.wo_number]);
 
   const f1Timeline = woData?.timeline?.find((t: any) => t.stage === "F1");
   const f1Remaining = f1Timeline
@@ -278,6 +304,7 @@ function WorkOrderTrackingPageInner() {
 
         {woData && (
           <div className="space-y-6">
+            <PlanBanner woNumber={woData.wo_number} />
             {/* WO Overview Header Card */}
             <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 shadow-sm">
               <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6 pb-6 border-b border-zinc-100 dark:border-zinc-800">
@@ -474,6 +501,7 @@ function WorkOrderTrackingPageInner() {
                     <tr>
                       <th className="py-2.5 px-3">Seq</th>
                       <th className="py-2.5 px-3">Stage</th>
+                      {planGates && <th className="py-2.5 px-3">Planned end</th>}
                       <th className="py-2.5 px-3 text-right">Target Qty</th>
                       <th className="py-2.5 px-3 text-right text-emerald-600">OK Completed</th>
                       <th className="py-2.5 px-3 text-right text-blue-600">On-Hand WIP</th>
@@ -488,6 +516,9 @@ function WorkOrderTrackingPageInner() {
                       <tr key={stg.stage} className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/40">
                         <td className="py-3 px-3 text-zinc-400 font-mono">{stg.sequence}</td>
                         <td className="py-3 px-3 font-mono font-bold text-zinc-900 dark:text-zinc-100">{stg.stage}</td>
+                        {planGates && (
+                          <td className="py-3 px-3"><GateCell gate={planGates[planKey(stg.stage)]} /></td>
+                        )}
                         <td className="py-3 px-3 text-right text-zinc-700 dark:text-zinc-300 font-mono font-bold">{stg.target_qty}</td>
                         <td className="py-3 px-3 text-right text-emerald-600 font-mono font-bold">{stg.ok_completed_qty}</td>
                         <td className="py-3 px-3 text-right text-blue-600 font-mono font-bold">{stg.on_hand_wip}</td>

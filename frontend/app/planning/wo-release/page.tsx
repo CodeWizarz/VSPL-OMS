@@ -56,7 +56,11 @@ import {
   getPlanningSummary,
   WorkOrderListItem,
   PlanningSummary,
-  updateWorkOrder
+  updateWorkOrder,
+  getPlanningConfig,
+  listSetups,
+  planningErrorText,
+  SetupSummary,
 } from "@/lib/api";
 
 const ALL_POSSIBLE_STAGES = [
@@ -140,6 +144,31 @@ function WOReleasePageInner() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [successResult, setSuccessResult] = useState<any>(null);
+
+  // Setup planning (docs/setup-planning-architecture.md): when switched on, a setup number is
+  // mandatory at release, and heat numbers are mandatory for routes that include F1.
+  const [planningEnabled, setPlanningEnabled] = useState(false);
+  const [openSetups, setOpenSetups] = useState<SetupSummary[]>([]);
+  const [setupsListed, setSetupsListed] = useState(true);   // false when this user may not list setups
+  const [setupChoice, setSetupChoice] = useState("");        // an existing setup number, "__new__", or typed text
+  const [newSetupNumber, setNewSetupNumber] = useState("");
+  const [newSetupDate, setNewSetupDate] = useState("");
+
+  useEffect(() => {
+    getPlanningConfig()
+      .then((c) => {
+        setPlanningEnabled(!!c?.setup_planning_enabled);
+        if (c?.setup_planning_enabled) {
+          listSetups("OPEN")
+            .then((l) => {
+              setOpenSetups(l);
+              setSetupsListed(true);
+            })
+            .catch(() => setSetupsListed(false));
+        }
+      })
+      .catch(() => setPlanningEnabled(false));
+  }, []);
 
   // Release chain: Engineering Release -> Manufacturing Release -> WO Release
   const [chainBusy, setChainBusy] = useState<"engineering" | "manufacturing" | null>(null);
@@ -587,6 +616,27 @@ function WOReleasePageInner() {
       return;
     }
 
+    // Setup planning: setup number (and heats for F1 routes) are mandatory when it is switched on.
+    let setupFields: { setup_number?: string; new_setup_date?: string; heat_numbers?: string[] } = {};
+    if (planningEnabled) {
+      const heats = heatNumber.split(/[,;\n]/).map((h) => h.trim()).filter(Boolean);
+      const creating = setupChoice === "__new__";
+      const chosenNumber = (creating ? newSetupNumber : setupChoice).trim();
+      if (!chosenNumber) {
+        setError(creating ? "Enter the new setup number." : "Choose the setup this work order is planned in.");
+        return;
+      }
+      if (creating && !newSetupDate) {
+        setError("Give the production day to create the new setup.");
+        return;
+      }
+      if (selectedStages.includes("F1") && heats.length === 0) {
+        setError("Enter at least one heat number (the route includes F1).");
+        return;
+      }
+      setupFields = { setup_number: chosenNumber, new_setup_date: creating ? newSetupDate : undefined, heat_numbers: heats };
+    }
+
     setLoading(true);
 
     try {
@@ -595,15 +645,16 @@ function WOReleasePageInner() {
         physical_wo_qty: qty,
         route_stages: selectedStages,
         casting_process: castingProcess || undefined,
-        heat_number: heatNumber.trim() || undefined,
+        heat_number: planningEnabled ? undefined : heatNumber.trim() || undefined,
         remarks: remarks,
+        ...setupFields,
       });
 
       setSuccessResult(res);
       fetchPlanningSummary();
       handleSearch(searchQuery, releaseFilter, sortBy, fromDate, toDate, dateType);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || "Failed to release Work Order.");
+      setError(planningErrorText(err, "Failed to release Work Order."));
     } finally {
       setLoading(false);
     }
@@ -778,6 +829,11 @@ function WOReleasePageInner() {
                 <p className="text-xs text-emerald-600 dark:text-emerald-400">
                   Route: <strong>{successResult.route}</strong>
                 </p>
+                {successResult.setup_number && (
+                  <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5">
+                    Setup: <strong className="font-mono">{successResult.setup_number}</strong>
+                  </p>
+                )}
                 {successResult.casting_process && (
                   <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5">
                     Casting Process:{" "}
@@ -1852,14 +1908,15 @@ function WOReleasePageInner() {
                   <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300 flex items-center justify-between">
                     <span className="flex items-center gap-1">
                       <Flame className="h-3.5 w-3.5 text-orange-500" />
-                      <span>Heat Number / Batch #</span>
+                      <span>{planningEnabled ? `Heat numbers${selectedStages.includes("F1") ? " *" : ""}` : "Heat Number / Batch #"}</span>
                     </span>
-                    <span className="text-[10px] text-zinc-400 font-normal">Melt / continuous casting</span>
+                    <span className="text-[10px] text-zinc-400 font-normal">{planningEnabled ? "Several allowed, comma separated" : "Melt / continuous casting"}</span>
                   </label>
                   <div className="relative mt-1.5">
                     <input
                       type="text"
-                      placeholder="e.g. HN-2026-088, CAST-01"
+                      placeholder={planningEnabled ? "e.g. H-771, H-772" : "e.g. HN-2026-088, CAST-01"}
+                      aria-label={planningEnabled ? "Heat numbers" : "Heat number"}
                       value={heatNumber}
                       onChange={(e) => setHeatNumber(e.target.value)}
                       className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3.5 py-2.5 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-blue-500 shadow-xs uppercase"
@@ -1867,6 +1924,54 @@ function WOReleasePageInner() {
                   </div>
                 </div>
               </div>
+
+          {/* Setup (production day) -- mandatory when setup planning is switched on */}
+          {planningEnabled && (
+            <div className="rounded-xl border border-orange-200 dark:border-orange-900/60 bg-orange-50/50 dark:bg-orange-950/20 p-3.5 space-y-3">
+              <label htmlFor="release-setup" className="text-xs font-bold text-zinc-700 dark:text-zinc-300 block">
+                Setup number * <span className="font-normal text-zinc-400">the production day this work order is planned in</span>
+              </label>
+              {setupsListed ? (
+                <select
+                  id="release-setup"
+                  value={setupChoice}
+                  onChange={(e) => setSetupChoice(e.target.value)}
+                  className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3.5 py-2.5 text-xs font-bold text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="">Choose an open setup</option>
+                  {openSetups.map((s) => (
+                    <option key={s.setup_number} value={s.setup_number}>
+                      {s.setup_number}{s.setup_date ? ` · ${formatDate(s.setup_date)}` : ""} · {s.wo_count} WO
+                    </option>
+                  ))}
+                  <option value="__new__">Create a new setup...</option>
+                </select>
+              ) : (
+                <input
+                  id="release-setup"
+                  type="text"
+                  value={setupChoice}
+                  onChange={(e) => setSetupChoice(e.target.value)}
+                  placeholder="Type the setup number (PPC creates new setups)"
+                  className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3.5 py-2.5 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-blue-500"
+                />
+              )}
+              {setupChoice === "__new__" && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="release-new-setup" className="text-[11px] font-bold text-zinc-600 dark:text-zinc-400 block mb-1">New setup number *</label>
+                    <input id="release-new-setup" type="text" value={newSetupNumber} onChange={(e) => setNewSetupNumber(e.target.value)} maxLength={60}
+                      className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3.5 py-2.5 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-blue-500" />
+                  </div>
+                  <div>
+                    <label htmlFor="release-new-setup-day" className="text-[11px] font-bold text-zinc-600 dark:text-zinc-400 block mb-1">Production day *</label>
+                    <input id="release-new-setup-day" type="date" value={newSetupDate} onChange={(e) => setNewSetupDate(e.target.value)}
+                      className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3.5 py-2.5 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-blue-500" />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Material Source & Casting Process Selector */}
           <div>

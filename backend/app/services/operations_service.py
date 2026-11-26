@@ -41,6 +41,7 @@ from app.services.oms_integration_service import (
 from app.services.conversion_mapping_service import ConversionMappingService
 from app.services.stage_plan_service import compute_stage_plan
 from app.services.stage_plan_service import apply_stage_plan
+from app.services.setup_planning_service import SetupPlanningService
 
 def validate_document_url(url: Optional[str]) -> Optional[str]:
     if not url:
@@ -189,7 +190,10 @@ class OperationsService:
                         stage_status="Pending",
                         planned_start=plan[stg][0],
                         planned_end=plan[stg][1],
+                        plan_source="RELEASE",
+                        plan_updated_at=datetime.now(),
                     ))
+                wo.plan_version = (wo.plan_version or 0) + 1   # the plan changed: an older Excel plan is stale
                 db.flush()
                 changes.append(f"Route {' -> '.join(current_route)} -> {' -> '.join(new_route)}")
                 OMSIntegrationService.recompute_work_order(db, wo)
@@ -214,6 +218,9 @@ class OperationsService:
                 if (start, end) != (row.planned_start, row.planned_end):
                     changes.append(f"{row.stage} plan {row.planned_start}..{row.planned_end} -> {start}..{end}")
                     row.planned_start, row.planned_end = start, end
+                    row.plan_source = "MANUAL"
+                    row.plan_updated_at = datetime.now()
+                    wo.plan_version = (wo.plan_version or 0) + 1   # an older Excel plan is now stale
 
         if changes:
             db.add(AuditLog(
@@ -1705,6 +1712,11 @@ class OperationsService:
                     detail="Continuous Casting Work Orders bypass F1 and require at least one downstream manufacturing stage (e.g. F2)."
                 )
 
+        # Setup planning: when switched on, a setup number (and heat numbers for F1 routes) is mandatory.
+        # Checked before anything on the work order changes; a refusal leaves the work order untouched.
+        release_setup = SetupPlanningService.bind_release(
+            db, wo, req.setup_number, req.new_setup_date, req.heat_numbers, req.heat_number, stages, current_user)
+
         wo.physical_wo_qty = req.physical_wo_qty
         wo.released_by = current_user.full_name if current_user else "Planner"
         wo.release_date = datetime.now()
@@ -1773,6 +1785,7 @@ class OperationsService:
             route=" -> ".join(stages),
             casting_process=wo.casting_process,
             heat_number=wo.heat_number,
+            setup_number=release_setup.setup_number if release_setup else None,
             stage_targets=targets,
             message=f"Work Order '{wo.wo_number}' successfully released with {req.physical_wo_qty} pieces."
         )

@@ -108,6 +108,10 @@ PACKING_ROLES = (UserRole.ADMIN, UserRole.DISPATCH, UserRole.PACKING) + (UserRol
 # former DISPATCH_ROLES, which included Production Manager.
 DISPATCH_EXECUTION_ROLES = (UserRole.ADMIN, UserRole.DISPATCH) + DISPATCH_STAGE_ROLES
 
+# Setup planning and scheduling (docs/setup-planning-architecture.md): PPC (the planner role) and admin.
+# Everyone else neither sees the module nor can call its endpoints.
+PPC_PLANNING_ROLES = (UserRole.ADMIN, UserRole.PLANNER)
+
 # User account administration: creating accounts, generating/resetting temporary
 # passwords, activating/deactivating, role assignment. Matches the existing
 # /auth/register gate (require_roles(UserRole.ADMIN)) -- Super Admin only.

@@ -18,6 +18,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { AppShell } from "@/app/components/layout/AppShell";
+import { PlanStatusChip, fmtDay } from "@/app/components/planning/PlanUi";
 import { Badge, getRAGVariant } from "@/app/components/ui/Badge";
 import { getWorkQueue, getWIPMatrix, getCurrentUser, QueueItem, StageQueue } from "@/lib/api";
 import { QUEUE_STAGES, resolveWorkspace, supervisorStage } from "@/lib/workspaces";
@@ -313,6 +314,14 @@ export default function MyWorkQueuePage() {
                                   </Link>
                                 )}
                                 <p className="text-[11px] text-zinc-400">Now at {r.current_stage}</p>
+                                {r.setup_number && (
+                                  <p className="text-[11px] text-zinc-500">
+                                    Setup <span className="font-mono font-semibold">{r.setup_number}</span>
+                                    {r.heat_numbers && r.heat_numbers.length > 0 && (
+                                      <> · Heat <span className="font-mono">{r.heat_numbers.join(", ")}</span></>
+                                    )}
+                                  </p>
+                                )}
                               </td>
                               <td className="px-4 py-3">
                                 <p className="font-semibold text-zinc-800 dark:text-zinc-200">{r.customer_name || "—"}</p>
@@ -340,6 +349,12 @@ export default function MyWorkQueuePage() {
                               </td>
                               <td className="px-4 py-3">
                                 <p className="text-zinc-700 dark:text-zinc-300">{formatDate(r.delivery_date)}</p>
+                                {r.commitment_date && r.commitment_date !== r.delivery_date && (
+                                  <p className="text-[11px] text-zinc-500">Commitment {fmtDay(r.commitment_date)}</p>
+                                )}
+                                {r.plan_status && (
+                                  <div className="mt-1"><PlanStatusChip status={r.plan_status} text={r.plan_text} /></div>
+                                )}
                                 <Badge variant={getRAGVariant(r.delivery_risk || r.status)} size="sm">
                                   {(r.delivery_risk || r.status || "").toString().toUpperCase()}
                                 </Badge>

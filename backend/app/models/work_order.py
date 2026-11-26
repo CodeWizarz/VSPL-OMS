@@ -71,6 +71,11 @@ class WorkOrder(Base):
     replacement_reason = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+    # Setup planning (docs/setup-planning-architecture.md): the one setup this work order is planned in
+    # (empty for work orders released before setup planning) and a counter that goes up whenever its
+    # plan dates change, so an old Excel sheet is recognised as stale.
+    setup_id = Column(GUID, ForeignKey("planning_setups.id"), nullable=True, index=True)
+    plan_version = Column(Integer, nullable=False, default=0, server_default="0")
 
     order = relationship("Order", back_populates="work_orders")
     source_wo = relationship("WorkOrder", remote_side=[id], foreign_keys=[source_wo_id])
@@ -117,5 +122,9 @@ class WORoute(Base):
     # release, editable by PPC / own-stage managers; drive the shop-floor work queue.
     planned_start = Column(Date, nullable=True)
     planned_end = Column(Date, nullable=True)
+    # Where the dates came from (RELEASE / EXCEL / MANUAL) and when they last changed
+    # (docs/setup-planning-architecture.md).
+    plan_source = Column(String(12), nullable=True)
+    plan_updated_at = Column(DateTime(timezone=True), nullable=True)
 
     work_order = relationship("WorkOrder", back_populates="routes")
