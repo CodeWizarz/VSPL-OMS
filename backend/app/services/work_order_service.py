@@ -712,6 +712,18 @@ class WorkOrderService:
             last_mov = next((m for m in reversed(movements) if m.from_stage == stg or m.to_stage == stg), None)
             rag = r.stage_status or calculate_rag_status(ok_qty, rej, inproc, r.stage_target_qty)
 
+            # MRB status for display (never affects the timeline if it cannot be worked out)
+            mrb_info = {"mrb_state": "NONE", "mrb_pending_qty": 0, "mrb_pending_tickets": [], "mrb_approved_qty": 0}
+            try:
+                from app.services.mrb_service import MRBService, display_state
+                _sm = MRBService.get_stage_mrb_summary(
+                    db=db, work_order_id=wo.id, stage=stg, onhand_qty=max(onhand, 0),
+                    already_moved=max((wip_rec.ok_qty - wip_rec.onhand_qty) if wip_rec else 0, 0))
+                mrb_info = {"mrb_state": display_state(_sm), "mrb_pending_qty": _sm["pending_qty"],
+                            "mrb_pending_tickets": _sm["pending_tickets"], "mrb_approved_qty": _sm["total_approved_good"]}
+            except Exception:
+                pass
+
             timeline_steps.append(StageTimelineStep(
                 stage=stg,
                 sequence=r.sequence,
@@ -729,7 +741,8 @@ class WorkOrderService:
                 last_movement_at=last_mov.created_at if last_mov else None,
                 machine=last_mov.machine_id if last_mov else None,
                 operator=last_mov.operator_name if last_mov else None,
-                duration_hours=2.5 if is_comp else (1.0 if is_cur else 0.0)
+                duration_hours=2.5 if is_comp else (1.0 if is_cur else 0.0),
+                **mrb_info
             ))
 
         yield_pct = round(100.0 * max(wo.physical_wo_qty - total_rejected, 0) / wo.physical_wo_qty, 1) if wo.physical_wo_qty > 0 else 100.0

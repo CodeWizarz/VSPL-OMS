@@ -65,6 +65,28 @@ const MACHINES = [
   { id: "M-PACK-01", name: "M-PACK-01 (Packaging & Banding Bay)", stage: "PACKING" },
 ];
 
+// Read-only Material Review Board (MRB) status. Display only: the move rules are unchanged.
+function mrbLabel(state?: string, pendingQty = 0, tickets: string[] = [], approvedQty = 0) {
+  const t = tickets.length ? " (" + tickets.slice(0, 3).join(", ") + ")" : "";
+  switch (state) {
+    case "CLEARED":
+      return { text: "MRB cleared", detail: `${approvedQty} pcs approved`, tone: "emerald" as const };
+    case "PARTIAL":
+      return { text: "MRB partly cleared", detail: `${approvedQty} approved, ${pendingQty} pending${t}`, tone: "amber" as const };
+    case "PENDING":
+      return { text: "MRB pending", detail: `${pendingQty} pcs waiting${t}`, tone: "rose" as const };
+    default:
+      return { text: "No MRB review yet", detail: "Nothing produced here to review", tone: "zinc" as const };
+  }
+}
+
+const MRB_TONES: Record<string, string> = {
+  emerald: "bg-emerald-50 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300",
+  amber: "bg-amber-50 dark:bg-amber-950/30 border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-300",
+  rose: "bg-rose-50 dark:bg-rose-950/30 border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-300",
+  zinc: "bg-zinc-50 dark:bg-zinc-950/50 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400",
+};
+
 export function MovePartsContent() {
   const searchParams = useSearchParams();
   const urlWO = searchParams?.get("wo");
@@ -837,6 +859,16 @@ export function MovePartsContent() {
                           }`}
                         >
                           <span>{step.stage}</span>
+                          {step.mrb_state && step.mrb_state !== "NONE" && (
+                            <span
+                              title={mrbLabel(step.mrb_state, step.mrb_pending_qty, step.mrb_pending_tickets, step.mrb_approved_qty).detail}
+                              className={`text-[9px] px-1 rounded font-extrabold uppercase ${
+                                step.mrb_state === "CLEARED" ? "bg-emerald-500 text-white" : step.mrb_state === "PARTIAL" ? "bg-amber-500 text-white" : "bg-rose-500 text-white"
+                              }`}
+                            >
+                              MRB {step.mrb_state === "CLEARED" ? "✓" : step.mrb_state === "PARTIAL" ? "½" : "⏳"}
+                            </span>
+                          )}
                           {onHand > 0 && !isOrigin && (
                             <span className="text-[9px] bg-purple-200 dark:bg-purple-900/60 text-purple-900 dark:text-purple-100 px-1 rounded font-extrabold">
                               {onHand}
@@ -866,7 +898,7 @@ export function MovePartsContent() {
                     Production &amp; Material Summary — Stage {stageState.stage}
                   </h3>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 text-xs">
                   <div className="rounded-xl bg-zinc-50 dark:bg-zinc-950/50 border border-zinc-200 dark:border-zinc-800 p-3">
                     <span className="block text-[10px] uppercase font-bold text-zinc-400">Target / Required</span>
                     <span className="font-mono font-extrabold text-zinc-900 dark:text-zinc-100 text-sm">{stageState.target_qty} pcs</span>
@@ -891,6 +923,16 @@ export function MovePartsContent() {
                     <span className="block text-[10px] uppercase font-bold text-amber-700 dark:text-amber-400">Remaining to Produce</span>
                     <span className="font-mono font-extrabold text-amber-700 dark:text-amber-400 text-sm">{stageState.in_process_qty} pcs</span>
                   </div>
+                  {(() => {
+                    const m = mrbLabel(stageState.mrb_state, stageState.mrb_pending_qty, stageState.pending_mrb_tickets || [], stageState.mrb_approved_qty);
+                    return (
+                      <div className={`rounded-xl border p-3 ${MRB_TONES[m.tone]}`} data-testid="mrb-status-card">
+                        <span className="block text-[10px] uppercase font-bold">MRB Review</span>
+                        <span className="block font-extrabold text-sm">{m.text}</span>
+                        <span className="block text-[10px] font-semibold opacity-80">{m.detail}</span>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             )}
@@ -980,6 +1022,14 @@ export function MovePartsContent() {
                     <p className="text-xs text-zinc-600 dark:text-zinc-400 max-w-lg mx-auto font-semibold">
                       {reason}
                     </p>
+                    {(() => {
+                      const m = mrbLabel(stageState?.mrb_state, stageState?.mrb_pending_qty, stageState?.pending_mrb_tickets || [], stageState?.mrb_approved_qty);
+                      return (
+                        <p className={`inline-block rounded-full border px-3 py-1 text-[11px] font-extrabold ${MRB_TONES[m.tone]}`}>
+                          {m.text} · {m.detail}
+                        </p>
+                      );
+                    })()}
                     <div className="flex flex-wrap items-center justify-center gap-4 pt-2 text-xs">
                       <div className="rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 px-4 py-2">
                         <span className="block text-[10px] uppercase font-bold text-zinc-400">Current Stage</span>

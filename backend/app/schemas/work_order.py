@@ -93,6 +93,12 @@ class StageTimelineStep(BaseModel):
     machine: Optional[str] = None
     operator: Optional[str] = None
     duration_hours: Optional[float] = None
+    # Read-only Material Review Board status of this stage (display only; movement rules are unchanged):
+    # NONE (no review ticket), PENDING (all waiting), PARTIAL (some cleared, some waiting), CLEARED.
+    mrb_state: str = "NONE"
+    mrb_pending_qty: int = 0
+    mrb_pending_tickets: List[str] = []
+    mrb_approved_qty: int = 0
 
 class TransactionHistoryItem(BaseModel):
     id: str
