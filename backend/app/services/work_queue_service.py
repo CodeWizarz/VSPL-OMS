@@ -10,6 +10,8 @@ from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
+
 from app.core.departments import normalize_stage
 from app.models.production_movement import StageWIP
 from app.models.work_order import WorkOrder, WORoute, WOStatus
@@ -95,6 +97,30 @@ class WorkQueueService:
                 "bucket": _bucket(planned_end, today, days),
                 "delivery_risk": calculate_delivery_risk(delivery, wo.current_stage or route_stages[0], status_value, route_stages),
             })
+
+        # Setup planning (docs/setup-planning-architecture.md): show the setup, heats, commitment date and
+        # the plan state next to each work order. Read-only; only when the switch is on.
+        if settings.SETUP_PLANNING_ENABLED and items:
+            from app.models.setup_planning import PlanningSetup, WOHeat
+            from app.services import plan_delay_service
+
+            by_no = {w.wo_number: w for w in active}
+            in_queue = [by_no[i["wo_number"]] for i in items if i["wo_number"] in by_no]
+            evs = plan_delay_service.evaluate_work_orders(db, in_queue, today)
+            setup_names = {str(s.id): s.setup_number for s in db.query(PlanningSetup).all()}
+            heats: Dict[str, List[str]] = {}
+            for h in db.query(WOHeat).filter(WOHeat.work_order_id.in_([w.id for w in in_queue])).all():
+                heats.setdefault(str(h.work_order_id), []).append(h.heat_number)
+            for i in items:
+                w = by_no.get(i["wo_number"])
+                if w is None:
+                    continue
+                ev = evs[str(w.id)]
+                i["setup_number"] = setup_names.get(str(w.setup_id)) if w.setup_id else None
+                i["heat_numbers"] = heats.get(str(w.id), [])
+                i["commitment_date"] = ev["commitment_date"]
+                i["plan_status"] = ev["status"]
+                i["plan_text"] = ev["text"]
 
         items.sort(key=lambda i: (i["days_to_due"] is None, i["days_to_due"] if i["days_to_due"] is not None else 0))
         counts = {b: {"wos": 0, "qty": 0} for b in BUCKETS}

@@ -101,12 +101,16 @@ MELTING_ENTRY_ROLES = (UserRole.ADMIN, UserRole.PRODUCTION_MANAGER, UserRole.QA,
 # Packing/BSR processing. Per spec this is Dispatch's remit ("Packing/BSR" is listed
 # under the Dispatch role); the dedicated PACKING role (an existing UserRole value
 # with no prior backend semantics) is also granted, since it exists for exactly this.
-PACKING_ROLES = (UserRole.ADMIN, UserRole.DISPATCH, UserRole.PACKING) + (UserRole.PACKING_SUPERVISOR, UserRole.PACKING_MANAGER) + DISPATCH_STAGE_ROLES
+PACKING_ROLES = (UserRole.ADMIN, UserRole.DISPATCH, UserRole.PACKING) + (UserRole.PACKING_SUPERVISOR, UserRole.PACKING_MANAGER) + DISPATCH_STAGE_ROLES + (UserRole.SCM,)
 
 # Final dispatch execution. Per spec, Production Manager explicitly cannot execute
 # final dispatch ("Cannot: final dispatch") -- this is intentionally narrower than the
 # former DISPATCH_ROLES, which included Production Manager.
-DISPATCH_EXECUTION_ROLES = (UserRole.ADMIN, UserRole.DISPATCH) + DISPATCH_STAGE_ROLES
+DISPATCH_EXECUTION_ROLES = (UserRole.ADMIN, UserRole.DISPATCH) + DISPATCH_STAGE_ROLES + (UserRole.SCM,)
+
+# Setup planning and scheduling (docs/setup-planning-architecture.md): PPC (the planner role) and admin.
+# Everyone else neither sees the module nor can call its endpoints.
+PPC_PLANNING_ROLES = (UserRole.ADMIN, UserRole.PLANNER)
 
 # User account administration: creating accounts, generating/resetting temporary
 # passwords, activating/deactivating, role assignment. Matches the existing
@@ -156,7 +160,7 @@ ACCOUNTS_ROLES = (UserRole.ADMIN, UserRole.ACCOUNTS, UserRole.CEO)
 # Commercial reports (PO -> dispatch -> collection cycle, invoices) are visible to the
 # commercial side: Admin, CEO, Sales, Accounts and Planner. (Ported from phase-2 main.)
 COMMERCIAL_REPORT_ROLES = (
-    UserRole.ADMIN, UserRole.CEO, UserRole.SALES, UserRole.ACCOUNTS, UserRole.PLANNER,
+    UserRole.ADMIN, UserRole.CEO, UserRole.SALES, UserRole.ACCOUNTS, UserRole.PLANNER, UserRole.SCM,
 )
 
 # Engineering generates Work Orders from OARs (WO Generation) and can view the Customer

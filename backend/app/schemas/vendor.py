@@ -87,6 +87,7 @@ class VendorDispatchItem(BaseModel):
     inward_dc_number: Optional[str]
     remarks: Optional[str]
     days_at_vendor: int
+    gate_planned_end: Optional[str] = None
     source_state: Optional[str] = None
     origin: Optional[str] = None
     process_name: Optional[str] = None

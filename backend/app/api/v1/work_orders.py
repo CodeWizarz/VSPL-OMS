@@ -1,5 +1,5 @@
 from app.core.gate_scope import deny_if_supervisor, filter_to_gate, require_own_stage, require_wo_at_gate, supervisor_gate, wo_ids_at_gate
-from datetime import date
+from datetime import date, datetime
 from pydantic import BaseModel, Field
 from app.core.departments import STAGE_OF_ROLE, normalize_stage
 from app.core.roles import PLANNING_ROLES, STAGE_MANAGER_ROLES, WO_GENERATION_ROLES
@@ -82,7 +82,10 @@ def update_stage_plan(
         if (start, end) != (row.planned_start, row.planned_end):
             changes.append(f"{row.stage} plan {row.planned_start}..{row.planned_end} -> {start}..{end}")
             row.planned_start, row.planned_end = start, end
+            row.plan_source = "MANUAL"
+            row.plan_updated_at = datetime.now()
     if changes:
+        wo.plan_version = (wo.plan_version or 0) + 1   # an older Excel plan is now stale
         db.add(AuditLog(user_id=user.id, user_name=user.full_name, action="WO_STAGE_PLAN_EDITED",
                         entity="WorkOrder", entity_id=wo.wo_number, new_value="; ".join(changes)[:2000], details=payload.reason))
         db.commit()

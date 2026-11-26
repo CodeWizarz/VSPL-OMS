@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
+import { PlanBanner } from "@/app/components/planning/PlanUi";
 import { useSearchParams } from "next/navigation";
 import {
   Factory,
@@ -96,6 +97,8 @@ export function ProductionEntryContent() {
   const [formError, setFormError] = useState("");
   const [availableWOs, setAvailableWOs] = useState<any[]>([]);
   const [currentUser, setCurrentUser] = useState<any>(null);
+  // SCM (Supply Chain Manager) only sends material to vendors here; in-house production is not theirs.
+  const isScmOnly = !!currentUser && ((currentUser as any).roles?.length ? (currentUser as any).roles : [(currentUser as any).role]).every((r: string) => r === "scm");
   const [activeGate, setActiveGate] = useState<string>("ALL");
   const [isGateLocked, setIsGateLocked] = useState<boolean>(false);
 
@@ -178,6 +181,7 @@ export function ProductionEntryContent() {
     getCurrentUser()
       .then((user) => {
         setCurrentUser(user);
+        if ((user.roles?.length ? user.roles : [user.role]).every((r: string) => r === "scm")) setProductionType("VENDOR");
         const resolved = resolveAssignedStage(user);
         if (resolved.stage && resolved.isLocked) {
           setActiveGate(resolved.stage);
@@ -849,6 +853,8 @@ export function ProductionEntryContent() {
 
         {woData && (
           <div className="space-y-6">
+            {/* Plan for this work order and gate (setup planning; read-only, only when switched on) */}
+            <PlanBanner woNumber={woData.wo_number} stage={selectedStage} />
             {/* Vendor Alert Banner if WO is currently at a vendor */}
             {Boolean(woData.is_at_vendor || woData.active_vendor_name || woData.vendor_name) && (
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-2xl border-2 border-purple-400 dark:border-purple-600 bg-purple-50 dark:bg-purple-950/40 shadow-sm">
@@ -1288,7 +1294,9 @@ export function ProductionEntryContent() {
                         <button
                           type="button"
                           onClick={() => setProductionType("IN_HOUSE")}
-                          className={`py-2.5 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                          disabled={isScmOnly}
+                          title={isScmOnly ? "SCM sends material to vendors; in-house production is recorded by the stage teams." : undefined}
+                          className={`py-2.5 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                             productionType === "IN_HOUSE"
                               ? "border-indigo-600 bg-indigo-600 text-white shadow-sm ring-2 ring-indigo-500/20"
                               : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50"

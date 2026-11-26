@@ -63,6 +63,17 @@ _ROLES: List[RoleInfo] = [
         allowed_modules=["Packing", "Dispatch"],
     ),
     RoleInfo(
+        role="scm", display_name="SCM (SUPPLY CHAIN MANAGER)", department="Supply Chain",
+        permissions=[
+            "Send material to vendors (Production Entry: At vendor)",
+            "Receive material back from vendors, choosing the receive gate (Vendor Tracking)",
+            "Cancel an untouched vendor trip",
+            "Dispatch Center: packing, BSR and dispatch",
+            "View PO to dispatch to collection, invoices and payments (read-only)",
+        ],
+        allowed_modules=["Production & WIP (Work Queue, Production Entry, Vendor Tracking, WO Tracking)", "Packing & Dispatch", "Sales & Accounts (view)", "Intelligence & Reports"],
+    ),
+    RoleInfo(
         role="ceo", display_name="CEO", department="Executive",
         permissions=["Read-only management visibility", "Quality oversight (read-only)"],
         allowed_modules=["Dashboard", "Reports", "Reconciliation"],

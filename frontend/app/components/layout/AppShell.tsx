@@ -32,6 +32,8 @@ import {
   Users as UsersIcon,
   Building2,
   CalendarClock,
+  CalendarRange,
+  Inbox,
   GitMerge,
   Cog,
   Clock,
@@ -50,7 +52,7 @@ import {
   BarChart3,
   Wallet,
 } from "lucide-react";
-import { logout, getCurrentUserRole, getCurrentUserRoles, getCurrentUser } from "@/lib/api";
+import { logout, getCurrentUserRole, getCurrentUserRoles, getCurrentUser, getPlanningConfig } from "@/lib/api";
 import { resolveWorkspace } from "@/lib/workspaces";
 
 // STORE is a physical material-handling role: it must see only the navigation it is
@@ -97,6 +99,8 @@ interface NavItem {
 interface NavGroup {
   group: string;
   items: NavItem[];
+  /** Hidden unless setup planning is switched on (GET /api/v1/planning/config). */
+  requires?: "planning";
 }
 
 const NAV_GROUPS: NavGroup[] = [
@@ -183,6 +187,42 @@ const NAV_GROUPS: NavGroup[] = [
         name: "Stage 8: Dispatch Center",
         href: "/dispatch",
         icon: <Truck className="h-4 w-4 text-emerald-500" />,
+      },
+    ],
+  },
+  {
+    group: "PLANNING & SCHEDULING",
+    requires: "planning",
+    items: [
+      {
+        name: "Setups",
+        href: "/planning/setups",
+        icon: <CalendarRange className="h-4 w-4 text-orange-500" />,
+        roles: ["admin", "planner"],
+      },
+      {
+        name: "Delay Board",
+        href: "/planning/delays",
+        icon: <AlertTriangle className="h-4 w-4 text-rose-500" />,
+        roles: ["admin", "planner"],
+      },
+      {
+        name: "Calendar",
+        href: "/planning/calendar",
+        icon: <CalendarRange className="h-4 w-4 text-sky-500" />,
+        roles: ["admin", "planner"],
+      },
+      {
+        name: "Capacity",
+        href: "/planning/capacity",
+        icon: <AlertTriangle className="h-4 w-4 text-amber-500" />,
+        roles: ["admin", "planner"],
+      },
+      {
+        name: "Unassigned",
+        href: "/planning/unassigned",
+        icon: <Inbox className="h-4 w-4 text-zinc-500" />,
+        roles: ["admin", "planner"],
       },
     ],
   },
@@ -313,13 +353,13 @@ const NAV_GROUPS: NavGroup[] = [
         name: "PO → Dispatch → Collection",
         href: "/sales/po-cycle",
         icon: <BarChart3 className="h-4 w-4 text-emerald-500" />,
-        roles: ["admin", "ceo", "sales", "accounts", "planner"],
+        roles: ["admin", "ceo", "sales", "accounts", "planner", "scm"],
       },
       {
         name: "Invoices & Payments",
         href: "/accounts/payments",
         icon: <Wallet className="h-4 w-4 text-indigo-500" />,
-        roles: ["admin", "accounts"],
+        roles: ["admin", "accounts", "scm"],
       },
     ],
   },
@@ -402,6 +442,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [darkMode, setDarkMode] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [userRoles, setUserRoles] = useState<string[]>([]);
+  const [planningEnabled, setPlanningEnabled] = useState(false);
   const [currentUser, setCurrentUser] = useState<{ full_name: string; email: string } | null>(null);
   const [notificationCount, setNotificationCount] = useState(3);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -474,8 +515,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .catch(() => setCurrentUser(null));
   }, [pathname, router]);
 
+  // Setup planning: fetched once; the Planning & Scheduling menu only shows when it is switched on.
+  useEffect(() => {
+    getPlanningConfig()
+      .then((c) => setPlanningEnabled(!!c?.setup_planning_enabled))
+      .catch(() => setPlanningEnabled(false));
+  }, []);
+
   const workspace = resolveWorkspace(userRoles.length ? userRoles : [userRole]);
   const visibleNavGroups = NAV_GROUPS
+    .filter((grp) => grp.requires !== "planning" || planningEnabled)
     .map((grp) => ({
       ...grp,
       items: grp.items.filter((item) => {
@@ -552,7 +601,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
 
-        {/* Quick Action Floor Badge */}
+        {/* Quick Action Floor Badge (not for SCM, whose menu has no Move Parts) */}
+        {workspace?.key !== "SCM" && (
         <div className="p-4 border-b border-zinc-100 dark:border-zinc-800/50">
           <Link
             href="/production/move"
@@ -567,6 +617,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </span>
           </Link>
         </div>
+        )}
 
         {/* Navigation Items */}
         <div

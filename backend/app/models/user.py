@@ -43,6 +43,11 @@ class UserRole(str, enum.Enum):
     DISPATCH_SUPERVISOR = "dispatch_supervisor"
     DISPATCH_MANAGER = "dispatch_manager"
 
+    # Supply Chain Manager (SCM): sends material to vendors and receives it back (Vendor
+    # Tracking, Production Entry "At vendor"), and manages the Dispatch Center (packing,
+    # BSR, dispatch). Not a stage role: no stage lock, and no in-house production entry.
+    SCM = "scm"
+
 class User(Base):
     __tablename__ = "users"
 

@@ -120,6 +120,10 @@ def apply_stage_plan(db: Session, wo, overwrite: bool = True) -> None:
         start_date=date.today(),
         lead_days_map=load_lead_days(db),
     )
+    from datetime import datetime  # local: keep module imports unchanged
+
     for r in routes:
         if overwrite or r.planned_end is None:
             r.planned_start, r.planned_end = plan.get(r.stage, (None, None))
+            r.plan_source = "RELEASE"
+            r.plan_updated_at = datetime.now()

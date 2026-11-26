@@ -15,6 +15,17 @@ from app.services.oms_integration_service import OMSIntegrationService
 
 class VendorService:
     @staticmethod
+    def _gate_planned_end(db: Session, d: VendorDispatch) -> Optional[str]:
+        """Planned end of the gate the pieces left from (setup planning), so SCM knows when they must be
+        back. Read-only; empty when setup planning is off or the gate has no date."""
+        from app.core.config import settings
+
+        if not settings.SETUP_PLANNING_ENABLED:
+            return None
+        r = db.query(WORoute).filter(WORoute.work_order_id == d.work_order_id, WORoute.stage == d.dispatch_stage).first()
+        return r.planned_end.isoformat() if r and r.planned_end else None
+
+    @staticmethod
     def list_dispatches(
         db: Session,
         status_filter: Optional[str] = None,
@@ -75,6 +86,7 @@ class VendorService:
                 "received_at": d.received_at,
                 "inward_dc_number": d.inward_dc_number,
                 "remarks": d.remarks,
+                "gate_planned_end": VendorService._gate_planned_end(db, d),
                 "days_at_vendor": max(days_at_vendor, 0),
                 "source_state": d.source_state,
                 "origin": d.origin,
