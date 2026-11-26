@@ -510,7 +510,13 @@ class OMSIntegrationService:
             "mrb_lock_status": mrb_summary["lock_status"],
             "mrb_approved_movable_qty": mrb_summary["approved_movable_qty"],
             "mrb_pending_qty": mrb_summary["pending_qty"],
-            "pending_mrb_tickets": mrb_summary["pending_tickets"]
+            "pending_mrb_tickets": mrb_summary["pending_tickets"],
+            # display only
+            "mrb_state": __import__("app.services.mrb_service", fromlist=["display_state"]).display_state(mrb_summary),
+            "mrb_total_tickets": mrb_summary["total_tickets"],
+            "mrb_approved_tickets": mrb_summary["approved_tickets_count"],
+            "mrb_rejected_tickets": mrb_summary["rejected_tickets_count"],
+            "mrb_approved_qty": mrb_summary["total_approved_good"],
         }
 
 
