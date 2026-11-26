@@ -2723,3 +2723,129 @@ export async function saveWoSplits(woNumber: string, parts: { setup_number: stri
   const { data } = await api.put(`/api/v1/planning/work-orders/${encodeURIComponent(woNumber)}/splits`, { parts, reason });
   return data;
 }
+
+// Sales order status dashboard (Sales and Admin only; the server enforces it)
+export type SalesSource = "OAR" | "PO_LINE" | "SCHEDULE";
+export interface SalesStatusBucket {
+  key: string;
+  label: string;
+  count: number;
+  value: number;
+  qty: number;
+  by_source?: Record<SalesSource, { count: number; value: number }>;
+}
+export interface SalesStatusItem {
+  source: "OAR" | "PO_LINE" | "SCHEDULE";
+  ref: string;
+  customer: string;
+  po: string;
+  part: string;
+  pending_qty: number;
+  unit_price: number | null;
+  value: number;
+  has_price: boolean;
+  date: string | null;
+  bucket: string;
+}
+export interface SalesOrderStatus {
+  as_of: string;
+  buckets: SalesStatusBucket[];
+  total: { count: number; value: number; qty: number };
+  by_source: Record<"OAR" | "PO_LINE" | "SCHEDULE", { count: number; value: number }>;
+  top_customers: { customer: string; count: number; value: number }[];
+  overdue: { count: number; value: number };
+  no_price_count: number;
+  items: SalesStatusItem[];
+}
+
+export async function getSalesOrderStatus(sources?: string[]): Promise<SalesOrderStatus> {
+  const { data } = await api.get("/api/v1/sales/order-status", { params: sources && sources.length ? { sources: sources.join(",") } : {} });
+  return data;
+}
+
+// Downloads a server-generated spreadsheet. Throws an Error carrying the real server message
+// (and HTTP status) when the server answers with an error, so the page can show it.
+async function downloadReportFile(path: string, params: Record<string, string>, fallbackName: string): Promise<void> {
+  const blobText = async (b: any): Promise<string> => {
+    try {
+      return b && typeof b.text === "function" ? await b.text() : "";
+    } catch {
+      return "";
+    }
+  };
+  const serverMessage = (raw: string): string => {
+    try {
+      const j = JSON.parse(raw);
+      if (typeof j?.detail === "string") return j.detail;
+      if (Array.isArray(j?.detail)) return j.detail.map((d: any) => d?.msg || JSON.stringify(d)).join(", ");
+    } catch {
+      /* not JSON */
+    }
+    return raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+  };
+  let res: any;
+  try {
+    res = await api.get(path, { params, responseType: "blob" });
+  } catch (e: any) {
+    const status = e?.response?.status;
+    const msg = serverMessage(await blobText(e?.response?.data)) || e?.message || "Network error";
+    throw new Error(status ? `Download failed (HTTP ${status}): ${msg}` : `Download failed: ${msg}`);
+  }
+  const type = String(res.headers?.["content-type"] || res.data?.type || "").toLowerCase();
+  if (type.includes("json") || type.includes("html") || type.startsWith("text/")) {
+    throw new Error(`Download failed (HTTP ${res.status}): ${serverMessage(await blobText(res.data)) || "the server did not return a spreadsheet"}`);
+  }
+  const cd: string = res.headers?.["content-disposition"] || "";
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  const url = window.URL.createObjectURL(res.data as Blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = m ? m[1] : fallbackName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => window.URL.revokeObjectURL(url), 15000);
+}
+
+export async function downloadSalesOrderStatusExcel(sources?: string[]): Promise<void> {
+  await downloadReportFile(
+    "/api/v1/sales/order-status.xlsx",
+    sources && sources.length ? { sources: sources.join(",") } : {},
+    "sales-order-status.xlsx",
+  );
+}
+
+// Customer schedule status dashboard (Sales and Admin only)
+export interface ScheduleStatusItem {
+  schedule: string;
+  customer: string;
+  customer_ref: string;
+  part: string;
+  qty: number;
+  unit_price: number | null;
+  value: number;
+  has_price: boolean;
+  status: "scheduled" | "awaiting_po" | "po_received" | "matched" | "cancelled" | string;
+  date: string | null;
+  bucket: string;
+}
+export interface ScheduleStatus {
+  as_of: string;
+  buckets: { key: string; label: string; count: number; value: number; qty: number }[];
+  total: { count: number; value: number; qty: number };
+  overdue: { count: number; value: number };
+  awaiting_po: { count: number; value: number };
+  status_split: { status: string; label: string; count: number; value: number }[];
+  top_customers: { customer: string; count: number; value: number }[];
+  no_price_count: number;
+  items: ScheduleStatusItem[];
+}
+
+export async function getScheduleStatus(): Promise<ScheduleStatus> {
+  const { data } = await api.get("/api/v1/sales/schedule-status");
+  return data;
+}
+
+export async function downloadScheduleStatusExcel(): Promise<void> {
+  await downloadReportFile("/api/v1/sales/schedule-status.xlsx", {}, "schedule-status.xlsx");
+}
