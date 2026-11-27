@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![VSPL SMES Production Workflow](docs/assets/workflow-animation.svg)
+![VSPL SMES Production Workflow](docs/assets/workflow-animation.gif)
 
 <br/>
 
