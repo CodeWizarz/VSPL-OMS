@@ -51,12 +51,15 @@ class BSRStockService:
 
     @staticmethod
     def list_all_stock(db: Session) -> List[dict]:
-        parts = db.query(Part).all()
+        # Query only the distinct parts that actually have active stock or allocations in BSRStock
+        active_part_ids = db.query(BSRStock.part_id).filter(
+            (BSRStock.available_qty > 0) | (BSRStock.allocated_qty > 0)
+        ).distinct().all()
+
         results = []
-        for p in parts:
-            stock = BSRStockService.get_stock_for_part(db, str(p.id))
-            if stock["total_available"] > 0 or stock["total_allocated"] > 0:
-                results.append(stock)
+        for (part_id,) in active_part_ids:
+            if part_id:
+                results.append(BSRStockService.get_stock_for_part(db, str(part_id)))
         return results
 
     @staticmethod

@@ -21,6 +21,7 @@ export default function PackingPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
+  const [successToast, setSuccessToast] = useState<string>("");
 
   // Pack Action Modal
   const [selectedWO, setSelectedWO] = useState<PackingQueueItem | null>(null);
@@ -79,7 +80,7 @@ export default function PackingPage() {
     setModalError("");
 
     try {
-      await updatePacking({
+      const res = await updatePacking({
         wo_number: selectedWO.wo_number,
         packed_quantity: qty,
         box_count: boxCount,
@@ -87,8 +88,13 @@ export default function PackingPage() {
         remarks: remarks,
       });
 
+      const packedWo = selectedWO.wo_number;
       setSelectedWO(null);
+      setSuccessToast(
+        `Successfully packed ${qty} pcs for ${packedWo}! Transferred to Stage 7: BSR (Bonded Storage Room) — Ready for Dispatch.`
+      );
       loadQueue();
+      setTimeout(() => setSuccessToast(""), 7000);
     } catch (err: any) {
       setModalError(err?.response?.data?.detail || "Packing update failed.");
     } finally {
@@ -154,6 +160,24 @@ export default function PackingPage() {
             </button>
           </div>
         </div>
+
+        {/* Success Banner */}
+        {successToast && (
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-emerald-900 dark:text-emerald-100 font-bold shadow-sm animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+              <span>{successToast}</span>
+            </div>
+            <Link
+              href="/bsr"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-bold text-[11px] shadow-xs transition shrink-0"
+            >
+              <Boxes className="h-3.5 w-3.5" />
+              <span>View in BSR Store</span>
+              <ArrowRight className="h-3 w-3" />
+            </Link>
+          </div>
+        )}
 
         {/* Search */}
         <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 shadow-sm">

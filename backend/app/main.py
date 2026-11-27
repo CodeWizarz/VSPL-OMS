@@ -34,6 +34,8 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         seed_database_if_empty(db)
+        from app.services.user_admin_service import UserAdminService
+        UserAdminService.purge_inactive_users(db)
     finally:
         db.close()
     yield

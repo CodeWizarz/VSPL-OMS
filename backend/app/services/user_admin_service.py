@@ -219,10 +219,33 @@ class UserAdminService:
                 )
 
         if UserAdminService._user_has_references(db, target.id):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This user has historical records and cannot be permanently deleted. Deactivate the user instead.",
-            )
+            if not target.is_active:
+                # If the user is inactive, safely detach references so permanent deletion succeeds
+                from sqlalchemy import text
+                tid = str(target.id)
+                db.execute(text(f"UPDATE audit_logs SET user_id = NULL WHERE user_id = '{tid}';"))
+                db.execute(text(f"UPDATE customer_part_cross_references SET created_by_id = NULL WHERE created_by_id = '{tid}';"))
+                db.execute(text(f"UPDATE dispatches SET created_by = NULL WHERE created_by = '{tid}';"))
+                db.execute(text(f"UPDATE machines SET created_by_id = NULL WHERE created_by_id = '{tid}';"))
+                db.execute(text(f"UPDATE operators SET user_id = NULL WHERE user_id = '{tid}';"))
+                db.execute(text(f"UPDATE operators SET created_by_id = NULL WHERE created_by_id = '{tid}';"))
+                db.execute(text(f"UPDATE packing_transactions SET created_by = NULL WHERE created_by = '{tid}';"))
+                db.execute(text(f"UPDATE po_master SET created_by_id = NULL WHERE created_by_id = '{tid}';"))
+                db.execute(text(f"UPDATE schedule_master SET created_by_id = NULL WHERE created_by_id = '{tid}';"))
+                db.execute(text(f"UPDATE shifts SET created_by_id = NULL WHERE created_by_id = '{tid}';"))
+                db.execute(text(f"UPDATE vendor_dispatches SET created_by = NULL WHERE created_by = '{tid}';"))
+                db.execute(text(f"UPDATE rejection_dispositions SET authorized_by_id = NULL WHERE authorized_by_id = '{tid}';"))
+                db.execute(text(f"UPDATE rejection_dispositions SET melting_sent_by_id = NULL WHERE melting_sent_by_id = '{tid}';"))
+                db.execute(text(f"UPDATE production_movements SET created_by = NULL WHERE created_by = '{tid}';"))
+                db.execute(text(f"UPDATE production_movements SET operator_id = NULL WHERE operator_id = '{tid}';"))
+                db.execute(text(f"UPDATE conversion_part_mappings SET created_by_id = NULL WHERE created_by_id = '{tid}';"))
+                db.execute(text(f"UPDATE conversion_part_mappings SET updated_by_id = NULL WHERE updated_by_id = '{tid}';"))
+                db.flush()
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This user has historical records and cannot be permanently deleted while active. Deactivate the user first.",
+                )
 
         target_id_str = str(target.id)
         target_email = target.email
@@ -238,6 +261,40 @@ class UserAdminService:
             user_id=target_id_str,
             email=target_email,
         )
+
+    @staticmethod
+    def purge_inactive_users(db: Session) -> int:
+        """Permanently purges all accounts marked inactive (is_active=False).
+        Cleanly detaches foreign key references in historical records by setting
+        them to NULL first, ensuring complete referential integrity."""
+        from sqlalchemy import text
+        try:
+            # 1. Detach all foreign key references for inactive accounts
+            db.execute(text("UPDATE audit_logs SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE customer_part_cross_references SET created_by_id = NULL WHERE created_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE dispatches SET created_by = NULL WHERE created_by IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE machines SET created_by_id = NULL WHERE created_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE operators SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE operators SET created_by_id = NULL WHERE created_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE packing_transactions SET created_by = NULL WHERE created_by IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE po_master SET created_by_id = NULL WHERE created_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE schedule_master SET created_by_id = NULL WHERE created_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE shifts SET created_by_id = NULL WHERE created_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE vendor_dispatches SET created_by = NULL WHERE created_by IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE rejection_dispositions SET authorized_by_id = NULL WHERE authorized_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE rejection_dispositions SET melting_sent_by_id = NULL WHERE melting_sent_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE production_movements SET created_by = NULL WHERE created_by IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE production_movements SET operator_id = NULL WHERE operator_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE conversion_part_mappings SET created_by_id = NULL WHERE created_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+            db.execute(text("UPDATE conversion_part_mappings SET updated_by_id = NULL WHERE updated_by_id IN (SELECT id FROM users WHERE is_active = FALSE);"))
+
+            # 2. Delete all inactive accounts
+            deleted_count = db.query(User).filter(User.is_active == False).delete(synchronize_session=False)
+            db.commit()
+            return deleted_count
+        except Exception:
+            db.rollback()
+            return 0
 
     @staticmethod
     def change_own_password(db: Session, current_user: User, req: ChangePasswordRequest) -> Token:
