@@ -55,8 +55,21 @@ export default function ScheduleStatusPage() {
     }
   };
 
-  const items = useMemo(() => (data ? (bucket ? data.items.filter((i) => i.bucket === bucket) : data.items) : []), [data, bucket]);
-  const bucketLabel = data?.buckets.find((b) => b.key === bucket)?.label;
+  const items = useMemo(() => {
+    if (!data) return [];
+    if (!bucket) return data.items;
+    if (bucket === "__overdue") return data.items.filter((i) => !!i.date && i.date < data.as_of);
+    if (bucket === "__awaiting") return data.items.filter((i) => i.status === "awaiting_po");
+    if (bucket === "__noprice") return data.items.filter((i) => !i.has_price);
+    return data.items.filter((i) => i.bucket === bucket);
+  }, [data, bucket]);
+  const bucketLabel =
+    bucket === "__overdue" ? "Overdue schedules" : bucket === "__awaiting" ? "Awaiting PO" : bucket === "__noprice" ? "Schedules without price"
+      : data?.buckets.find((b) => b.key === bucket)?.label;
+  const openView = (key: string | null) => {
+    setBucket(key);
+    setTimeout(() => document.getElementById("open-list")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+  };
   const chartRows = useMemo(() => (data?.buckets || []).map((b) => ({ key: b.key, label: b.label.replace(" Delivery", ""), value: b.value })), [data]);
   const statusTotal = useMemo(() => (data?.status_split || []).reduce((a, s) => a + s.count, 0), [data]);
 
@@ -101,10 +114,10 @@ export default function ScheduleStatusPage() {
         ) : (
           <>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <Kpi tone="hero" label="Open schedule value" money={data.total.value} sub={`${data.total.count.toLocaleString("en-IN")} open schedules`} foot={`${data.total.qty.toLocaleString("en-IN")} pcs scheduled`} />
-              <Kpi tone="amber" label="Awaiting PO" money={data.awaiting_po.value} sub={`${data.awaiting_po.count.toLocaleString("en-IN")} schedules without a PO`} />
-              <Kpi tone="red" label="Overdue" money={data.overdue.value} sub={`${data.overdue.count.toLocaleString("en-IN")} schedules past required date`} />
-              <Kpi tone="neutral" label="Schedules without price" count={data.no_price_count} sub={data.no_price_count ? "counted as ₹0 value" : "every schedule is priced"} />
+              <Kpi tone="hero" label="Open schedule value" onClick={() => openView(null)} active={!bucket} money={data.total.value} sub={`${data.total.count.toLocaleString("en-IN")} open schedules`} foot={`${data.total.qty.toLocaleString("en-IN")} pcs scheduled`} />
+              <Kpi tone="amber" label="Awaiting PO" onClick={() => openView("__awaiting")} active={bucket === "__awaiting"} money={data.awaiting_po.value} sub={`${data.awaiting_po.count.toLocaleString("en-IN")} schedules without a PO`} />
+              <Kpi tone="red" label="Overdue" onClick={() => openView("__overdue")} active={bucket === "__overdue"} money={data.overdue.value} sub={`${data.overdue.count.toLocaleString("en-IN")} schedules past required date`} />
+              <Kpi tone="neutral" label="Schedules without price" onClick={() => openView("__noprice")} active={bucket === "__noprice"} count={data.no_price_count} sub={data.no_price_count ? "counted as ₹0 value" : "every schedule is priced"} />
             </div>
 
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
@@ -139,6 +152,7 @@ export default function ScheduleStatusPage() {
               </Card>
             </div>
 
+            <div id="open-list" className="scroll-mt-4" />
             <DataTable
               title="Open schedules"
               rows={items}

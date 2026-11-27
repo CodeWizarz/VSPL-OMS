@@ -144,11 +144,21 @@ const TONES: Record<Tone, { bar: string; value: string; card: string }> = {
 };
 
 /** One KPI. `money` shows compact form big and the full amount under it, so nothing ever wraps. */
-export function Kpi(props: { label: string; tone?: Tone; money?: number; count?: number; sub?: string; foot?: string }) {
+export function Kpi(props: { label: string; tone?: Tone; money?: number; count?: number; sub?: string; foot?: string; onClick?: () => void; active?: boolean }) {
   const t = TONES[props.tone || "neutral"];
   const big = props.money !== undefined ? inrCompact(props.money) : inrPlain(props.count || 0);
+  const clickable = !!props.onClick;
   return (
-    <div className={`print-card relative overflow-hidden rounded-2xl border p-4 shadow-sm ${t.card}`}>
+    <div
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onClick={props.onClick}
+      onKeyDown={clickable ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onClick!(); } } : undefined}
+      title={clickable ? "Click to see these in the list below" : undefined}
+      className={`print-card relative overflow-hidden rounded-2xl border p-4 shadow-sm ${t.card} ${
+        clickable ? "cursor-pointer transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-500/50" : ""
+      } ${props.active ? "ring-2 ring-blue-500" : ""}`}
+    >
       <span className={`absolute inset-y-0 left-0 w-1 ${t.bar}`} />
       <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{props.label}</p>
       <p className={`mt-1 whitespace-nowrap font-extrabold tabular-nums leading-tight ${t.value} ${props.tone === "hero" ? "text-3xl" : "text-2xl"}`}>{big}</p>
@@ -157,6 +167,7 @@ export function Kpi(props: { label: string; tone?: Tone; money?: number; count?:
       )}
       {props.sub && <p className="mt-1 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300">{props.sub}</p>}
       {props.foot && <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{props.foot}</p>}
+      {clickable && <p className="no-print mt-1 text-[10px] font-bold uppercase tracking-wide text-blue-600 dark:text-blue-400">{props.active ? "Showing below ↓" : "View orders ↓"}</p>}
     </div>
   );
 }
