@@ -151,10 +151,20 @@ export function EditWorkOrderModal({ wo, onClose, onSuccess }: EditWorkOrderModa
                 min={1}
                 value={qty}
                 onChange={(e) => setQty(e.target.value === "" ? "" : Number(e.target.value))}
-                disabled={isFloorActive}
+                disabled={isFloorActive && !allowOverrun}
                 required
                 className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3.5 py-2 text-xs font-mono font-bold text-zinc-900 dark:text-zinc-50 focus:border-blue-500 focus:outline-none disabled:opacity-60"
               />
+              {isFloorActive && !allowOverrun && (
+                <span className="text-[10px] text-amber-500 mt-1 block">
+                  Locked: Check "Allow Overrun" below to adjust quantity.
+                </span>
+              )}
+              {isFloorActive && allowOverrun && (
+                <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold mt-1 block">
+                  Unlocked: Overrun mode active. Enter expanded quantity.
+                </span>
+              )}
             </div>
 
             {/* WO Date */}

@@ -727,24 +727,16 @@ class ProductionService:
                 )
             )
 
-        # Gate completion: if this gate has completed processing and material moved downstream
-        if wip.ent_qty > 0 and wip.inproc_qty == 0 and (wip.ok_qty + wip.rejected_qty) > 0:
+        is_f1 = matched_stage.upper() == "F1"
+        is_vendor = (req.production_type or "").upper() == "VENDOR"
+
+        # Gate completion: if this gate has completed processing and material moved downstream.
+        # F1 is exempt because casting / foundry can pour excess moulds / additional pieces.
+        if not is_f1 and wip.ent_qty > 0 and wip.inproc_qty == 0 and (wip.ok_qty + wip.rejected_qty) > 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Gate '{matched_stage}' has completed and passed for Work Order '{req.wo_number}'. All {wip.ok_qty + wip.rejected_qty} pieces have been produced and moved downstream."
             )
-
-        # Authoritative production ceiling: a fresh production entry can only convert
-        # material that is still physically unprocessed at this stage (inproc_qty =
-        # ent_qty - ok_qty - rejected_qty), never `available_wip`. available_wip also
-        # includes onhand_qty -- completed-but-not-yet-moved stock -- which exists
-        # precisely because earlier production already consumed that capacity; letting
-        # a new entry validate against it double-counts already-completed pieces and
-        # allows cumulative OK to run past ent_qty (and past the OMS target derived
-        # from it) with no ceiling. This is the same ent/ok/rej accounting the OMS
-        # Engine already uses to compute inproc_qty -- not a new formula.
-        is_f1 = matched_stage.upper() == "F1"
-        is_vendor = (req.production_type or "").upper() == "VENDOR"
 
         if total_proc > wip.inproc_qty:
             if is_f1:
@@ -754,14 +746,21 @@ class ProductionService:
                         detail="Remarks / Reason is mandatory when recording F1 Excess Production (e.g., Extra mould poured, Heat balance batch)."
                     )
                 # F1 Excess Production: Expand physical WO quantity, F1 ent_qty, and all downstream route targets
-                excess_qty = total_proc - wip.inproc_qty
+                excess_qty = total_proc - (wip.inproc_qty or 0)
                 orig_target = wo.physical_wo_qty or 0
                 wo.physical_wo_qty = orig_target + excess_qty
                 wo.excess_qty = (getattr(wo, "excess_qty", 0) or 0) + excess_qty
                 wip.ent_qty = (wip.ent_qty or 0) + excess_qty
-                wip.inproc_qty = total_proc - (wip.ok_qty + wip.rejected_qty)
+                wip.inproc_qty = (wip.inproc_qty or 0) + excess_qty
                 for r in routes:
                     r.stage_target_qty = wo.physical_wo_qty
+
+                # If this work order had shortfall recorded, reduce or clear it with excess pieces
+                if getattr(wo, "shortfall", None) == "YES":
+                    wo.shortfall_qty = max(0, (wo.shortfall_qty or 0) - excess_qty)
+                    if wo.shortfall_qty == 0:
+                        wo.shortfall = "No"
+                        wo.shortfall_reason = None
 
                 db.add(AuditLog(
                     user_id=current_user.id if current_user else None,

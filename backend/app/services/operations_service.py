@@ -1378,10 +1378,15 @@ class OperationsService:
 
         # 2. Update Quantity
         if getattr(req, "physical_wo_qty", None) is not None and req.physical_wo_qty != wo.physical_wo_qty:
-            if has_started_production:
+            if has_started_production and not getattr(req, "allow_overrun", False):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Cannot change quantity on '{wo.wo_number}' because floor production activity has already started.",
+                    detail=f"Cannot change quantity on '{wo.wo_number}' because floor production activity has already started. Enable 'Allow Overrun' to adjust quantity.",
+                )
+            if has_started_production and req.physical_wo_qty < wo.physical_wo_qty:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot reduce planned quantity on active Work Order '{wo.wo_number}'. Quantity can only be expanded via Overrun.",
                 )
             # Check parent OAR available quantity
             order = wo.order
@@ -1395,9 +1400,18 @@ class OperationsService:
                         f"({max(available_for_wo, 0)}) on OAR '{order.oar_number}'."
                     ),
                 )
+            old_qty = wo.physical_wo_qty
             changes.append(f"physical_wo_qty: {wo.physical_wo_qty} -> {req.physical_wo_qty}")
             wo.physical_wo_qty = req.physical_wo_qty
             wo.projected_final_good = req.physical_wo_qty
+
+            # If shortfall was recorded and quantity was increased, adjust shortfall
+            if getattr(wo, "shortfall", None) == "YES" and req.physical_wo_qty > old_qty:
+                diff = req.physical_wo_qty - old_qty
+                wo.shortfall_qty = max(0, (wo.shortfall_qty or 0) - diff)
+                if wo.shortfall_qty == 0:
+                    wo.shortfall = "No"
+                    wo.shortfall_reason = None
 
             # Update route targets
             routes = db.query(WORoute).filter(WORoute.work_order_id == wo.id).order_by(WORoute.sequence).all()
@@ -1406,7 +1420,7 @@ class OperationsService:
                 targets = calculate_stage_targets(req.physical_wo_qty, route=stg_names)
                 for r in routes:
                     r.stage_target_qty = targets.get(r.stage, req.physical_wo_qty)
-                    if r.sequence == 1:
+                    if not has_started_production and r.sequence == 1:
                         r.cumulative_ent_qty = req.physical_wo_qty
                         r.cumulative_inproc_qty = req.physical_wo_qty
 
@@ -1417,10 +1431,23 @@ class OperationsService:
                     StageWIP.stage == first_stg
                 ).first()
                 if first_wip:
-                    first_wip.ent_qty = req.physical_wo_qty
-                    first_wip.inproc_qty = req.physical_wo_qty
-                    first_wip.received_qty = req.physical_wo_qty
-                    first_wip.available_wip = req.physical_wo_qty
+                    if has_started_production:
+                        diff = req.physical_wo_qty - old_qty
+                        first_wip.ent_qty = (first_wip.ent_qty or 0) + diff
+                        first_wip.received_qty = (first_wip.received_qty or 0) + diff
+                        first_wip.inproc_qty = max(0, (first_wip.ent_qty or 0) - (first_wip.ok_qty or 0) - (first_wip.rejected_qty or 0))
+                    else:
+                        first_wip.ent_qty = req.physical_wo_qty
+                        first_wip.inproc_qty = req.physical_wo_qty
+                        first_wip.received_qty = req.physical_wo_qty
+                        first_wip.available_wip = req.physical_wo_qty
+
+                # Recompute deterministic state
+                try:
+                    from app.services.oms_integration_service import OMSIntegrationService
+                    OMSIntegrationService.recompute_work_order(db, wo)
+                except Exception:
+                    pass
 
         # 3. Update Route Stages
         if getattr(req, "route_stages", None) is not None and len(req.route_stages) > 0:
