@@ -64,8 +64,20 @@ export default function SalesOrderStatusPage() {
     }
   };
 
-  const items = useMemo(() => (data ? (bucket ? data.items.filter((i) => i.bucket === bucket) : data.items) : []), [data, bucket]);
-  const bucketLabel = data?.buckets.find((b) => b.key === bucket)?.label;
+  // bucket is a month key from the chart/table, or one of the special views opened from the cards
+  const items = useMemo(() => {
+    if (!data) return [];
+    if (!bucket) return data.items;
+    if (bucket === "__overdue") return data.items.filter((i) => !!i.date && i.date < data.as_of);
+    if (bucket === "__noprice") return data.items.filter((i) => !i.has_price);
+    return data.items.filter((i) => i.bucket === bucket);
+  }, [data, bucket]);
+  const bucketLabel =
+    bucket === "__overdue" ? "Overdue orders" : bucket === "__noprice" ? "Orders without price" : data?.buckets.find((b) => b.key === bucket)?.label;
+  const openView = (key: string | null) => {
+    setBucket(key);
+    setTimeout(() => document.getElementById("open-list")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+  };
   const activeSeries = SOURCES.filter((s) => sources.includes(s.key));
   const chartRows = useMemo(
     () =>
@@ -117,10 +129,10 @@ export default function SalesOrderStatusPage() {
         ) : (
           <>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <Kpi tone="hero" label="Total pending value" money={data.total.value} sub={`${data.total.count.toLocaleString("en-IN")} open orders`} foot={`${data.total.qty.toLocaleString("en-IN")} pcs to deliver`} />
-              <Kpi tone="red" label="Overdue" money={data.overdue.value} sub={`${data.overdue.count.toLocaleString("en-IN")} orders past delivery date`} />
-              <Kpi tone="blue" label={data.buckets[0]?.label || "Due this month"} money={data.buckets[0]?.value || 0} sub={`${(data.buckets[0]?.count || 0).toLocaleString("en-IN")} orders (overdue included)`} />
-              <Kpi tone="amber" label="Orders without price" count={data.no_price_count} sub={data.no_price_count ? "counted as ₹0 value" : "every order is priced"} />
+              <Kpi tone="hero" label="Total pending value" onClick={() => openView(null)} active={!bucket} money={data.total.value} sub={`${data.total.count.toLocaleString("en-IN")} open orders`} foot={`${data.total.qty.toLocaleString("en-IN")} pcs to deliver`} />
+              <Kpi tone="red" label="Overdue" onClick={() => openView("__overdue")} active={bucket === "__overdue"} money={data.overdue.value} sub={`${data.overdue.count.toLocaleString("en-IN")} orders past delivery date`} />
+              <Kpi tone="blue" label={data.buckets[0]?.label || "Due this month"} onClick={() => openView(data.buckets[0]?.key || null)} active={!!bucket && bucket === data.buckets[0]?.key} money={data.buckets[0]?.value || 0} sub={`${(data.buckets[0]?.count || 0).toLocaleString("en-IN")} orders (overdue included)`} />
+              <Kpi tone="amber" label="Orders without price" onClick={() => openView("__noprice")} active={bucket === "__noprice"} count={data.no_price_count} sub={data.no_price_count ? "counted as ₹0 value" : "every order is priced"} />
             </div>
 
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
@@ -155,6 +167,7 @@ export default function SalesOrderStatusPage() {
               </Card>
             </div>
 
+            <div id="open-list" className="scroll-mt-4" />
             <DataTable
               title="Open orders"
               rows={items}
