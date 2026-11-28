@@ -1012,6 +1012,18 @@ export async function updatePOMaster(poId: string, payload: POMasterUpdatePayloa
   return data;
 }
 
+/** Changes one PO line's unit price and nothing else (Sales dashboards' Edit price). */
+export async function updatePOLinePrice(poId: string, lineId: string, unitPrice: number): Promise<POMasterOut> {
+  const { data } = await api.put(`/api/v1/masters/pos/${encodeURIComponent(poId)}/lines/${encodeURIComponent(lineId)}/price`, { unit_price: unitPrice });
+  return data;
+}
+
+/** Prices an order that has no PO line or schedule by recording its PO line in PO Master. */
+export async function setOrderPrice(orderId: string, unitPrice: number): Promise<POMasterOut> {
+  const { data } = await api.put(`/api/v1/masters/orders/${encodeURIComponent(orderId)}/price`, { unit_price: unitPrice });
+  return data;
+}
+
 export async function deletePOMaster(poId: string): Promise<{ message: string }> {
   const { data } = await api.delete(`/api/v1/masters/pos/${encodeURIComponent(poId)}`);
   return data;
@@ -2699,8 +2711,15 @@ export interface SalesStatusBucket {
   qty: number;
   by_source?: Record<SalesSource, { count: number; value: number }>;
 }
+/** What a price edit on a dashboard row changes (set by the server). */
+export type PriceTarget =
+  | { type: "PO_LINE"; po_id: string; line_id: string }
+  | { type: "SCHEDULE"; id: string }
+  | { type: "ORDER"; order_id: string };     // an order with no PO line or schedule: its PO line gets recorded
+
 export interface SalesStatusItem {
   source: "OAR" | "PO_LINE" | "SCHEDULE";
+  price_target?: PriceTarget | null;
   ref: string;
   customer: string;
   po: string;
@@ -2782,6 +2801,7 @@ export async function downloadSalesOrderStatusExcel(sources?: string[]): Promise
 
 // Customer schedule status dashboard (Sales and Admin only)
 export interface ScheduleStatusItem {
+  price_target?: PriceTarget | null;
   schedule: string;
   customer: string;
   customer_ref: string;
